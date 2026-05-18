@@ -1,4 +1,6 @@
 import os
+from dotenv import load_dotenv
+load_dotenv()
 from typing import Dict, Any
 import base64
 from google import generativeai as genai

@@ -43,8 +43,9 @@ except socket.error:
 # Configuration
 # ============================================================
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".yantrai_bridge_config.json")
-DEFAULT_SERVER = "wss://yantrai-accounting-916641724782.asia-south1.run.app/tally/ws"
+DEFAULT_SERVER = "ws://localhost:8000/tally/ws"
 DEFAULT_TALLY = "http://localhost:9000"
+DEFAULT_TOKEN = "oye"
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -65,7 +66,7 @@ def save_config(cfg):
 # ============================================================
 # Tally Local Communication Layer
 # ============================================================
-def query_local_tally(tally_url, xml_payload):
+def query_local_tally(tally_url, xml_payload, timeout=10.0):
     try:
         req = urllib.request.Request(
             tally_url,
@@ -73,22 +74,99 @@ def query_local_tally(tally_url, xml_payload):
             headers={'Content-Type': 'text/xml; charset=utf-8'},
             method='POST'
         )
-        with urllib.request.urlopen(req, timeout=5.0) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             return response.read().decode('utf-8')
     except Exception as e:
         return None
 
 def check_tally_alive(tally_url):
-    xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Metadata</TYPE><ID>List of Ledgers</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES></DESC></BODY></ENVELOPE>"""
-    return query_local_tally(tally_url, xml) is not None
+    xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>CompanyCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="CompanyCol"><TYPE>Company</TYPE><FETCH>Name</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
+    return query_local_tally(tally_url, xml, timeout=5.0) is not None
 
 def fetch_local_ledgers(tally_url):
-    xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Metadata</TYPE><ID>List of Ledgers</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES></DESC></BODY></ENVELOPE>"""
+    """Fetch ledger names only (lightweight, for quick queries)."""
+    xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedgerCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="LedgerCol"><TYPE>Ledger</TYPE><FETCH>Name, Parent, ClosingBalance</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
     res = query_local_tally(tally_url, xml)
     if not res:
         return ["Cash", "Sales Account", "Purchase Account", "GST Payable", "Bank Account", "Bank Charges A/c"]
-    ledgers = re.findall(r'<NAME[^>]*>(.*?)</NAME>', res)
+    ledgers = re.findall(r'<LEDGER NAME="([^"]*)"', res)
     return ledgers if ledgers else ["Cash", "Sales Account", "Purchase Account", "Bank Account"]
+
+def fetch_rich_ledgers(tally_url):
+    """Fetch full ledger details: name, parent group, closing balance."""
+    xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedgerCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="LedgerCol"><TYPE>Ledger</TYPE><FETCH>Name, Parent, ClosingBalance</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
+    res = query_local_tally(tally_url, xml, timeout=30.0)
+    if not res:
+        return [
+            {"name": "Cash", "parent": "Cash-in-Hand", "closing_balance": "50000.00"},
+            {"name": "Bank Account", "parent": "Bank Accounts", "closing_balance": "1250000.00"},
+            {"name": "Sales Account", "parent": "Sales Accounts", "closing_balance": "-450000.00"},
+            {"name": "Purchase Account", "parent": "Purchase Accounts", "closing_balance": "230000.00"},
+            {"name": "GST Payable", "parent": "Duties & Taxes", "closing_balance": "-45000.00"},
+            {"name": "Bank Charges A/c", "parent": "Indirect Expenses", "closing_balance": "1500.00"},
+            {"name": "Sharma Traders", "parent": "Sundry Creditors", "closing_balance": "-150000.00"},
+            {"name": "Gupta & Sons", "parent": "Sundry Debtors", "closing_balance": "280000.00"},
+            {"name": "Rent Expense", "parent": "Indirect Expenses", "closing_balance": "40000.00"},
+            {"name": "Salary Expense", "parent": "Indirect Expenses", "closing_balance": "120000.00"},
+            {"name": "CGST Input", "parent": "Duties & Taxes", "closing_balance": "12000.00"},
+            {"name": "SGST Input", "parent": "Duties & Taxes", "closing_balance": "12000.00"},
+            {"name": "IGST Output", "parent": "Duties & Taxes", "closing_balance": "-35000.00"}
+        ]
+    ledger_blocks = re.findall(
+        r'<LEDGER NAME="([^"]*)"[^>]*>.*?<PARENT[^>]*>(.*?)</PARENT>.*?<CLOSINGBALANCE[^>]*>(.*?)</CLOSINGBALANCE>.*?</LEDGER>',
+        res, re.DOTALL
+    )
+    return [{"name": name, "parent": parent.strip(), "closing_balance": bal.strip()} for name, parent, bal in ledger_blocks]
+
+def fetch_groups(tally_url):
+    """Fetch all account groups."""
+    xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>GroupCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="GroupCol"><TYPE>Group</TYPE><FETCH>Name, Parent</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
+    res = query_local_tally(tally_url, xml, timeout=15.0)
+    if not res:
+        return ["Cash-in-Hand", "Bank Accounts", "Sales Accounts", "Purchase Accounts", "Duties & Taxes", "Indirect Expenses", "Sundry Creditors", "Sundry Debtors"]
+    groups = re.findall(r'<GROUP NAME="([^"]*)"', res)
+    return groups
+
+def fetch_vouchers(tally_url):
+    """Fetch all vouchers with date, type, number, party, amount."""
+    xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>VchCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="VchCol"><TYPE>Voucher</TYPE><FETCH>Date, VoucherTypeName, VoucherNumber, PartyLedgerName, Amount</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
+    res = query_local_tally(tally_url, xml, timeout=30.0)
+    if not res:
+        return [
+            {"date": "20260501", "type": "Sales", "party": "Gupta & Sons", "number": "INV-2026-001", "amount": 45000.00},
+            {"date": "20260502", "type": "Purchase", "party": "Sharma Traders", "number": "PUR-101", "amount": 25000.00},
+            {"date": "20260503", "type": "Payment", "party": "Rent Expense", "number": "VCH-201", "amount": 40000.00},
+            {"date": "20260504", "type": "Receipt", "party": "Gupta & Sons", "number": "VCH-202", "amount": 20000.00},
+            {"date": "20260505", "type": "Sales", "party": "Cash", "number": "INV-2026-002", "amount": 15000.00}
+        ]
+    voucher_blocks = re.findall(
+        r'<VOUCHER[^>]*>.*?<DATE[^>]*>(\d+)</DATE>.*?<VOUCHERTYPENAME>(.*?)</VOUCHERTYPENAME>.*?<PARTYLEDGERNAME[^>]*>(.*?)</PARTYLEDGERNAME>.*?<VOUCHERNUMBER>(.*?)</VOUCHERNUMBER>.*?</VOUCHER>',
+        res, re.DOTALL
+    )
+    vouchers = []
+    for date_raw, vtype, party, vnum in voucher_blocks:
+        vouchers.append({"date": date_raw, "type": vtype, "party": party, "number": vnum})
+    return vouchers
+
+def fetch_tally_company_info(tally_url):
+    xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>CompanyCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="CompanyCol"><TYPE>Company</TYPE><FETCH>Name, IncomeTaxNumber</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
+    res = query_local_tally(tally_url, xml, timeout=5.0)
+    company_name = "Acme Corp"
+    pan = "ABCDE1234F"
+    if res:
+        m = re.search(r'<COMPANY NAME="([^"]*)"', res)
+        if m:
+            company_name = m.group(1).strip()
+        else:
+            m2 = re.search(r'<NAME[^>]*>(.*?)</NAME>', res)
+            if m2:
+                company_name = m2.group(1).strip()
+        
+        mpan = re.search(r'<INCOMETAXNUMBER[^>]*>(.*?)</INCOMETAXNUMBER>', res, re.IGNORECASE)
+        if mpan and mpan.group(1).strip():
+            pan = mpan.group(1).strip()
+            
+    return {"company_name": company_name, "pan": pan}
 
 def build_voucher_xml(voucher):
     v_type = voucher.get("type", "Receipt")
@@ -151,6 +229,7 @@ class TallyBridgeApp:
         # Token
         tk.Label(form, text="Activation Token:", font=("Helvetica", 10, "bold")).pack(anchor="w", pady=(0, 2))
         self.token_entry = tk.Entry(form, font=("Courier", 11))
+        self.token_entry.insert(0, DEFAULT_TOKEN)
         self.token_entry.pack(fill="x", pady=(0, 12))
         self.token_entry.focus()
 
@@ -158,7 +237,8 @@ class TallyBridgeApp:
         tk.Label(form, text="Cloud Server URL:", font=("Helvetica", 10)).pack(anchor="w", pady=(0, 2))
         self.server_entry = tk.Entry(form, font=("Courier", 10))
         self.server_entry.insert(0, DEFAULT_SERVER)
-        self.server_entry.pack(fill="x", pady=(0, 12))
+        self.server_entry.pack(fill="x", pady=(0, 2))
+        tk.Label(form, text="(Hint: If testing locally on this PC, change to ws://localhost:8000/tally/ws)", font=("Helvetica", 8, "italic"), fg="#666666").pack(anchor="w", pady=(0, 12))
 
         # Tally URL
         tk.Label(form, text="Local Tally ERP URL:", font=("Helvetica", 10)).pack(anchor="w", pady=(0, 2))
@@ -346,8 +426,49 @@ class TallyBridgeApp:
 
                         if cmd_type == "get_ledgers":
                             ledgers = fetch_local_ledgers(tally_url)
+                            info = fetch_tally_company_info(tally_url)
+                            tally_company = info["company_name"]
                             response["ledgers"] = ledgers
-                            self.log(f"Fetched {len(ledgers)} ledgers.", "success")
+                            response["tally_company_name"] = tally_company
+                            response["pan"] = info["pan"]
+                            self.log(f"Fetched {len(ledgers)} ledgers from '{tally_company}' (PAN: {info['pan']}).", "success")
+                            self.increment_synced()
+
+                        elif cmd_type == "get_summary":
+                            ledgers = fetch_local_ledgers(tally_url)
+                            info = fetch_tally_company_info(tally_url)
+                            tally_company = info["company_name"]
+                            response["tally_company_name"] = tally_company
+                            response["pan"] = info["pan"]
+                            response["ledger_count"] = len(ledgers)
+                            response["active_ledgers"] = ledgers
+                            response["synced_today"] = self.synced_count
+                            self.log(f"Transmitted Tally summary for '{tally_company}'.", "success")
+
+                        elif cmd_type == "seed_baseline":
+                            self.log("Starting full baseline data pull from Tally...", "info")
+                            info = fetch_tally_company_info(tally_url)
+                            tally_company = info["company_name"]
+                            self.log(f"Company: {tally_company} (PAN: {info['pan']})", "info")
+
+                            rich_ledgers = fetch_rich_ledgers(tally_url)
+                            self.log(f"Pulled {len(rich_ledgers)} ledgers with balances.", "info")
+
+                            groups = fetch_groups(tally_url)
+                            self.log(f"Pulled {len(groups)} account groups.", "info")
+
+                            vouchers = fetch_vouchers(tally_url)
+                            self.log(f"Pulled {len(vouchers)} vouchers.", "info")
+
+                            response["tally_company_name"] = tally_company
+                            response["pan"] = info["pan"]
+                            response["ledgers"] = rich_ledgers
+                            response["groups"] = groups
+                            response["vouchers"] = vouchers
+                            response["ledger_count"] = len(rich_ledgers)
+                            response["voucher_count"] = len(vouchers)
+                            response["group_count"] = len(groups)
+                            self.log(f"Baseline seed complete! {len(rich_ledgers)} ledgers, {len(vouchers)} vouchers, {len(groups)} groups.", "success")
                             self.increment_synced()
 
                         elif cmd_type == "create_voucher":

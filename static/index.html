@@ -51,6 +51,11 @@
                         
                         if (navWhatsapp) navWhatsapp.style.display = isSuperAdmin ? 'flex' : 'none';
                         if (drawerWhatsapp) drawerWhatsapp.style.display = isSuperAdmin ? 'flex' : 'none';
+
+                        const tokenInput = document.getElementById('activation-token-input');
+                        if(tokenInput) {
+                            tokenInput.value = user.company_name || 'Acme Corp';
+                        }
                     } catch (e) {
                         console.error("Error parsing user session: ", e);
                     }
@@ -100,6 +105,11 @@
                 user.company_name = newCompany;
                 localStorage.setItem('currentUser', JSON.stringify(user));
                 
+                const tokenInput = document.getElementById('activation-token-input');
+                if(tokenInput) {
+                    tokenInput.value = user.company_name || 'Acme Corp';
+                }
+
                 // Clear active session explicitly
                 if (typeof currentSessionId !== 'undefined') currentSessionId = null;
                 window.location.hash = 'chat';
@@ -110,12 +120,19 @@
                 if (typeof fetchHistory === 'function') fetchHistory();
                 if (typeof loadTasks === 'function') loadTasks();
                 if (typeof loadPartyMaster === 'function') loadPartyMaster();
+                if (typeof fetchTallySummary === 'function') fetchTallySummary();
             }
         }
 
         function handleLogout() {
             localStorage.removeItem('currentUser');
             window.location.href = '/login';
+        }
+
+        function copyActivationToken() {
+            const val = document.getElementById('activation-token-input').value;
+            navigator.clipboard.writeText(val);
+            alert('Secure Activation Token copied: ' + val);
         }
     </script>
 </head>
@@ -537,22 +554,62 @@
                             <div style="border-top: 1px solid var(--border); padding-top: 14px;">
                                 <label style="display: block; color: #94a3b8; font-size: 0.75rem; font-weight: bold; text-transform: uppercase; margin-bottom: 6px; text-align: left;">Secure Activation Token</label>
                                 <div style="display: flex; gap: 8px;">
-                                    <input type="text" readonly value="yantr_tok_acme_99b28a4c1102" style="flex: 1; background: rgba(30, 41, 59, 0.6); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; color: #38bdf8; font-family: monospace; font-size: 0.85rem; outline: none;">
-                                    <button class="btn" onclick="navigator.clipboard.writeText('yantr_tok_acme_99b28a4c1102'); alert('Activation Token copied!');" style="background: rgba(56, 189, 248, 0.15); color: var(--accent); padding: 8px 12px; border-radius: 6px; border: none; font-weight: bold; cursor: pointer;">Copy</button>
+                                    <input type="text" id="activation-token-input" readonly value="Acme Corp" style="flex: 1; background: rgba(30, 41, 59, 0.6); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; color: #38bdf8; font-family: monospace; font-size: 0.85rem; outline: none;">
+                                    <button class="btn" onclick="copyActivationToken()" style="background: rgba(56, 189, 248, 0.15); color: var(--accent); padding: 8px 12px; border-radius: 6px; border: none; font-weight: bold; cursor: pointer;">Copy</button>
                                 </div>
                             </div>
                             
-                            <!-- Download Script Link -->
-                            <div style="display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--border); padding-top: 14px; font-size: 0.85rem;">
-                                <span style="color: #94a3b8;">Need the Mac/Windows sync agent?</span>
-                                <a href="/tally_bridge_agent/download" download style="color: #38bdf8; text-decoration: none; font-weight: bold; display: flex; align-items: center; gap: 4px;">
-                                    <i class="fas fa-download"></i> Download Agent
-                                </a>
+                            <!-- Download Script Link & TDL Plugin -->
+                            <div style="display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--border); padding-top: 14px; font-size: 0.85rem;">
+                                <div style="display: flex; align-items: center; justify-content: space-between;">
+                                    <span style="color: #94a3b8;">Need the Mac/Windows sync agent?</span>
+                                    <a href="/tally_bridge_agent/download" download style="color: #38bdf8; text-decoration: none; font-weight: bold; display: flex; align-items: center; gap: 4px;">
+                                        <i class="fas fa-download"></i> Download Agent
+                                    </a>
+                                </div>
+                                <div style="display: flex; align-items: center; justify-content: space-between;">
+                                    <span style="color: #94a3b8;">🚀 Native TDL TCP Sync Plugin (Recommended)</span>
+                                    <a href="/tally/download-tdl" download style="background: rgba(16, 185, 129, 0.15); color: #10b981; padding: 6px 12px; border-radius: 6px; text-decoration: none; font-weight: bold; display: flex; align-items: center; gap: 6px;">
+                                        <i class="fas fa-plug"></i> Download TDL Plugin
+                                    </a>
+                                </div>
                             </div>
 
-                            <button class="btn" onclick="triggerTallyIngestion()" style="width: 100%; background: #10b981; color: white; border: none; font-weight: bold; border-radius: 8px; padding: 12px; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 8px;">
-                                <i class="fas fa-sync-alt"></i> Ingest All Tally Data ⚡
-                            </button>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 8px;">
+                                <button class="btn" onclick="triggerTallyIngestion()" style="background: #10b981; color: white; border: none; font-weight: bold; border-radius: 8px; padding: 12px; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px;">
+                                    <i class="fas fa-sync-alt"></i> Live Ingest ⚡
+                                </button>
+                                <button class="btn" onclick="document.getElementById('tally-xml-upload').click()" style="background: #38bdf8; color: #0f172a; border: none; font-weight: bold; border-radius: 8px; padding: 12px; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px;">
+                                    <i class="fas fa-file-code"></i> Upload XML Dump 📁
+                                </button>
+                                <input type="file" id="tally-xml-upload" hidden accept=".xml" onchange="handleTallyXmlDumpUpload(this)">
+                            </div>
+
+                            <!-- Tally ERP Live Summary -->
+                            <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-top: 8px;">
+                                <h4 style="margin: 0 0 12px 0; color: white; display: flex; align-items: center; justify-content: space-between; font-size: 0.95rem;">
+                                    <span>📊 Tally ERP Live Summary</span>
+                                    <button class="btn" onclick="fetchTallySummary()" style="background: rgba(56, 189, 248, 0.15); color: #38bdf8; padding: 4px 10px; border-radius: 6px; border: none; font-size: 0.75rem; font-weight: bold; cursor: pointer;">Refresh 🔄</button>
+                                </h4>
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 0.85rem;">
+                                    <div style="background: rgba(15, 23, 42, 0.6); padding: 10px; border-radius: 8px; border: 1px solid var(--border);">
+                                        <div style="color: #94a3b8; font-size: 0.75rem;">ACTIVE COMPANY</div>
+                                        <div id="tally-summary-company" style="color: #38bdf8; font-weight: bold; font-family: monospace; margin-top: 4px;">Checking...</div>
+                                    </div>
+                                    <div style="background: rgba(15, 23, 42, 0.6); padding: 10px; border-radius: 8px; border: 1px solid var(--border);">
+                                        <div style="color: #94a3b8; font-size: 0.75rem;">LEDGERS SCRAPED</div>
+                                        <div id="tally-summary-ledgers" style="color: #4ade80; font-weight: bold; margin-top: 4px;">0</div>
+                                    </div>
+                                    <div style="background: rgba(15, 23, 42, 0.6); padding: 10px; border-radius: 8px; border: 1px solid var(--border);">
+                                        <div style="color: #94a3b8; font-size: 0.75rem;">VOUCHERS PUSHED</div>
+                                        <div id="tally-summary-pushed" style="color: #f59e0b; font-weight: bold; margin-top: 4px;">0</div>
+                                    </div>
+                                    <div style="background: rgba(15, 23, 42, 0.6); padding: 10px; border-radius: 8px; border: 1px solid var(--border);">
+                                        <div style="color: #94a3b8; font-size: 0.75rem;">TUNNEL STATUS</div>
+                                        <div id="tally-summary-tunnel" style="color: #10b981; font-weight: bold; margin-top: 4px;">Active 🟢</div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -852,7 +909,9 @@
             }
             
             if (view === 'schema') {
+                fetchTallySummary();
                 loadPartyMaster();
+                loadItemMaster();
             }
             
             // Desktop sidebar highlight
@@ -876,7 +935,7 @@
             
             if (view === 'history') fetchHistory();
             if (view === 'chat') loadChatSessions();
-            if (view === 'training') fetchTrainingStats();
+            if (view === 'training') { fetchTrainingStats(); fetchTallySummary(); }
             if (view === 'tasks') loadTasks();
         }
 
@@ -1964,8 +2023,11 @@
                 // Send feedback for any corrections made in the chat table
                 if (corrections.length > 0) {
                     appendAIMessage({ text: `Learning from ${corrections.length} correction(s) made to the table...`, ui_type: 'text' });
+                    const currentUser = JSON.parse(localStorage.getItem('currentUser'));
+                    const companyName = currentUser ? currentUser.company_name : 'Acme Corp';
                     for (const c of corrections) {
                         c.party_name = partyName; // Attach actual party name to correction embedding!
+                        c.company_name = companyName; // Attach active company for ring-fencing!
                         await fetch(`${API}/feedback`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
@@ -2226,6 +2288,8 @@
             if (!lastExtractedData) return;
             const fields = ['party_name', 'invoice_number', 'total_amount'];
             const corrections = [];
+            const currentUser = JSON.parse(localStorage.getItem('currentUser'));
+            const companyName = currentUser ? currentUser.company_name : 'Acme Corp';
             
             fields.forEach(f => {
                 const current = document.getElementById(f).value;
@@ -2235,7 +2299,8 @@
                         field: f,
                         original: original,
                         corrected: current,
-                        party_name: document.getElementById('party_name').value
+                        party_name: document.getElementById('party_name').value,
+                        company_name: companyName
                     });
                 }
             });
@@ -2688,6 +2753,7 @@
         }
 
         async function startModelOptimization() {
+            const currentUser = JSON.parse(localStorage.getItem('currentUser'));
             const consoleEl = document.getElementById('optimizer-console');
             consoleEl.innerHTML = '';
             logToOptimizerConsole(`[OPTIMIZATION START] Initializing AI vector cluster weights...`);
@@ -2726,40 +2792,112 @@
         // ==========================================
         // Direct Tally Syncer Client Integration
         // ==========================================
-        async function triggerTallyIngestion() {
+        async function handleTallyXmlDumpUpload(input) {
+            const file = input.files[0];
+            if (!file) return;
             const consoleEl = document.getElementById('optimizer-console');
             consoleEl.innerHTML = '';
-            logToOptimizerConsole(`[TALLY CONNECT] Establishing connection to local Tally ERP instance...`);
+            logToOptimizerConsole(`[XML DUMP UPLOAD] Uploading Tally XML Backup Dump '${file.name}'...`);
             
-            const ticks = [
-                "Connecting to Tally ERP Host at http://localhost:9000...",
-                "Successfully connected! Scraped Tally Chart of Accounts...",
-                "Found active ledgers: [Cash, Sales, Purchase, GST Input, Bank Charges A/c].",
-                "Ingesting historical narration logs from Tally database...",
-                "Parsing legacy mappings dump (Narration -> Ledger)...",
-                "Seeding PGVector Supabase database mappings..."
-            ];
-
-            for (let i = 0; i < ticks.length; i++) {
-                await new Promise(resolve => setTimeout(resolve, 600));
-                logToOptimizerConsole(`[PROCESS] ${ticks[i]}`);
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            try {
+                const response = await fetch('/tally/upload-xml', {
+                    method: 'POST',
+                    body: formData
+                });
+                const result = await response.json();
+                if (result.status === 'success') {
+                    fetchTrainingStats();
+                    logToOptimizerConsole(`[SUCCESS] Tally XML Dump parsed successfully! Extracted ${result.ledgers.length} ledgers and seeded ${result.learned_count} AI mapping rules.`);
+                    alert(`XML Dump Ingested Successfully!\nExtracted ${result.ledgers.length} ledgers and seeded ${result.learned_count} AI mapping rules.`);
+                } else {
+                    throw new Error(result.message || 'Upload failed');
+                }
+            } catch (err) {
+                logToOptimizerConsole(`[ERROR] XML Dump Upload failed: ${err.message}`);
+                alert(`Upload Failed: ${err.message}`);
             }
+            input.value = '';
+        }
+
+        let _tallyIngesting = false;
+        async function triggerTallyIngestion() {
+            if (_tallyIngesting) return;
+            _tallyIngesting = true;
+            const btn = document.querySelector('[onclick="triggerTallyIngestion()"]');
+            if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
+
+            const currentUser = JSON.parse(localStorage.getItem('currentUser'));
+            const consoleEl = document.getElementById('optimizer-console');
+            consoleEl.innerHTML = '';
+            logToOptimizerConsole(`[TALLY CONNECT] Establishing connection to local Tally Bridge Agent...`);
+            logToOptimizerConsole(`[PROCESS] Dispatching seed_baseline command via WebSocket tunnel...`);
+            logToOptimizerConsole(`[PROCESS] Pulling all ledgers, groups, and vouchers from TallyPrime (port 9000)...`);
 
             try {
                 const response = await fetch('/tally/ingest', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ company_name: currentUser ? currentUser.company_name : 'Acme Corp' })
+                    body: JSON.stringify({
+                        company_name: currentUser ? currentUser.company_name : 'Acme Corp',
+                        username: currentUser ? currentUser.username : 'admin'
+                    })
                 });
                 const result = await response.json();
                 if (result.status === 'success') {
                     fetchTrainingStats();
-                    logToOptimizerConsole(`[SUCCESS] Direct Tally Ingestion completed successfully! Learned ${result.learned_count} new ledger mappings from Tally logs.`);
+                    fetchTallySummary();
+                    if (result.tally_company) {
+                        logToOptimizerConsole(`[SUCCESS] Connected to Tally company: "${result.tally_company}"`);
+                    }
+                    if (result.ledger_count) {
+                        logToOptimizerConsole(`[DATA] Pulled ${result.ledger_count} ledgers, ${result.voucher_count || 0} vouchers, ${result.group_count || 0} account groups`);
+                    }
+                    logToOptimizerConsole(`[SUCCESS] ${result.message}`);
+                    logToOptimizerConsole(`[AI TRAINING] Learned ${result.learned_count} new ledger-group mappings from Tally Chart of Accounts!`);
+                    
+                    if (result.name_mismatch && result.tally_company) {
+                        const mismatchMsg = `⚠️ Tally Company Name Mismatch!\nYou are currently logged in under company '${result.ui_company}', but the Tally data ingested is for '${result.tally_company}'.\n\nWould you like to automatically update your active company name to '${result.tally_company}' to match Tally?`;
+                        if (confirm(mismatchMsg)) {
+                            try {
+                                const updateRes = await fetch('/user/update_company_name', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        username: currentUser ? currentUser.username : 'admin',
+                                        new_company_name: result.tally_company,
+                                        pan: result.pan
+                                    })
+                                });
+                                const updateData = await updateRes.json();
+                                if (updateData.status === 'success') {
+                                    if (currentUser) {
+                                        currentUser.company_name = result.tally_company;
+                                        if (!currentUser.companies) currentUser.companies = [];
+                                        if (!currentUser.companies.includes(result.tally_company)) {
+                                            currentUser.companies.push(result.tally_company);
+                                        }
+                                        localStorage.setItem('currentUser', JSON.stringify(currentUser));
+                                    }
+                                    alert(`Success! Active company updated to '${result.tally_company}'.`);
+                                    location.reload();
+                                }
+                            } catch (uErr) {
+                                alert(`Failed to update company name: ${uErr.message}`);
+                            }
+                        }
+                    }
                 } else {
                     throw new Error(result.message || 'Ingestion failed');
                 }
             } catch (err) {
                 logToOptimizerConsole(`[ERROR] Direct Tally Sync failed: ${err.message}`);
+                logToOptimizerConsole(`[HINT] Make sure the Tally Bridge Agent is running and connected!`);
+            } finally {
+                _tallyIngesting = false;
+                if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
             }
         }
 
@@ -2798,6 +2936,7 @@
         }
 
         async function fetchTrainingStats() {
+            const currentUser = JSON.parse(localStorage.getItem('currentUser'));
             try {
                 const response = await fetch('/training/optimize', {
                     method: 'POST',
@@ -2810,6 +2949,41 @@
                 }
             } catch (err) {
                 console.error("Error fetching training stats: ", err);
+            }
+        }
+
+        async function fetchTallySummary() {
+            const currentUser = JSON.parse(localStorage.getItem('currentUser'));
+            try {
+                const response = await fetch('/tally/summary', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ company_name: currentUser ? currentUser.company_name : 'Acme Corp' })
+                });
+                const result = await response.json();
+                if (result.status === 'success') {
+                    document.getElementById('tally-summary-company').innerText = result.summary.tally_company_name;
+                    document.getElementById('tally-summary-ledgers').innerText = result.summary.ledger_count;
+                    document.getElementById('tally-summary-pushed').innerText = result.summary.synced_today;
+
+                    const kbContainer = document.getElementById('kb-ledgers');
+                    if (kbContainer && result.summary.active_ledgers) {
+                        let ledgersList = result.summary.active_ledgers;
+                        if (ledgersList.length === 0) {
+                            kbContainer.innerHTML = '<div style="color: #64748b; padding: 20px; text-align: center;">No ledgers synchronized yet. Click Live Ingest above to pull from Tally ERP.</div>';
+                        } else {
+                            let tagsHtml = '<div style="display: flex; flex-wrap: wrap; gap: 8px;">';
+                            ledgersList.forEach(l => {
+                                const name = typeof l === 'string' ? l : (l.name || 'Unnamed Ledger');
+                                tagsHtml += `<span style="background: rgba(56, 189, 248, 0.1); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.2); padding: 6px 12px; border-radius: 6px; font-size: 0.85rem; font-weight: 500; display: inline-flex; align-items: center; gap: 6px;"><i class="fas fa-tag" style="font-size: 0.75rem;"></i> ${escapeHtml(name)}</span>`;
+                            });
+                            tagsHtml += '</div>';
+                            kbContainer.innerHTML = tagsHtml;
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error("Error fetching tally summary: ", err);
             }
         }
 
@@ -2834,6 +3008,7 @@
                     btn.style.color = 'var(--accent)';
                 }
                 document.getElementById('schema-subview-coa').style.display = 'block';
+                fetchTallySummary();
             } else if (subview === 'parties') {
                 const btn = document.getElementById('schema-tab-parties');
                 if (btn) {

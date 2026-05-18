@@ -173,6 +173,7 @@ def init_db():
     # Run Column Alters to update existing database states
     try:
         cursor.execute("ALTER TABLE accounting_users ADD COLUMN IF NOT EXISTS company_name TEXT;")
+        cursor.execute("ALTER TABLE accounting_users ADD COLUMN IF NOT EXISTS pan TEXT;")
     except:
         pass
         
@@ -289,7 +290,55 @@ def add_company_to_user(username: str, new_company_name: str):
     finally:
         cursor.close()
         conn.close()
-    
+
+def update_user_active_company(username: str, new_company_name: str, pan: str = None):
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT companies FROM accounting_users WHERE username = %s", (username,))
+        row = cursor.fetchone()
+        if row:
+            companies = row[0] if row[0] else []
+            if isinstance(companies, str):
+                import json
+                companies = json.loads(companies)
+            if new_company_name not in companies:
+                companies.append(new_company_name)
+            import json
+            cursor.execute("""
+                UPDATE accounting_users 
+                SET companies = %s, company_name = %s, pan = COALESCE(%s, pan)
+                WHERE username = %s
+            """, (json.dumps(companies), new_company_name, pan, username))
+            conn.commit()
+            return True
+        return False
+    except Exception as e:
+        print(f"Error updating user active company: {e}")
+        return False
+    finally:
+        cursor.close()
+        conn.close()
+
+def create_user(username: str, password: str, role: str = "admin", name: str = None, email: str = None, phone: str = None, company_name: str = "Acme Corp"):
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        import json
+        companies_json = json.dumps([company_name])
+        cursor.execute("""
+            INSERT INTO accounting_users (username, password, role, name, email, phone, company_name, companies)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (username, password, role, name or username, email or f"{username}@yantrai.com", phone or "+919999999999", company_name, companies_json))
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error creating user: {e}")
+        return False
+    finally:
+        cursor.close()
+        conn.close()
+
 # ---- Chat Functions ----
 
 def create_chat_session(title="New Chat", company_name=None):
@@ -439,14 +488,15 @@ def get_history(company_name=None):
     conn.close()
     return rows
 
-def save_correction(field, original, corrected, party_name=None, embedding=None):
+def save_correction(field, original, corrected, party_name=None, embedding=None, company_name="Acme Corp"):
     conn = get_conn()
     cursor = conn.cursor()
     data = {
         "field": field,
         "original": original,
         "corrected": corrected,
-        "party_name": party_name
+        "party_name": party_name,
+        "company_name": company_name
     }
     
     if embedding:
@@ -463,16 +513,16 @@ def save_correction(field, original, corrected, party_name=None, embedding=None)
     cursor.close()
     conn.close()
 
-def get_corrections():
+def get_corrections(company_name="Acme Corp"):
     conn = get_conn()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("SELECT data FROM knowledge_base WHERE type = %s", ('correction',))
+    cursor.execute("SELECT data FROM knowledge_base WHERE type = %s AND data->>'company_name' = %s", ('correction', company_name))
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
     return [r['data'] for r in rows]
 
-def get_relevant_corrections(query_embedding, limit=5):
+def get_relevant_corrections(query_embedding, company_name="Acme Corp", limit=5):
     if not query_embedding:
         return []
     conn = get_conn()
@@ -481,15 +531,135 @@ def get_relevant_corrections(query_embedding, limit=5):
     
     cursor.execute("""
     SELECT data FROM knowledge_base 
-    WHERE type = 'correction' AND embedding IS NOT NULL
+    WHERE type = 'correction' AND embedding IS NOT NULL AND data->>'company_name' = %s
     ORDER BY embedding <=> %s::vector 
     LIMIT %s
-    """, (embedding_str, limit))
+    """, (company_name, embedding_str, limit))
     
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
     return [r['data'] for r in rows]
+
+def save_tally_vouchers(company_name, vouchers):
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM tally_vouchers WHERE company_name = %s", (company_name,))
+        for v in vouchers:
+            v_id = str(uuid.uuid4())
+            date_raw = str(v.get("date", ""))
+            if len(date_raw) == 8 and date_raw.isdigit():
+                v_date = f"{date_raw[:4]}-{date_raw[4:6]}-{date_raw[6:]}"
+            else:
+                v_date = "2026-05-01"
+            v_num = str(v.get("number", ""))
+            party = str(v.get("party", ""))
+            v_type = str(v.get("type", ""))
+            amount = float(v.get("amount", 0.0))
+            cursor.execute("""
+            INSERT INTO tally_vouchers (id, date, voucher_number, ledger_name, amount, voucher_type, company_name, reconciled)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE)
+            """, (v_id, v_date, v_num, party, amount, v_type, company_name))
+        conn.commit()
+    except Exception as e:
+        print(f"Error saving tally vouchers: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+def get_all_tally_vouchers(company_name):
+    conn = get_conn()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute("SELECT * FROM tally_vouchers WHERE company_name = %s ORDER BY date ASC", (company_name,))
+        rows = cursor.fetchall()
+        return rows
+    except Exception as e:
+        print(f"Error fetching all tally vouchers: {e}")
+        return []
+    finally:
+        cursor.close()
+        conn.close()
+
+def get_accounting_summary(company_name=None, user_msg=""):
+    conn = get_conn()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        msg_lower = str(user_msg).lower()
+        target_company = company_name or "Acme Corp"
+        
+        cursor.execute("SELECT DISTINCT company_name FROM tally_vouchers UNION SELECT DISTINCT company_name FROM parties UNION SELECT DISTINCT company_name FROM invoices")
+        known_companies = [r['company_name'] for r in cursor.fetchall() if r['company_name']]
+        
+        for kc in known_companies:
+            if kc.lower() in msg_lower:
+                target_company = kc
+                break
+        if "indulge" in msg_lower and not any("indulge" in kc.lower() for kc in known_companies):
+            target_company = "Indulge"
+        elif "indulge" in msg_lower:
+            for kc in known_companies:
+                if "indulge" in kc.lower():
+                    target_company = kc
+                    break
+            
+        param_like = f"%{target_company}%"
+        
+        cursor.execute("""
+            SELECT data->>'original' as name, data->>'corrected' as grp 
+            FROM knowledge_base 
+            WHERE type='correction' AND data->>'field'='ledger_group_mapping'
+            AND (data->>'company_name' ILIKE %s OR %s ILIKE ('%%' || (data->>'company_name') || '%%') OR data->>'company_name' IS NULL)
+        """, (param_like, target_company))
+        ledgers = cursor.fetchall()
+        ledger_sample = [f"{l['name']} ({l['grp']})" for l in ledgers[:30]]
+        
+        cursor.execute("""
+            SELECT date, voucher_number, ledger_name, voucher_type, amount 
+            FROM tally_vouchers 
+            WHERE company_name ILIKE %s OR %s ILIKE ('%%' || company_name || '%%') 
+            ORDER BY date DESC
+        """, (param_like, target_company))
+        vouchers = cursor.fetchall()
+        voucher_sample = vouchers[:30]
+        
+        cursor.execute("""
+            SELECT name 
+            FROM parties 
+            WHERE company_name ILIKE %s OR %s ILIKE ('%%' || company_name || '%%') 
+            ORDER BY name ASC
+        """, (param_like, target_company))
+        parties = cursor.fetchall()
+        party_sample = [p['name'] for p in parties[:30]]
+        
+        cursor.execute("""
+            SELECT * 
+            FROM invoices 
+            WHERE company_name ILIKE %s OR %s ILIKE ('%%' || company_name || '%%') 
+            ORDER BY created_at DESC LIMIT 20
+        """, (param_like, target_company))
+        recent_invoices = cursor.fetchall()
+        
+        summary = {
+            "target_company": target_company,
+            "active_ui_company": company_name,
+            "tally_ledgers_ingested_count": len(ledgers),
+            "tally_ledgers_sample": ledger_sample,
+            "tally_vouchers_ingested_count": len(vouchers),
+            "tally_vouchers_sample": voucher_sample,
+            "party_master_count": len(parties),
+            "party_master_sample": party_sample,
+            "recent_uploaded_invoices_count": len(recent_invoices),
+            "recent_uploaded_invoices": recent_invoices
+        }
+        return f"Accounting Data Summary for company '{target_company}' (Active UI Company: '{company_name}'):\n" + json.dumps(summary, default=str)
+    except Exception as e:
+        print(f"Error getting accounting summary: {e}")
+        return f"Accounting Data Summary for company '{company_name}': No recent data available."
+    finally:
+        cursor.close()
+        conn.close()
 
 def get_unreconciled_tally_vouchers(company_name):
     conn = get_conn()

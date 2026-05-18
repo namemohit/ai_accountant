@@ -8,30 +8,108 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
-<body style="display: flex; align-items: center; justify-content: center; height: 100vh;">
-    <div class="card" style="width: 400px; padding: 40px; text-align: center;">
-        <h1 style="background: linear-gradient(to right, #da7756, #e8a87c); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 32px; font-weight: 800;">YantrAI Login</h1>
-        <div class="form-group" style="text-align: left;">
-            <label>Username</label>
-            <input type="text" id="username" placeholder="sadmin or admin">
+<body style="display: flex; align-items: center; justify-content: center; height: 100vh; background: var(--bg-main);">
+    <div class="card" style="width: 420px; padding: 40px; text-align: center; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); border: 1px solid var(--border);">
+        <h1 style="background: linear-gradient(to right, #da7756, #e8a87c); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 24px; font-weight: 800;">YantrAI Cloud</h1>
+        
+        <!-- Tabs -->
+        <div style="display: flex; gap: 12px; margin-bottom: 28px; border-bottom: 1px solid var(--border); padding-bottom: 4px;">
+            <button id="tab-login" onclick="switchTab('login')" style="flex: 1; background: none; border: none; color: var(--accent); font-weight: 700; font-size: 1rem; padding: 8px 12px; border-bottom: 2px solid var(--accent); cursor: pointer;">Sign In</button>
+            <button id="tab-register" onclick="switchTab('register')" style="flex: 1; background: none; border: none; color: #94a3b8; font-weight: 600; font-size: 1rem; padding: 8px 12px; cursor: pointer;">Register Tenant</button>
         </div>
-        <div class="form-group" style="text-align: left;">
-            <label>Password</label>
-            <input type="password" id="password" placeholder="••••••••">
+
+        <!-- Login Form -->
+        <div id="form-login">
+            <div class="form-group" style="text-align: left;">
+                <label>Username</label>
+                <input type="text" id="username" placeholder="e.g. rohit or admin">
+            </div>
+            <div class="form-group" style="text-align: left;">
+                <label>Password</label>
+                <input type="password" id="password" placeholder="••••••••">
+            </div>
+            <button class="btn confirm-btn" onclick="handleLogin()" id="login-btn" style="width: 100%; margin-top: 12px; padding: 12px; font-weight: bold; font-size: 1rem;">Sign In</button>
         </div>
-        <button class="btn" onclick="handleLogin()" id="login-btn">Sign In</button>
+
+        <!-- Register Form -->
+        <div id="form-register" style="display: none;">
+            <div class="form-group" style="text-align: left;">
+                <label>New Username *</label>
+                <input type="text" id="reg-username" placeholder="e.g. rohit">
+            </div>
+            <div class="form-group" style="text-align: left;">
+                <label>Password *</label>
+                <input type="password" id="reg-password" placeholder="••••••••">
+            </div>
+            <div class="form-group" style="text-align: left;">
+                <label>Company / Tenant Name *</label>
+                <input type="text" id="reg-company" placeholder="e.g. Rohit Enterprises">
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                <div class="form-group" style="text-align: left;">
+                    <label>Full Name</label>
+                    <input type="text" id="reg-name" placeholder="Rohit Sharma">
+                </div>
+                <div class="form-group" style="text-align: left;">
+                    <label>Phone</label>
+                    <input type="text" id="reg-phone" placeholder="+91 9876543210">
+                </div>
+            </div>
+            <div class="form-group" style="text-align: left;">
+                <label>Email Address</label>
+                <input type="email" id="reg-email" placeholder="rohit@enterprises.com">
+            </div>
+            <button class="btn confirm-btn" onclick="handleRegister()" id="register-btn" style="width: 100%; margin-top: 12px; padding: 12px; font-weight: bold; font-size: 1rem; background: #10b981;">Create Tenant Account</button>
+        </div>
+
         <p id="error-msg" style="color: #f87171; margin-top: 20px; font-size: 0.875rem; display: none;"></p>
+        <p id="success-msg" style="color: #4ade80; margin-top: 20px; font-size: 0.875rem; display: none;"></p>
     </div>
 
     <script>
+        function switchTab(tab) {
+            const errorEl = document.getElementById('error-msg');
+            const successEl = document.getElementById('success-msg');
+            errorEl.style.display = 'none';
+            successEl.style.display = 'none';
+
+            if (tab === 'login') {
+                document.getElementById('form-login').style.display = 'block';
+                document.getElementById('form-register').style.display = 'none';
+                document.getElementById('tab-login').style.color = 'var(--accent)';
+                document.getElementById('tab-login').style.borderBottom = '2px solid var(--accent)';
+                document.getElementById('tab-login').style.fontWeight = '700';
+                document.getElementById('tab-register').style.color = '#94a3b8';
+                document.getElementById('tab-register').style.borderBottom = 'none';
+                document.getElementById('tab-register').style.fontWeight = '600';
+            } else {
+                document.getElementById('form-login').style.display = 'none';
+                document.getElementById('form-register').style.display = 'block';
+                document.getElementById('tab-register').style.color = '#10b981';
+                document.getElementById('tab-register').style.borderBottom = '2px solid #10b981';
+                document.getElementById('tab-register').style.fontWeight = '700';
+                document.getElementById('tab-login').style.color = '#94a3b8';
+                document.getElementById('tab-login').style.borderBottom = 'none';
+                document.getElementById('tab-login').style.fontWeight = '600';
+            }
+        }
+
         async function handleLogin() {
-            const username = document.getElementById('username').value;
+            const username = document.getElementById('username').value.trim();
             const password = document.getElementById('password').value;
             const btn = document.getElementById('login-btn');
             const errorEl = document.getElementById('error-msg');
+            const successEl = document.getElementById('success-msg');
+
+            if (!username || !password) {
+                errorEl.innerText = 'Please enter username and password';
+                errorEl.style.display = 'block';
+                return;
+            }
 
             btn.innerText = 'Authenticating...';
             errorEl.style.display = 'none';
+            successEl.style.display = 'none';
 
             try {
                 const res = await fetch('/api/login', {
@@ -52,6 +130,56 @@
                 errorEl.innerText = error.message;
                 errorEl.style.display = 'block';
                 btn.innerText = 'Sign In';
+            }
+        }
+
+        async function handleRegister() {
+            const username = document.getElementById('reg-username').value.trim();
+            const password = document.getElementById('reg-password').value;
+            const company_name = document.getElementById('reg-company').value.trim();
+            const name = document.getElementById('reg-name').value.trim();
+            const phone = document.getElementById('reg-phone').value.trim();
+            const email = document.getElementById('reg-email').value.trim();
+            
+            const btn = document.getElementById('register-btn');
+            const errorEl = document.getElementById('error-msg');
+            const successEl = document.getElementById('success-msg');
+
+            if (!username || !password || !company_name) {
+                errorEl.innerText = 'Username, password, and company name are required.';
+                errorEl.style.display = 'block';
+                return;
+            }
+
+            btn.innerText = 'Creating Tenant...';
+            errorEl.style.display = 'none';
+            successEl.style.display = 'none';
+
+            try {
+                const res = await fetch('/api/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password, company_name, name, phone, email })
+                });
+
+                if (!res.ok) {
+                    const errObj = await res.json();
+                    throw new Error(errObj.detail || 'Registration failed');
+                }
+
+                const data = await res.json();
+                localStorage.setItem('currentUser', JSON.stringify(data.user));
+                
+                successEl.innerText = 'Tenant account created successfully! Redirecting to dashboard...';
+                successEl.style.display = 'block';
+                
+                setTimeout(() => {
+                    window.location.href = '/';
+                }, 1500);
+            } catch (error) {
+                errorEl.innerText = error.message;
+                errorEl.style.display = 'block';
+                btn.innerText = 'Create Tenant Account';
             }
         }
     </script>

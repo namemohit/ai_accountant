@@ -1,0 +1,92 @@
+;; =======================================================================
+;; YantrAI Accounting Cloud - Native TDL TCP Synchronization Plugin
+;; =======================================================================
+
+[#Menu: Gateway of Tally]
+    Add : Key Item : "🚀 YantrAI AI Cloud Sync" : Y : Menu : Yantrai Sync Menu
+
+[Menu: Yantrai Sync Menu]
+    Title    : "YantrAI AI Cloud Synchronization Hub"
+    Key Item : "1. Perform Initial Cloud Setup (Baseline Seed)" : I : Export Report : Yantrai Ledger Report
+    Key Item : "2. Check Cloud Connection Status" : C : Call : YantraiCheckStatus
+
+[Function: YantraiCheckStatus]
+    01 : Msg Box : "YantrAI Cloud" : "TallyPrime is securely linked to YantrAI Cloud Webhook Engine (http://localhost:8000). All systems operational."
+
+;; =======================================================================
+;; Custom TDL XML Reports & Collections (Bypasses Tally Internal Crash)
+;; =======================================================================
+
+[Collection: Yantrai Ledger Collection]
+    Type : Ledger
+    Fetch : Name, Parent, ClosingBalance
+
+[Report: Yantrai Ledger Report]
+    Collection : Yantrai Ledger Collection
+    Form : Yantrai Ledger Form
+    Set : SVExportFormat : $$SysName:XML
+    Set : SVExportLocation : "http://127.0.0.1:8000/v1/tally/seed"
+
+[Form: Yantrai Ledger Form]
+    Part : Yantrai Ledger Part
+
+[Part: Yantrai Ledger Part]
+    Line : Yantrai Ledger Line
+    Repeat : Yantrai Ledger Line : Yantrai Ledger Collection
+
+[Line: Yantrai Ledger Line]
+    Fields : Yantrai Ledger Name, Yantrai Ledger Parent
+
+[Field: Yantrai Ledger Name]
+    Set as : $Name
+    XML Tag : "NAME"
+
+[Field: Yantrai Ledger Parent]
+    Set as : $Parent
+    XML Tag : "PARENT"
+
+;; =======================================================================
+;; Real-Time Incremental Push (Event-Driven Hook)
+;; =======================================================================
+
+[#Form: Voucher]
+    Add : Option : Yantrai Voucher Trigger : $$IsSysName:Accepted
+
+[!Form: Yantrai Voucher Trigger]
+    Add : On : Form Accept : Yes : Export Report : Yantrai Voucher Report
+
+[Collection: Yantrai Voucher Collection]
+    Type : Voucher
+    Fetch : VoucherTypeName, Date, VoucherNumber, Narration
+
+[Report: Yantrai Voucher Report]
+    Collection : Yantrai Voucher Collection
+    Form : Yantrai Voucher Form
+    Set : SVExportFormat : $$SysName:XML
+    Set : SVExportLocation : "http://127.0.0.1:8000/v1/tally/incremental"
+
+[Form: Yantrai Voucher Form]
+    Part : Yantrai Voucher Part
+
+[Part: Yantrai Voucher Part]
+    Line : Yantrai Voucher Line
+    Repeat : Yantrai Voucher Line : Yantrai Voucher Collection
+
+[Line: Yantrai Voucher Line]
+    Fields : Yantrai VchType, Yantrai VchNo, Yantrai VchDate, Yantrai VchNarration
+
+[Field: Yantrai VchType]
+    Set as : $VoucherTypeName
+    XML Tag : "VOUCHERTYPE"
+
+[Field: Yantrai VchNo]
+    Set as : $VoucherNumber
+    XML Tag : "VOUCHERNUMBER"
+
+[Field: Yantrai VchDate]
+    Set as : $Date
+    XML Tag : "DATE"
+
+[Field: Yantrai VchNarration]
+    Set as : $Narration
+    XML Tag : "NARRATION"

@@ -1,0 +1,10 @@
+.env
+__pycache__/
+dist/
+build/
+*.spec
+*.db
+*.log
+scratch/
+chat_temp_*
+temp_*
