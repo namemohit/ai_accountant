@@ -1,0 +1,4 @@
+([('YantrAI_Tally_Bridge',
+   '/Users/mohit/Desktop/name.mohit '
+   'Mac/YantrAI/macbook_codes/accounting_agent/dist/YantrAI_Tally_Bridge',
+   'EXECUTABLE')],)

@@ -1,0 +1,37 @@
+/Users/mohit/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+/Users/mohit/Library/Python/3.9/lib/python/site-packages/google/api_core/_python_version_support.py:242: FutureWarning: You are using a non-supported Python version (3.9.6). Google will not post any further updates to google.api_core supporting this Python version. Please upgrade to the latest Python version, or at least Python 3.10, and then update google.api_core.
+  warnings.warn(message, FutureWarning)
+/Users/mohit/Library/Python/3.9/lib/python/site-packages/google/auth/__init__.py:54: FutureWarning: You are using a Python version 3.9 past its end of life. Google will update google-auth with critical bug fixes on a best-effort basis, but not with any other fixes or features. Please upgrade your Python version, and then update google-auth.
+  warnings.warn(eol_message.format("3.9"), FutureWarning)
+/Users/mohit/Library/Python/3.9/lib/python/site-packages/google/oauth2/__init__.py:40: FutureWarning: You are using a Python version 3.9 past its end of life. Google will update google-auth with critical bug fixes on a best-effort basis, but not with any other fixes or features. Please upgrade your Python version, and then update google-auth.
+  warnings.warn(eol_message.format("3.9"), FutureWarning)
+/Users/mohit/Desktop/name.mohit Mac/YantrAI/macbook_codes/accounting_agent/utils/parser.py:4: FutureWarning: 
+
+All support for the `google.generativeai` package has ended. It will no longer be receiving 
+updates or bug fixes. Please switch to the `google.genai` package as soon as possible.
+See README for more details:
+
+https://github.com/google-gemini/deprecated-generative-ai-python/blob/main/README.md
+
+  from google import generativeai as genai
+INFO:     Started server process [97244]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+Cloud Database Initialized Successfully.
+INFO:     127.0.0.1:61536 - "POST /api/gst-reconciliation/upload HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61563 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61563 - "GET /sw.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61563 - "GET /chat/sessions?company_name=Acme%20Corp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61564 - "GET /chat/sessions?company_name=Acme%20Corp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61563 - "GET /chat/sessions?company_name=Acme%20Corp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61604 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61604 - "GET /static/style.css HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:61604 - "GET /chat/sessions?company_name=Acme%20Corp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61605 - "GET /chat/sessions?company_name=Acme%20Corp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61605 - "GET /sw.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61670 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61670 - "GET /chat/sessions?company_name=Acme%20Corp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61671 - "GET /chat/sessions?company_name=Acme%20Corp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61671 - "GET /sw.js HTTP/1.1" 200 OK

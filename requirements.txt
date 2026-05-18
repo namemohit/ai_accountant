@@ -1,0 +1,9 @@
+requests
+google-generativeai
+python-dotenv
+pillow
+flask
+fastapi
+uvicorn
+python-multipart
+websockets
