@@ -1,0 +1,92 @@
+{
+  "name": "Payment Gateway Reconciliation",
+  "industry": "All",
+  "description": "Reconcile Tally sales invoices against payment gateway settlement reports. Verifies gateway fees, GST on fees, and net settlement amounts against contracted rates.",
+  "supported_sources": [
+    "Razorpay",
+    "Stripe",
+    "Cashfree",
+    "PayU",
+    "Paytm",
+    "PhonePe",
+    "CCAvenue",
+    "BillDesk",
+    "UPI Direct",
+    "Other Gateway"
+  ],
+  "master_schema": {
+    "order_id": ["order id", "invoice no", "invoice number", "reference id", "transaction id"],
+    "date": ["date", "invoice date", "transaction date"],
+    "gross_amount": ["amount", "total", "invoice amount", "gross", "value"],
+    "customer_name": ["customer", "party", "customer name", "buyer"]
+  },
+  "source_schema": {
+    "order_id": ["order id", "receipt", "merchant ref", "reference", "transaction id", "payment id"],
+    "date": ["date", "created at", "settled at", "transaction date"],
+    "gross_amount": ["amount", "gross", "settlement amount", "credit", "captured amount"],
+    "fee_amount": ["fee", "fees", "gateway fee", "charges", "commission"],
+    "gst_on_fee": ["tax", "gst", "gst on fee", "service tax"],
+    "net_payout": ["net", "net amount", "net payout", "amount credited", "settlement"],
+    "customer_name": ["customer name", "buyer", "payer", "email", "name"]
+  },
+  "matching_rules": [
+    {
+      "strategy": "exact_id",
+      "field": "order_id",
+      "priority": 1
+    },
+    {
+      "strategy": "amount+date",
+      "fields": ["gross_amount", "date"],
+      "amount_tolerance": 1.0,
+      "date_tolerance": 2,
+      "priority": 2
+    }
+  ],
+  "variance_formulas": [
+    {
+      "name": "gross_variance",
+      "label": "Gross Amount Variance",
+      "formula": "master.gross_amount - external.gross_amount",
+      "tolerance": 1.0
+    },
+    {
+      "name": "fee_expected",
+      "label": "Expected Fee",
+      "formula": "external.gross_amount * config.fee_rate / 100"
+    },
+    {
+      "name": "fee_variance",
+      "label": "Fee Variance",
+      "formula": "external.fee_amount - (external.gross_amount * config.fee_rate / 100)",
+      "tolerance": 2.0
+    },
+    {
+      "name": "gst_variance",
+      "label": "GST on Fee Variance",
+      "formula": "external.gst_on_fee - (external.fee_amount * 0.18)",
+      "tolerance": 1.0
+    },
+    {
+      "name": "net_payout_variance",
+      "label": "Net Payout Variance",
+      "formula": "external.net_payout - (external.gross_amount - external.fee_amount - external.gst_on_fee)",
+      "tolerance": 1.0
+    }
+  ],
+  "default_config": {
+    "fee_rates": {
+      "Razorpay": 2.0,
+      "Stripe": 2.9,
+      "Cashfree": 1.95,
+      "PayU": 2.0,
+      "Paytm": 2.0,
+      "PhonePe": 2.0,
+      "CCAvenue": 2.5,
+      "BillDesk": 1.5,
+      "UPI Direct": 0.0,
+      "Other Gateway": 2.0
+    },
+    "gst_rate_on_fee": 18.0
+  }
+}

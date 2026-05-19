@@ -1,0 +1,85 @@
+{
+  "name": "GST 2B vs Tally Purchases",
+  "industry": "All",
+  "description": "Reconcile GSTR-2B (auto-drafted by GSTN) against Tally purchase invoices to identify ITC at risk, missing supplier invoices, amount mismatches, and supplier filing gaps. Catches issues before filing GSTR-3B.",
+  "supported_sources": [
+    "GSTR-2B",
+    "GSTR-2A"
+  ],
+  "master_schema": {
+    "invoice_number": ["invoice no", "invoice number", "bill no", "voucher no", "ref no"],
+    "date": ["date", "invoice date", "bill date"],
+    "supplier_gstin": ["supplier gstin", "gstin", "vendor gstin", "party gstin"],
+    "supplier_name": ["supplier", "vendor", "party", "supplier name"],
+    "taxable_value": ["taxable value", "taxable amount", "net amount", "basic amount"],
+    "cgst": ["cgst", "cgst amount"],
+    "sgst": ["sgst", "sgst amount"],
+    "igst": ["igst", "igst amount"],
+    "total_tax": ["total tax", "gst amount"]
+  },
+  "source_schema": {
+    "invoice_number": ["invoice number", "invoice no", "doc no", "document number"],
+    "date": ["invoice date", "doc date", "document date", "date"],
+    "supplier_gstin": ["gstin of supplier", "supplier gstin", "gstin"],
+    "supplier_name": ["trade name of supplier", "supplier name", "trade name", "legal name"],
+    "taxable_value": ["taxable value", "taxable amount"],
+    "cgst": ["central tax", "cgst", "cgst amount"],
+    "sgst": ["state/ut tax", "sgst", "sgst amount", "state tax"],
+    "igst": ["integrated tax", "igst", "igst amount"],
+    "total_tax": ["total tax", "total gst"]
+  },
+  "matching_rules": [
+    {
+      "strategy": "exact_id",
+      "field": "invoice_number",
+      "priority": 1
+    },
+    {
+      "strategy": "fuzzy_text+date",
+      "fields": ["supplier_gstin", "date"],
+      "name_similarity": 0.95,
+      "date_tolerance": 1,
+      "priority": 2
+    },
+    {
+      "strategy": "amount+date",
+      "fields": ["taxable_value", "date"],
+      "amount_tolerance": 1.0,
+      "date_tolerance": 1,
+      "priority": 3
+    }
+  ],
+  "variance_formulas": [
+    {
+      "name": "taxable_variance",
+      "label": "Taxable Value Variance",
+      "formula": "master.taxable_value - external.taxable_value",
+      "tolerance": 1.0
+    },
+    {
+      "name": "cgst_variance",
+      "label": "CGST Variance",
+      "formula": "master.cgst - external.cgst",
+      "tolerance": 1.0
+    },
+    {
+      "name": "sgst_variance",
+      "label": "SGST Variance",
+      "formula": "master.sgst - external.sgst",
+      "tolerance": 1.0
+    },
+    {
+      "name": "igst_variance",
+      "label": "IGST Variance",
+      "formula": "master.igst - external.igst",
+      "tolerance": 1.0
+    },
+    {
+      "name": "itc_at_risk_variance",
+      "label": "ITC at Risk (Total)",
+      "formula": "(master.cgst + master.sgst + master.igst) - (external.cgst + external.sgst + external.igst)",
+      "tolerance": 1.0
+    }
+  ],
+  "default_config": {}
+}

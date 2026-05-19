@@ -260,8 +260,8 @@ def get_embedding(text: str):
 
 @app.post("/chat")
 async def chat_with_tally(
-    message: str = Form(None), 
-    session_id: str = Form(None), 
+    message: str = Form(None),
+    session_id: str = Form(None),
     file: UploadFile = File(None),
     company_name: str = Form(None),
     txn_type: str = Form(None)
@@ -269,14 +269,15 @@ async def chat_with_tally(
     try:
         kb = load_kb()
         user_msg = message or ""
-        
+
         # Create new session if needed
         if not session_id or session_id == "null" or session_id == "undefined":
             session_id = db.create_chat_session(company_name=company_name)
-        
+
         file_context = ""
         file_url = None
-        is_bank_statement = (txn_type == "Bank Statement")
+        is_bank_statement = False
+        ai_detected_type = None
         if file:
             os.makedirs("static/uploads", exist_ok=True)
             import re
@@ -284,22 +285,30 @@ async def chat_with_tally(
             unique_filename = f"{uuid.uuid4()}_{safe_filename}"
             persistent_path = f"static/uploads/{unique_filename}"
             file_url = f"/static/uploads/{unique_filename}"
-            
+
             temp_path = f"chat_temp_{uuid.uuid4()}_{safe_filename}"
             file_content = await file.read()
             with open(temp_path, "wb") as buffer:
                 buffer.write(file_content)
             with open(persistent_path, "wb") as buffer:
                 buffer.write(file_content)
-            
+
             try:
                 # Analyze the document first to get context
                 file_analysis = parser.parse(temp_path, context="Understand what this document is (Purchase, Sale, Report, etc.) and summarize key details for a conversation.")
                 file_context = f"\n[USER UPLOADED A DOCUMENT]: {file_analysis}\n"
-                
+
+                # AI Auto-Classification: detect document type from content
                 fa_lower = file_analysis.lower()
                 if "bank statement" in fa_lower or "bank transaction" in fa_lower or "statement of account" in fa_lower or "bank ledger" in fa_lower:
                     is_bank_statement = True
+                    ai_detected_type = "Bank Statement"
+                elif "purchase" in fa_lower and ("invoice" in fa_lower or "bill" in fa_lower):
+                    ai_detected_type = "Purchase"
+                elif "sale" in fa_lower or "tax invoice" in fa_lower or "invoice" in fa_lower:
+                    ai_detected_type = "Sales"
+                else:
+                    ai_detected_type = "Other"
 
                 if not user_msg:
                     user_msg = "I've uploaded a document. Please tell me what it is and summarize it."
@@ -309,34 +318,101 @@ async def chat_with_tally(
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
 
+        # AI Intent Detection for Service Requests (no file needed)
+        # Detect if user is asking YantrAI to do something for them (outcome request)
+        is_service_request = False
+        if not file and user_msg:
+            service_keywords = [
+                "can you set up", "can you build", "can you create", "can you configure",
+                "i want you to", "i need you to", "please set up", "please configure",
+                "set up automated", "automate my", "build me", "create a report for",
+                "help me set up", "integrate my", "connect my", "file my gst",
+                "do my", "handle my", "manage my", "prepare my",
+                "i want yantrai to", "assign task", "raise a request",
+                "can yantrai", "will yantrai", "does yantrai offer"
+            ]
+            msg_lower = user_msg.lower()
+            for kw in service_keywords:
+                if kw in msg_lower:
+                    is_service_request = True
+                    break
+
         # Save user message
         if file:
             db.save_chat_message(
-                session_id, "user", user_msg, 
-                ui_type="file", 
+                session_id, "user", user_msg,
+                ui_type="file",
                 ui_data={"file_url": file_url, "filename": file.filename}
             )
         else:
             db.save_chat_message(session_id, "user", user_msg)
-        
-        # Intercept Task assignments
-        if txn_type == "Task":
-            task_desc = user_msg
-            if file_context:
-                task_desc += "\n" + file_context
-            task_id = db.create_task(session_id, company_name, task_desc, 'sadmin')
-            
-            ai_response = {
-                "text": "Your task has been successfully assigned to the YantrAI Super Admin team. We will update you on its progress.",
-                "ui_type": "task_assigned",
-                "ui_data": {"task_id": task_id, "status": "Requested", "description": task_desc}
-            }
-            db.save_chat_message(
-                session_id, "assistant", ai_response.get("text", ""),
-                ai_response.get("ui_type", "text"), ai_response.get("ui_data")
-            )
-            return {"status": "success", "response": ai_response.get("text"), "ui_type": ai_response.get("ui_type"), "ui_data": ai_response.get("ui_data")}
-        
+
+        # If AI detects a service request intent, ask Gemini to rephrase and confirm
+        if is_service_request:
+            # Use Gemini to create a structured service request summary
+            sr_prompt = f"""You are TallyAI, an AI accounting assistant for Indian businesses.
+
+The user just sent a message that appears to be a SERVICE REQUEST — they want the YantrAI team to perform a task or deliver an outcome for them (not just answer a question).
+
+USER MESSAGE: "{user_msg}"
+COMPANY: {company_name}
+
+Your job: Rephrase their request into a clear, structured service request summary. Extract:
+1. A short title (under 60 chars) for the request
+2. A clear 1-2 sentence description of what the user wants done
+3. A category (one of: GST & Compliance, Tally Setup, Reconciliation, Custom Report, Integration, Automation, Data Migration, Other)
+4. Priority (Normal or Urgent — only Urgent if they mention deadline or urgency)
+
+RESPOND IN JSON ONLY:
+{{
+    "is_service_request": true,
+    "title": "Short title of request",
+    "description": "Clear rephrased description of what the user wants YantrAI to do for them",
+    "category": "Category",
+    "priority": "Normal|Urgent",
+    "text": "A friendly message to the user explaining you understood their request and asking them to confirm before raising it to the YantrAI team. Be warm and professional."
+}}
+
+If on second thought this is actually just a regular accounting question (NOT a service request), respond:
+{{
+    "is_service_request": false
+}}
+"""
+            try:
+                sr_response = parser.model.generate_content(sr_prompt)
+                sr_raw = sr_response.text.strip()
+                import re as re_mod
+                sr_match = re_mod.search(r'(\{.*\})', sr_raw, re_mod.DOTALL)
+                if sr_match:
+                    sr_data = json.loads(sr_match.group(1))
+                else:
+                    sr_data = {"is_service_request": False}
+            except Exception as sr_err:
+                print(f"Service request detection error: {sr_err}")
+                sr_data = {"is_service_request": False}
+
+            if sr_data.get("is_service_request"):
+                ai_response = {
+                    "text": sr_data.get("text", "I understand you'd like YantrAI to help with this. Please confirm to raise this as a service request."),
+                    "ui_type": "service_request_confirm",
+                    "ui_data": {
+                        "title": sr_data.get("title", user_msg[:60]),
+                        "description": sr_data.get("description", user_msg),
+                        "category": sr_data.get("category", "Other"),
+                        "priority": sr_data.get("priority", "Normal"),
+                        "company_name": company_name,
+                        "original_message": user_msg
+                    },
+                    "suggested_questions": []
+                }
+                msg_id = db.save_chat_message(
+                    session_id, "assistant", ai_response["text"],
+                    ai_response["ui_type"], ai_response["ui_data"]
+                )
+                ai_response["session_id"] = session_id
+                ai_response["id"] = msg_id
+                return ai_response
+
         # Get conversation history
         history = db.get_chat_messages(session_id)
         context_msgs = []
@@ -398,7 +474,10 @@ async def chat_with_tally(
         
         CRITICAL INSTRUCTION: When the user asks about ingested data, Tally data, company summaries, ledger mappings, vouchers, parties, or any accounting information — you MUST answer using the REAL ACCOUNTING DATA section above. This data has been pulled from TallyPrime and stored in the cloud database. Do NOT say "I couldn't find any ingested data" if the REAL ACCOUNTING DATA section contains information. Summarize it clearly with counts, names, and relevant details.
         STRICT COMPANY RING-FENCING MANDATE: You are operating strictly within the ring-fenced scope of the active company shown in the REAL ACCOUNTING DATA summary. You are strictly prohibited from utilizing external financial knowledge or referencing data/figures outside the provided REAL ACCOUNTING DATA section. If a requested transaction, ledger, or figure is not present in the provided context, state explicitly that it does not exist in the active company's records.
-        
+
+        AI AUTO-DETECTED DOCUMENT TYPE: {ai_detected_type or 'N/A (no file uploaded)'}
+        NOTE: You have auto-classified this document. Use this detection to set the correct "category" in invoice_metadata (Sales or Purchase). If the document is clearly a Purchase invoice (billed TO the user's company), set category to "Purchase". If it is a Sales invoice (issued BY the user's company), set category to "Sales". Override the auto-detection if your deeper analysis disagrees.
+
         USER QUESTION: "{user_msg}"
         
         RESPONSE FORMAT (JSON):
@@ -562,7 +641,7 @@ async def chat_with_tally(
                     # Check if an existing invoice has the same number
                     duplicate = next((inv for inv in existing_invs if str(inv.get("invoice_number", "")).strip().lower() == str(inv_num).strip().lower()), None)
                     if duplicate:
-                        warning_text = f"\n\n⚠️ **POTENTIAL DUPLICATE INVOICE ALERT**:\nWe found an existing invoice in your Sync History with the exact same invoice number (**{inv_num}**) for this company. Synchronizing this will overwrite the existing entry to avoid duplicates."
+                        warning_text = f"\n\n⚠️ **POTENTIAL DUPLICATE INVOICE ALERT**:\nWe found an existing invoice in your Invoices with the exact same invoice number (**{inv_num}**) for this company. Synchronizing this will overwrite the existing entry to avoid duplicates."
                         if warning_text not in ai_response["text"]:
                             ai_response["text"] += warning_text
                         ui_data["duplicate_detected"] = True
@@ -592,6 +671,7 @@ async def chat_with_tally(
         }
 
 import utils.gst_reconciler as gst_reconciler
+import utils.revenue_reconciler as revenue_reconciler
 
 @app.post("/api/gst-reconciliation/upload")
 async def gst_reconciliation_upload(
@@ -625,6 +705,363 @@ async def gst_reconciliation_upload(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/revenue-reconciliation/upload")
+async def revenue_reconciliation_upload(
+    file: UploadFile = File(...), 
+    gateway_type: str = Form(...), 
+    company_name: str = Form(None)
+):
+    try:
+        if not company_name:
+            company_name = "Acme Corp" # Fallback
+            
+        file_content = await file.read()
+        tally_vouchers = db.get_unreconciled_tally_vouchers(company_name)
+        
+        results = revenue_reconciler.reconcile_revenue(file_content, gateway_type, tally_vouchers)
+        
+        return {
+            "status": "success",
+            "message": f"Successfully parsed {file.filename}",
+            "data": results
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ═══════════════════════════════════════════════════════════════════════════
+# UNIVERSAL RECONCILIATION STUDIO API
+# ═══════════════════════════════════════════════════════════════════════════
+from utils import recon_engine
+
+@app.get("/api/recon/templates")
+async def recon_list_templates(company_name: str = None):
+    """List public templates + this company's private templates."""
+    tpls = db.get_recon_templates(company_name)
+    return {"status": "success", "templates": tpls}
+
+@app.get("/api/recon/templates/{template_id}")
+async def recon_get_template(template_id: str):
+    tpl = db.get_recon_template(template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return {"status": "success", "template": tpl}
+
+@app.get("/api/recon/sessions")
+async def recon_list_sessions(company_name: str):
+    sessions = db.get_recon_sessions(company_name)
+    return {"status": "success", "sessions": sessions}
+
+@app.post("/api/recon/sessions")
+async def recon_create_session(payload: dict):
+    company_name = payload.get("company_name")
+    template_id = payload.get("template_id")
+    name = payload.get("name") or "Untitled Reconciliation"
+    if not company_name or not template_id:
+        raise HTTPException(status_code=400, detail="company_name and template_id required")
+    tpl = db.get_recon_template(template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+    # Seed config from template defaults
+    config = tpl.get("default_config") or {}
+    if isinstance(config, str):
+        config = json.loads(config)
+    session_id = db.create_recon_session(company_name, template_id, name, config)
+    return {"status": "success", "session_id": session_id}
+
+@app.get("/api/recon/sessions/{session_id}")
+async def recon_get_session(session_id: str):
+    sess = db.get_recon_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    tpl = db.get_recon_template(sess["template_id"]) if sess.get("template_id") else None
+    sources = db.get_recon_sources(session_id)
+    summary = db.get_recon_session_summary(session_id)
+    return {
+        "status": "success",
+        "session": sess,
+        "template": tpl,
+        "sources": sources,
+        "summary": summary,
+    }
+
+def _parse_template_field(tpl, key):
+    val = tpl.get(key) or {}
+    if isinstance(val, str):
+        try:
+            return json.loads(val)
+        except Exception:
+            return {}
+    return val
+
+@app.post("/api/recon/sessions/{session_id}/upload-master")
+async def recon_upload_master(session_id: str, file: UploadFile = File(...)):
+    sess = db.get_recon_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    tpl = db.get_recon_template(sess["template_id"])
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    file_content = await file.read()
+    master_schema = _parse_template_field(tpl, "master_schema")
+    canonical_records, mapping = recon_engine.parse_and_normalize(
+        file_content, file.filename, master_schema, "Master", use_ai_fallback=True
+    )
+
+    if not canonical_records:
+        raise HTTPException(status_code=400, detail="No records could be parsed from the master file.")
+
+    source_id = db.create_recon_source(
+        session_id=session_id,
+        source_type="master",
+        source_name="Master",
+        file_name=file.filename,
+        record_count=len(canonical_records),
+        column_mapping=mapping,
+    )
+    db.bulk_insert_recon_records(session_id, source_id, canonical_records)
+
+    return {
+        "status": "success",
+        "source_id": source_id,
+        "record_count": len(canonical_records),
+        "column_mapping": mapping,
+    }
+
+@app.post("/api/recon/sessions/{session_id}/upload-source")
+async def recon_upload_source(
+    session_id: str,
+    source_name: str = Form(...),
+    file: UploadFile = File(...),
+):
+    sess = db.get_recon_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    tpl = db.get_recon_template(sess["template_id"])
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    master_src = db.get_recon_master_source(session_id)
+    if not master_src:
+        raise HTTPException(status_code=400, detail="Upload the master file first.")
+
+    file_content = await file.read()
+    source_schema = _parse_template_field(tpl, "source_schema")
+    canonical_records, mapping = recon_engine.parse_and_normalize(
+        file_content, file.filename, source_schema, source_name, use_ai_fallback=True
+    )
+
+    if not canonical_records:
+        raise HTTPException(status_code=400, detail="No records could be parsed from the source file.")
+
+    source_id = db.create_recon_source(
+        session_id=session_id,
+        source_type="external",
+        source_name=source_name,
+        file_name=file.filename,
+        record_count=len(canonical_records),
+        column_mapping=mapping,
+    )
+    db.bulk_insert_recon_records(session_id, source_id, canonical_records)
+
+    # Run reconciliation immediately
+    master_records_db = db.get_recon_records(session_id, source_id=master_src["id"])
+    external_records_db = db.get_recon_records(session_id, source_id=source_id)
+
+    # Normalize shape for engine
+    def _shape(r):
+        return {
+            "id": r["id"],
+            "matching_key": r["matching_key"],
+            "canonical_data": r["canonical_data"] if isinstance(r["canonical_data"], dict) else (json.loads(r["canonical_data"]) if r["canonical_data"] else {}),
+        }
+    master_shaped = [_shape(r) for r in master_records_db]
+    external_shaped = [_shape(r) for r in external_records_db]
+
+    # Compose runtime config: session.config merged with per-platform commission rate
+    sess_config = sess.get("config") or {}
+    if isinstance(sess_config, str):
+        sess_config = json.loads(sess_config)
+    # If template has commission_rates per source, flatten the one for this source
+    if "commission_rates" in sess_config and isinstance(sess_config["commission_rates"], dict):
+        sess_config = {**sess_config, "commission_rate": sess_config["commission_rates"].get(source_name, 0)}
+
+    tpl_dict = {
+        "matching_rules": _parse_template_field(tpl, "matching_rules") if isinstance(_parse_template_field(tpl, "matching_rules"), list) else (json.loads(tpl["matching_rules"]) if isinstance(tpl["matching_rules"], str) else tpl["matching_rules"]),
+        "variance_formulas": _parse_template_field(tpl, "variance_formulas") if isinstance(_parse_template_field(tpl, "variance_formulas"), list) else (json.loads(tpl["variance_formulas"]) if isinstance(tpl["variance_formulas"], str) else tpl["variance_formulas"]),
+    }
+    # Ensure they're lists
+    if isinstance(tpl_dict["matching_rules"], dict):
+        tpl_dict["matching_rules"] = list(tpl_dict["matching_rules"].values())
+    if isinstance(tpl_dict["variance_formulas"], dict):
+        tpl_dict["variance_formulas"] = list(tpl_dict["variance_formulas"].values())
+
+    enriched_matches, metrics = recon_engine.reconcile(master_shaped, external_shaped, tpl_dict, sess_config)
+
+    # Attach external_source_name for downstream filtering
+    for m in enriched_matches:
+        m["external_source_name"] = source_name
+
+    db.bulk_insert_recon_matches(session_id, enriched_matches)
+
+    return {
+        "status": "success",
+        "source_id": source_id,
+        "record_count": len(canonical_records),
+        "column_mapping": mapping,
+        "match_metrics": metrics,
+    }
+
+@app.get("/api/recon/sessions/{session_id}/matches")
+async def recon_get_matches(session_id: str, source_name: str = None, status: str = None):
+    matches = db.get_recon_matches(session_id, source_name=source_name, status=status)
+    return {"status": "success", "matches": matches}
+
+@app.post("/api/recon/matches/{match_id}/status")
+async def recon_update_match(match_id: str, payload: dict):
+    db.update_recon_match_status(match_id, payload.get("status", "confirmed"), payload.get("notes"))
+    return {"status": "success"}
+
+@app.post("/api/recon/sessions/{session_id}/config")
+async def recon_update_config(session_id: str, payload: dict):
+    sess = db.get_recon_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    current = sess.get("config") or {}
+    if isinstance(current, str):
+        current = json.loads(current)
+    current.update(payload.get("config") or {})
+    db.update_recon_session_config(session_id, current)
+    return {"status": "success", "config": current}
+
+@app.get("/api/recon/sessions/{session_id}/export")
+async def recon_export(session_id: str):
+    """Return all matches as CSV-friendly rows."""
+    import csv as _csv, io as _io
+    matches = db.get_recon_matches(session_id)
+    sess = db.get_recon_session(session_id)
+    tpl = db.get_recon_template(sess["template_id"]) if sess and sess.get("template_id") else None
+
+    formulas = _parse_template_field(tpl, "variance_formulas") if tpl else []
+    if isinstance(formulas, dict):
+        formulas = list(formulas.values())
+    variance_names = [f["name"] for f in formulas if "name" in f]
+
+    buf = _io.StringIO()
+    fieldnames = ["external_source", "match_type", "match_score", "master_key", "external_key"] + variance_names + ["status", "notes"]
+    writer = _csv.DictWriter(buf, fieldnames=fieldnames)
+    writer.writeheader()
+    for m in matches:
+        variances = m.get("variances") or {}
+        if isinstance(variances, str):
+            variances = json.loads(variances)
+        row = {
+            "external_source": m.get("external_source_name", ""),
+            "match_type": m.get("match_type", ""),
+            "match_score": m.get("match_score", ""),
+            "master_key": m.get("master_key", ""),
+            "external_key": m.get("external_key", ""),
+            "status": m.get("status", ""),
+            "notes": m.get("notes") or "",
+        }
+        for vn in variance_names:
+            row[vn] = variances.get(vn, "")
+        writer.writerow(row)
+
+    return PlainTextResponse(buf.getvalue(), media_type="text/csv")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GSTR-1 / GSTR-3B FILING ASSISTANT API
+# ═══════════════════════════════════════════════════════════════════════════
+from utils import gstr_engine
+
+@app.get("/api/gstr/summary")
+async def gstr_summary(company_name: str, month: int = None, year: int = None):
+    """Returns dashboard data — current vs prior month, due dates, validation count."""
+    try:
+        today = datetime.now()
+        if not month:
+            month = today.month
+        if not year:
+            year = today.year
+
+        gstr1 = gstr_engine.compute_gstr1(company_name, month, year)
+        gstr3b = gstr_engine.compute_gstr3b(company_name, month, year)
+
+        # GST filing due dates (standard): GSTR-1 = 11th of next month, 3B = 20th of next month
+        next_month = month + 1 if month < 12 else 1
+        next_year = year if month < 12 else year + 1
+        gstr1_due = f"{next_year}-{next_month:02d}-11"
+        gstr3b_due = f"{next_year}-{next_month:02d}-20"
+        days_to_gstr1 = (datetime(next_year, next_month, 11) - today).days
+        days_to_gstr3b = (datetime(next_year, next_month, 20) - today).days
+
+        error_count = sum(1 for i in gstr1["validation_issues"] if i["severity"] == "error")
+        warning_count = sum(1 for i in gstr1["validation_issues"] if i["severity"] == "warning")
+
+        return {
+            "status": "success",
+            "company_name": company_name,
+            "filing_period": f"{month:02d}/{year}",
+            "gstr1": {
+                "totals": gstr1["totals"],
+                "due_date": gstr1_due,
+                "days_remaining": days_to_gstr1,
+                "validation_errors": error_count,
+                "validation_warnings": warning_count,
+            },
+            "gstr3b": {
+                "summary": gstr3b["summary"],
+                "due_date": gstr3b_due,
+                "days_remaining": days_to_gstr3b,
+            },
+            "validation_issues": gstr1["validation_issues"][:50],
+        }
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/gstr/gstr1")
+async def gstr1_detail(company_name: str, month: int = None, year: int = None):
+    """Return full GSTR-1 computed data."""
+    today = datetime.now()
+    if not month: month = today.month
+    if not year: year = today.year
+    return {"status": "success", "data": gstr_engine.compute_gstr1(company_name, month, year)}
+
+
+@app.get("/api/gstr/gstr3b")
+async def gstr3b_detail(company_name: str, month: int = None, year: int = None):
+    today = datetime.now()
+    if not month: month = today.month
+    if not year: year = today.year
+    return {"status": "success", "data": gstr_engine.compute_gstr3b(company_name, month, year)}
+
+
+@app.get("/api/gstr/gstr1/export")
+async def gstr1_export(company_name: str, month: int, year: int):
+    """Download GSTN offline-tool-compatible JSON."""
+    gstr1 = gstr_engine.compute_gstr1(company_name, month, year)
+    payload = gstr_engine.gstr1_to_gstn_json(gstr1)
+    from fastapi.responses import JSONResponse
+    return JSONResponse(payload, headers={
+        "Content-Disposition": f"attachment; filename=GSTR1_{company_name}_{month:02d}{year}.json"
+    })
+
+
+@app.get("/api/gstr/gstr3b/export")
+async def gstr3b_export(company_name: str, month: int, year: int):
+    gstr3b = gstr_engine.compute_gstr3b(company_name, month, year)
+    payload = gstr_engine.gstr3b_to_gstn_json(gstr3b)
+    from fastapi.responses import JSONResponse
+    return JSONResponse(payload, headers={
+        "Content-Disposition": f"attachment; filename=GSTR3B_{company_name}_{month:02d}{year}.json"
+    })
+
 
 @app.get("/chat/sessions")
 async def list_chat_sessions(company_name: str = None):
@@ -827,6 +1264,154 @@ async def confirm_reconciliation(payload: dict):
         print(f"Error in reconciliation confirm: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/bank-reconciliation/upload")
+async def bank_reconciliation_upload(
+    file: UploadFile = File(...),
+    company_name: str = Form("Acme Corp")
+):
+    """Parse a bank statement file (CSV/XLSX/PDF) and reconcile against Tally vouchers."""
+    try:
+        import tempfile, os
+        
+        # Save uploaded file temporarily
+        suffix = os.path.splitext(file.filename)[1] if file.filename else ".csv"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+        
+        # Use Gemini to parse the bank statement into structured transactions
+        parse_prompt = """You are a bank statement parser. Extract ALL transactions from this bank statement.
+Return a JSON array of objects, each with these exact fields:
+- "date": transaction date in YYYY-MM-DD format
+- "description": the narration/description text exactly as shown
+- "reference": any reference number, cheque number, UTR, or transaction ID
+- "amount": the transaction amount as a number (positive for credits/deposits, negative for debits/withdrawals)
+- "party_name": the likely party/entity name extracted from the description (best guess)
+- "transaction_type": one of "Cheque", "NEFT", "RTGS", "UPI", "IMPS", "ATM", "POS", "Transfer", "Other"
+
+Return ONLY the JSON array, no explanation."""
+        
+        if suffix.lower() in ['.csv']:
+            # Read as text for CSV and use Gemini directly
+            text_content = content.decode('utf-8', errors='ignore')
+            model = genai.GenerativeModel('gemini-flash-latest')
+            response = model.generate_content(f"{parse_prompt}\n\nRAW BANK STATEMENT DATA:\n---\n{text_content}\n---")
+            result = response.text
+        else:
+            # Use the global parser for PDF/XLSX/images (file-based)
+            result = parser.parse(tmp_path, parse_prompt)
+        
+        # Clean up temp file
+        try:
+            os.unlink(tmp_path)
+        except:
+            pass
+        
+        # Parse the Gemini response into transactions
+        transactions = []
+        if result:
+            import re as re_mod
+            # Extract JSON array from response
+            json_match = re_mod.search(r'\[.*\]', result, re_mod.DOTALL)
+            if json_match:
+                try:
+                    transactions = json.loads(json_match.group())
+                except:
+                    pass
+        
+        if not transactions:
+            return {"status": "error", "message": "Could not parse bank statement. Please ensure it's a valid CSV, XLSX, or PDF file."}
+        
+        # Run reconciliation engine
+        from utils.reconciler import reconcile_statement
+        reconciled = reconcile_statement(transactions, company_name)
+        
+        # Calculate stats
+        auto_matched = sum(1 for r in reconciled if r.get("status") == "auto_matched")
+        auto_filled = sum(1 for r in reconciled if r.get("status") == "auto_filled")
+        unmatched = sum(1 for r in reconciled if r.get("status") == "unmatched")
+        total = len(reconciled)
+        
+        # Get all ledger names for dropdown
+        ledger_names = []
+        try:
+            all_vouchers = db.get_all_tally_vouchers(company_name)
+            ledger_set = set()
+            for v in all_vouchers:
+                ln = v.get("ledger_name", "")
+                if ln:
+                    ledger_set.add(ln)
+            # Also add from knowledge base
+            conn_l = db.get_conn()
+            cursor_l = conn_l.cursor()
+            cursor_l.execute(
+                "SELECT DISTINCT data->>'original' as name FROM knowledge_base WHERE type='correction' AND data->>'field'='ledger_group_mapping' AND (data->>'company_name' ILIKE %s OR data->>'company_name' IS NULL)",
+                (f"%{company_name}%",)
+            )
+            for row in cursor_l.fetchall():
+                if row[0]:
+                    ledger_set.add(row[0])
+            cursor_l.close()
+            conn_l.close()
+            ledger_names = sorted(list(ledger_set))
+        except Exception as le:
+            print(f"Error fetching ledger names: {le}")
+            ledger_names = ["Cash", "Bank Account", "Sales Account", "Purchase Account", "GST Payable", "Suspense A/c"]
+        
+        return {
+            "status": "success",
+            "data": {
+                "reconciled": reconciled,
+                "metrics": {
+                    "total": total,
+                    "auto_matched": auto_matched,
+                    "auto_filled": auto_filled,
+                    "unmatched": unmatched
+                },
+                "ledger_names": ledger_names,
+                "file_name": file.filename
+            }
+        }
+    except Exception as e:
+        print(f"Error in bank reconciliation upload: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/voice-transcribe")
+async def voice_transcribe(
+    file: UploadFile = File(...),
+    company_name: str = Form("Acme Corp")
+):
+    """Transcribe and translate real-time voice messages into English using Gemini."""
+    try:
+        content = await file.read()
+        if not content:
+            return {"status": "success", "text": ""}
+            
+        mime_type = file.content_type or "audio/webm"
+        
+        # Use gemini-flash-latest which has native speech-to-text & translation capabilities
+        model = genai.GenerativeModel('gemini-flash-latest')
+        
+        prompt = """Transcribe the following audio. If the speech is in Hindi, Gujarati, or any other language, 
+translate it directly into grammatically correct English text. Return only the final transcribed/translated text. 
+If there is no clear speech or it is just background noise, return an empty string. Do not include any notes, explanations, or packaging."""
+
+        response = model.generate_content([
+            prompt,
+            {"mime_type": mime_type, "data": content}
+        ])
+        
+        transcribed_text = response.text.strip() if response.text else ""
+        return {"status": "success", "text": transcribed_text}
+    except Exception as e:
+        print(f"Error in voice transcription: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/training/upload")
 async def upload_training_data(
     file: UploadFile = File(None),
@@ -952,33 +1537,115 @@ async def ingest_tally_data(payload: dict):
         ws_response = await dispatch_tally_command(company, "seed_baseline")
         
         if not ws_response or ws_response.get("status") != "success":
-            # Fallback simulator data when bridge agent is not connected or times out
+            # Fallback simulator data — rich format mirrors what the upgraded bridge agent sends.
             ws_response = {
                 "status": "success",
                 "tally_company_name": company,
                 "pan": "ABCDE1234F",
+                "gstin": "27ABCDE1234F1Z5",
                 "ledgers": [
-                    {"name": "Cash", "parent": "Cash-in-Hand", "closing_balance": "50000.00"},
-                    {"name": "Bank Account", "parent": "Bank Accounts", "closing_balance": "1250000.00"},
-                    {"name": "Sales Account", "parent": "Sales Accounts", "closing_balance": "-450000.00"},
-                    {"name": "Purchase Account", "parent": "Purchase Accounts", "closing_balance": "230000.00"},
-                    {"name": "GST Payable", "parent": "Duties & Taxes", "closing_balance": "-45000.00"},
-                    {"name": "Bank Charges A/c", "parent": "Indirect Expenses", "closing_balance": "1500.00"},
-                    {"name": "Sharma Traders", "parent": "Sundry Creditors", "closing_balance": "-150000.00"},
-                    {"name": "Gupta & Sons", "parent": "Sundry Debtors", "closing_balance": "280000.00"},
-                    {"name": "Rent Expense", "parent": "Indirect Expenses", "closing_balance": "40000.00"},
-                    {"name": "Salary Expense", "parent": "Indirect Expenses", "closing_balance": "120000.00"},
-                    {"name": "CGST Input", "parent": "Duties & Taxes", "closing_balance": "12000.00"},
-                    {"name": "SGST Input", "parent": "Duties & Taxes", "closing_balance": "12000.00"},
-                    {"name": "IGST Output", "parent": "Duties & Taxes", "closing_balance": "-35000.00"}
+                    {"name": "Cash", "parent": "Cash-in-Hand", "group_path": "Assets > Current Assets > Cash-in-Hand", "closing_balance": 50000.00, "ledger_type": "cash"},
+                    {"name": "HDFC Bank - Current A/c", "parent": "Bank Accounts", "group_path": "Assets > Current Assets > Bank Accounts", "closing_balance": 1250000.00, "bank_name": "HDFC Bank", "account_number": "50100012345678", "ifsc_code": "HDFC0001234", "ledger_type": "bank"},
+                    {"name": "Sales Account", "parent": "Sales Accounts", "group_path": "Income > Direct Income > Sales Accounts", "closing_balance": -450000.00, "is_revenue": True, "ledger_type": "income"},
+                    {"name": "Purchase Account", "parent": "Purchase Accounts", "group_path": "Expenses > Direct Expenses > Purchase Accounts", "closing_balance": 230000.00, "ledger_type": "expense"},
+                    {"name": "CGST Output", "parent": "Duties & Taxes", "group_path": "Liabilities > Current Liabilities > Duties & Taxes", "closing_balance": -22500.00, "gst_registration_type": "output", "ledger_type": "tax"},
+                    {"name": "SGST Output", "parent": "Duties & Taxes", "group_path": "Liabilities > Current Liabilities > Duties & Taxes", "closing_balance": -22500.00, "gst_registration_type": "output", "ledger_type": "tax"},
+                    {"name": "IGST Output", "parent": "Duties & Taxes", "group_path": "Liabilities > Current Liabilities > Duties & Taxes", "closing_balance": -35000.00, "gst_registration_type": "output", "ledger_type": "tax"},
+                    {"name": "CGST Input", "parent": "Duties & Taxes", "group_path": "Assets > Current Assets > Duties & Taxes", "closing_balance": 12000.00, "gst_registration_type": "input", "ledger_type": "tax"},
+                    {"name": "SGST Input", "parent": "Duties & Taxes", "group_path": "Assets > Current Assets > Duties & Taxes", "closing_balance": 12000.00, "gst_registration_type": "input", "ledger_type": "tax"},
+                    {"name": "Bank Charges A/c", "parent": "Indirect Expenses", "closing_balance": 1500.00, "ledger_type": "expense"},
+                    {"name": "Sharma Traders", "parent": "Sundry Creditors", "group_path": "Liabilities > Current Liabilities > Sundry Creditors", "closing_balance": -150000.00, "gstin": "27AABCS1234F1Z5", "pan": "AABCS1234F", "ledger_type": "party", "place_of_supply": "Maharashtra"},
+                    {"name": "Gupta & Sons", "parent": "Sundry Debtors", "group_path": "Assets > Current Assets > Sundry Debtors", "closing_balance": 280000.00, "gstin": "29AABCG5678N1Z8", "pan": "AABCG5678N", "ledger_type": "party", "place_of_supply": "Karnataka"},
+                    {"name": "Rent Expense", "parent": "Indirect Expenses", "closing_balance": 40000.00, "tds_applicable": True, "ledger_type": "expense"},
+                    {"name": "Salary Expense", "parent": "Indirect Expenses", "closing_balance": 120000.00, "ledger_type": "expense"}
                 ],
-                "groups": ["Cash-in-Hand", "Bank Accounts", "Sales Accounts", "Purchase Accounts", "Duties & Taxes", "Indirect Expenses", "Sundry Creditors", "Sundry Debtors"],
+                "groups": [
+                    {"name": "Cash-in-Hand", "parent": "Current Assets"},
+                    {"name": "Bank Accounts", "parent": "Current Assets"},
+                    {"name": "Sales Accounts", "parent": "Direct Income", "is_revenue": True},
+                    {"name": "Purchase Accounts", "parent": "Direct Expenses"},
+                    {"name": "Duties & Taxes", "parent": "Current Liabilities"},
+                    {"name": "Indirect Expenses", "parent": "Profit & Loss"},
+                    {"name": "Sundry Creditors", "parent": "Current Liabilities"},
+                    {"name": "Sundry Debtors", "parent": "Current Assets"}
+                ],
+                "stock_items": [
+                    {"name": "Steel Pipes 1 inch", "unit": "Nos", "hsn_code": "7306", "gst_rate": 18.0, "closing_qty": 250, "closing_value": 75000, "standard_rate": 300},
+                    {"name": "Aluminum Sheet 4x8", "unit": "Pcs", "hsn_code": "7606", "gst_rate": 18.0, "closing_qty": 80, "closing_value": 120000, "standard_rate": 1500},
+                    {"name": "Copper Wire 2.5mm", "unit": "Mtr", "hsn_code": "7408", "gst_rate": 18.0, "closing_qty": 1200, "closing_value": 96000, "standard_rate": 80}
+                ],
                 "vouchers": [
-                    {"date": "20260501", "type": "Sales", "party": "Gupta & Sons", "number": "INV-2026-001", "amount": 45000.00},
-                    {"date": "20260502", "type": "Purchase", "party": "Sharma Traders", "number": "PUR-101", "amount": 25000.00},
-                    {"date": "20260503", "type": "Payment", "party": "Rent Expense", "number": "VCH-201", "amount": 40000.00},
-                    {"date": "20260504", "type": "Receipt", "party": "Gupta & Sons", "number": "VCH-202", "amount": 20000.00},
-                    {"date": "20260505", "type": "Sales", "party": "Cash", "number": "INV-2026-002", "amount": 15000.00}
+                    {
+                        "date": "20260501", "type": "Sales", "number": "INV-2026-001",
+                        "party": "Gupta & Sons", "party_gstin": "29AABCG5678N1Z8",
+                        "amount": 45000.00, "taxable_value": 38135.59,
+                        "cgst_amount": 0, "sgst_amount": 0, "igst_amount": 6864.41,
+                        "place_of_supply": "Karnataka",
+                        "narration": "Sale of Steel Pipes to Gupta & Sons against PO-2026-15",
+                        "reference_no": "PO-2026-15",
+                        "ledger_entries": [
+                            {"ledger": "Gupta & Sons", "amount": 45000.00, "is_debit": True},
+                            {"ledger": "Sales Account", "amount": -38135.59, "is_debit": False},
+                            {"ledger": "IGST Output", "amount": -6864.41, "is_debit": False}
+                        ],
+                        "tally_master_id": "VCH-GUID-001"
+                    },
+                    {
+                        "date": "20260502", "type": "Purchase", "number": "PUR-101",
+                        "party": "Sharma Traders", "party_gstin": "27AABCS1234F1Z5",
+                        "amount": 25000.00, "taxable_value": 21186.44,
+                        "cgst_amount": 1906.78, "sgst_amount": 1906.78, "igst_amount": 0,
+                        "place_of_supply": "Maharashtra",
+                        "narration": "Purchase of Copper Wire from Sharma Traders, BillNo. ST-485",
+                        "reference_no": "ST-485",
+                        "ledger_entries": [
+                            {"ledger": "Purchase Account", "amount": 21186.44, "is_debit": True},
+                            {"ledger": "CGST Input", "amount": 1906.78, "is_debit": True},
+                            {"ledger": "SGST Input", "amount": 1906.78, "is_debit": True},
+                            {"ledger": "Sharma Traders", "amount": -25000.00, "is_debit": False}
+                        ],
+                        "tally_master_id": "VCH-GUID-002"
+                    },
+                    {
+                        "date": "20260503", "type": "Payment", "number": "VCH-201",
+                        "party": "Rent Expense",
+                        "amount": 40000.00,
+                        "narration": "Office rent for May 2026 paid by NEFT to landlord",
+                        "instrument_number": "NEFT240503",
+                        "ledger_entries": [
+                            {"ledger": "Rent Expense", "amount": 40000.00, "is_debit": True},
+                            {"ledger": "HDFC Bank - Current A/c", "amount": -40000.00, "is_debit": False}
+                        ],
+                        "tally_master_id": "VCH-GUID-003"
+                    },
+                    {
+                        "date": "20260504", "type": "Receipt", "number": "VCH-202",
+                        "party": "Gupta & Sons",
+                        "amount": 20000.00,
+                        "narration": "Part payment received from Gupta & Sons against INV-2026-001",
+                        "instrument_number": "UTR240504",
+                        "bill_refs": [{"name": "INV-2026-001", "type": "Agst Ref", "amount": 20000.00}],
+                        "ledger_entries": [
+                            {"ledger": "HDFC Bank - Current A/c", "amount": 20000.00, "is_debit": True},
+                            {"ledger": "Gupta & Sons", "amount": -20000.00, "is_debit": False}
+                        ],
+                        "tally_master_id": "VCH-GUID-004"
+                    },
+                    {
+                        "date": "20260505", "type": "Sales", "number": "INV-2026-002",
+                        "party": "Cash",
+                        "amount": 15000.00, "taxable_value": 12711.86,
+                        "cgst_amount": 1144.07, "sgst_amount": 1144.07, "igst_amount": 0,
+                        "place_of_supply": "Maharashtra",
+                        "narration": "Counter sale - Aluminum Sheet 4x8 - 1 piece",
+                        "ledger_entries": [
+                            {"ledger": "Cash", "amount": 15000.00, "is_debit": True},
+                            {"ledger": "Sales Account", "amount": -12711.86, "is_debit": False},
+                            {"ledger": "CGST Output", "amount": -1144.07, "is_debit": False},
+                            {"ledger": "SGST Output", "amount": -1144.07, "is_debit": False}
+                        ],
+                        "tally_master_id": "VCH-GUID-005"
+                    }
                 ]
             }
 
@@ -986,18 +1653,111 @@ async def ingest_tally_data(payload: dict):
         pan = ws_response.get("pan", "ABCDE1234F")
         rich_ledgers = ws_response.get("ledgers", [])
         groups = ws_response.get("groups", [])
+        stock_items = ws_response.get("stock_items", [])
         vouchers = ws_response.get("vouchers", [])
-        
+
         name_mismatch = (tally_company.lower() != company.lower())
-        
+
         print(f"[SEED BASELINE] Company: {tally_company} (PAN: {pan}, UI Company: {company}, Mismatch: {name_mismatch})")
-        print(f"[SEED BASELINE] Pulled {len(rich_ledgers)} ledgers, {len(groups)} groups, {len(vouchers)} vouchers")
-        
+        print(f"[SEED BASELINE] Pulled {len(rich_ledgers)} ledgers, {len(groups)} groups, {len(stock_items)} stock items, {len(vouchers)} vouchers")
+
+        # Persist EVERYTHING — vouchers, ledgers, groups, stock items — via upsert (no DELETEs)
         try:
-            db.save_tally_vouchers(tally_company, vouchers)
-            print(f"[SEED BASELINE] Saved {len(vouchers)} vouchers to tally_vouchers table.")
+            v_result = db.save_tally_vouchers(tally_company, vouchers)
+            ledger_count = db.save_tally_ledgers(tally_company, rich_ledgers)
+            group_count = db.save_tally_groups(tally_company, groups)
+            stock_count = db.save_tally_stock_items(tally_company, stock_items)
+            print(f"[SEED BASELINE] Upserted: {v_result.get('upserted',0)} vouchers, {ledger_count} ledgers, {group_count} groups, {stock_count} stock items.")
+            db.log_tally_sync(tally_company, 'baseline',
+                              records_in=len(vouchers)+len(rich_ledgers)+len(groups)+len(stock_items),
+                              records_upserted=v_result.get('upserted',0)+ledger_count+group_count+stock_count,
+                              status='success')
         except Exception as v_err:
-            print(f"[SEED BASELINE] Error saving vouchers: {v_err}")
+            print(f"[SEED BASELINE] Error saving Tally data: {v_err}")
+            db.log_tally_sync(tally_company, 'baseline', 0, 0, 'failed', str(v_err))
+        
+        # =====================================================================
+        # BANK RECONCILIATION AI TRAINING: Seed RAG knowledge base with
+        # historically reconciled transactions from Tally (where bank_date exists)
+        # =====================================================================
+        bank_reco_learned = 0
+        try:
+            conn_br = db.get_conn()
+            cursor_br = conn_br.cursor()
+            
+            for v in vouchers:
+                ledger_entries = v.get("ledger_entries", [])
+                for le in ledger_entries:
+                    bank_allocs = le.get("bank_allocations", [])
+                    for ba in bank_allocs:
+                        bank_date = ba.get("bank_date", "")
+                        if not bank_date:
+                            continue  # Not reconciled in Tally — skip
+                        
+                        # This is a historically reconciled transaction!
+                        instrument_num = ba.get("instrument_number", "")
+                        instrument_date = ba.get("instrument_date", "")
+                        txn_type = ba.get("transaction_type", "")
+                        payment_favouring = ba.get("payment_favouring", "")
+                        ba_amount = ba.get("amount", 0)
+                        ledger_name = le.get("ledger_name", "")
+                        party = v.get("party", "")
+                        narration = v.get("narration", "")
+                        voucher_type = v.get("type", "")
+                        
+                        # Build a rich description for the semantic embedding
+                        desc_parts = [f"bank reconciliation {txn_type}"]
+                        if instrument_num:
+                            desc_parts.append(f"ref {instrument_num}")
+                        if payment_favouring:
+                            desc_parts.append(f"favouring {payment_favouring}")
+                        if narration:
+                            desc_parts.append(f"narration {narration}")
+                        if party:
+                            desc_parts.append(f"party {party}")
+                        desc_text = " ".join(desc_parts)
+                        
+                        # Check duplicate
+                        cursor_br.execute(
+                            "SELECT COUNT(*) FROM knowledge_base WHERE type = 'correction' AND data->>'field' = 'bank_reconciliation' AND data->>'original' = %s AND data->>'corrected' = %s",
+                            (desc_text[:200], ledger_name)
+                        )
+                        if cursor_br.fetchone()[0] > 0:
+                            continue
+                        
+                        data_dict = {
+                            "field": "bank_reconciliation",
+                            "original": desc_text[:200],
+                            "corrected": ledger_name,
+                            "party_name": party or payment_favouring,
+                            "company_name": tally_company,
+                            "instrument_number": instrument_num,
+                            "transaction_type": txn_type,
+                            "voucher_type": voucher_type,
+                            "amount": ba_amount
+                        }
+                        data_json = json.dumps(data_dict)
+                        emb = get_embedding(desc_text)
+                        if emb:
+                            emb_str = f"[{','.join(map(str, emb))}]"
+                            cursor_br.execute(
+                                "INSERT INTO knowledge_base (type, data, embedding) VALUES (%s, %s, %s)",
+                                ('correction', data_json, emb_str)
+                            )
+                        else:
+                            cursor_br.execute(
+                                "INSERT INTO knowledge_base (type, data) VALUES (%s, %s)",
+                                ('correction', data_json)
+                            )
+                        bank_reco_learned += 1
+            
+            conn_br.commit()
+            cursor_br.close()
+            conn_br.close()
+            if bank_reco_learned > 0:
+                print(f"[SEED BASELINE] 🏦 Trained AI on {bank_reco_learned} historical bank reconciliation mappings!")
+        except Exception as br_err:
+            print(f"[SEED BASELINE] Bank reco training error: {br_err}")
         
         # FAST BULK INSERT: Store ledger-group mappings without per-ledger embedding calls
         # Embeddings can be backfilled later via the optimizer — this keeps ingestion instant
@@ -1158,9 +1918,10 @@ async def ingest_tally_data(payload: dict):
         
         return {
             "status": "success",
-            "message": f"Full Tally baseline seed complete! Pulled {len(rich_ledgers)} ledgers, {len(vouchers)} vouchers, {len(groups)} groups from '{tally_company}'. Learned {learned_count} new ledger-group mappings.",
+            "message": f"Full Tally baseline seed complete! Pulled {len(rich_ledgers)} ledgers, {len(vouchers)} vouchers, {len(groups)} groups from '{tally_company}'. Learned {learned_count} ledger-group mappings and {bank_reco_learned} bank reconciliation patterns.",
             "ledgers": active_ledger_names,
             "learned_count": learned_count,
+            "bank_reco_learned": bank_reco_learned,
             "tally_company": tally_company,
             "pan": pan,
             "ui_company": company,
@@ -1171,10 +1932,10 @@ async def ingest_tally_data(payload: dict):
         }
                 
     except Exception as e:
-        print(f"Error in Tally ingestion: {e}")
         import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        tb = traceback.format_exc()
+        print(f"Error in Tally ingestion: {e}\n{tb}")
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 @app.post("/user/update_company_name")
 async def update_company_name_endpoint(payload: dict):
@@ -1386,8 +2147,16 @@ async def api_register(payload: dict):
     success = db.create_user(username, password, role="admin", name=name, email=email, phone=phone, company_name=company_name)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to create user account")
-        
+
+    # Auto-add "Sample Co" as first company for every new user
+    db.add_company_to_user(username, "Sample Co")
+
     user = db.get_user_by_username(username)
+    companies = user.get("companies") or [company_name]
+    # Ensure Sample Co is first in list
+    if "Sample Co" in companies and companies[0] != "Sample Co":
+        companies.remove("Sample Co")
+        companies.insert(0, "Sample Co")
     return {
         "status": "success",
         "user": {
@@ -1397,7 +2166,7 @@ async def api_register(payload: dict):
             "email": user["email"],
             "phone": user["phone"],
             "company_name": user.get("company_name", company_name),
-            "companies": user.get("companies") or [company_name]
+            "companies": companies
         }
     }
 
@@ -1412,7 +2181,15 @@ async def api_login(credentials: dict):
     user = db.get_user_by_username(username)
     if not user or user["password"] != password:
         raise HTTPException(status_code=401, detail="Invalid username or password")
-        
+
+    # Ensure "Sample Co" is available for every user on login
+    companies = user.get("companies") or [user.get("company_name", "Acme Corp")]
+    if isinstance(companies, str):
+        companies = json.loads(companies)
+    if "Sample Co" not in companies:
+        db.add_company_to_user(username, "Sample Co")
+        companies.append("Sample Co")
+
     return {
         "status": "success",
         "user": {
@@ -1422,7 +2199,7 @@ async def api_login(credentials: dict):
             "email": user["email"],
             "phone": user["phone"],
             "company_name": user.get("company_name", "Acme Corp"),
-            "companies": user.get("companies") or [user.get("company_name", "Acme Corp")]
+            "companies": companies
         }
     }
 
@@ -1445,6 +2222,39 @@ async def tally_bridge_status():
     return {"connected_clients": list(tally_connections.keys())}
 
 # ---- Tasks Endpoints ----
+
+@app.post("/tasks/confirm-service-request")
+async def confirm_service_request(request: Request):
+    """User confirmed a service request — now create the task for super admin."""
+    data = await request.json()
+    session_id = data.get("session_id")
+    company_name = data.get("company_name", "")
+    title = data.get("title", "Service Request")
+    description = data.get("description", "")
+    category = data.get("category", "Other")
+    priority = data.get("priority", "Normal")
+    original_message = data.get("original_message", "")
+
+    full_desc = f"[{category}] [{priority}]\n\n{title}\n\n{description}\n\n---\nOriginal user message: {original_message}"
+    task_id = db.create_task(session_id, company_name, full_desc, 'sadmin')
+
+    # Save confirmation message to chat
+    confirm_text = f"✅ Your service request has been raised successfully!\n\n**{title}**\nCategory: {category} | Priority: {priority}\n\nThe YantrAI team will review this and get back to you."
+    msg_id = db.save_chat_message(
+        session_id, "assistant", confirm_text,
+        "task_assigned",
+        {"task_id": task_id, "status": "Requested", "title": title, "description": description, "category": category, "priority": priority}
+    )
+
+    return {
+        "status": "success",
+        "task_id": task_id,
+        "text": confirm_text,
+        "ui_type": "task_assigned",
+        "ui_data": {"task_id": task_id, "status": "Requested", "title": title, "description": description, "category": category, "priority": priority},
+        "id": msg_id,
+        "session_id": session_id
+    }
 
 @app.get("/tasks")
 async def get_tasks(company_name: str = "", role: str = "admin"):

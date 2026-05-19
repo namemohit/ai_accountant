@@ -1,0 +1,59 @@
+{
+  "name": "Bank Statement Reconciliation",
+  "industry": "All",
+  "description": "Reconcile bank statement transactions against Tally vouchers (Payment / Receipt / Contra). Catches missing entries, amount mismatches, and stale uncleared cheques. Supports any Indian bank export format.",
+  "supported_sources": [
+    "HDFC Bank",
+    "ICICI Bank",
+    "SBI",
+    "Axis Bank",
+    "Kotak Mahindra",
+    "Yes Bank",
+    "IDFC First",
+    "RBL Bank",
+    "Other Bank"
+  ],
+  "master_schema": {
+    "voucher_number": ["voucher no", "voucher number", "cheque no", "instrument no", "ref no", "reference"],
+    "date": ["date", "voucher date", "transaction date"],
+    "amount": ["amount", "debit", "credit", "value"],
+    "party_name": ["party", "ledger", "account", "party name", "narration"],
+    "narration": ["narration", "particulars", "description", "remarks"]
+  },
+  "source_schema": {
+    "voucher_number": ["cheque no", "ref no", "utr", "transaction id", "txn id", "instrument no", "reference"],
+    "date": ["date", "txn date", "transaction date", "value date"],
+    "amount": ["amount", "debit", "credit", "withdrawal", "deposit", "value"],
+    "narration": ["narration", "description", "particulars", "details", "remarks"]
+  },
+  "matching_rules": [
+    {
+      "strategy": "exact_id",
+      "field": "voucher_number",
+      "priority": 1
+    },
+    {
+      "strategy": "amount+date",
+      "fields": ["amount", "date"],
+      "amount_tolerance": 1.0,
+      "date_tolerance": 3,
+      "priority": 2
+    },
+    {
+      "strategy": "fuzzy_text+date",
+      "fields": ["narration", "date"],
+      "name_similarity": 0.75,
+      "date_tolerance": 3,
+      "priority": 3
+    }
+  ],
+  "variance_formulas": [
+    {
+      "name": "amount_variance",
+      "label": "Amount Variance",
+      "formula": "master.amount - external.amount",
+      "tolerance": 1.0
+    }
+  ],
+  "default_config": {}
+}

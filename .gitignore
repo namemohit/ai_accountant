@@ -8,3 +8,4 @@ build/
 scratch/
 chat_temp_*
 temp_*
+.claude/

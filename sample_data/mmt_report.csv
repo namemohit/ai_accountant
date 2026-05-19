@@ -1,0 +1,6 @@
+MMT Booking ID,Customer Name,Arrival Date,Departure Date,Hotel Amount,Commission,GST on Commission,TDS,Net Payout,Status
+FAB-1001,Rahul Kumar,2026-05-01,2026-05-03,8000,1600,288,80,6032,Confirmed
+FAB-1004,Neha Verma,2026-05-08,2026-05-10,9500,1900,342,95,7163,Confirmed
+FAB-1005,Karan Mehta,2026-05-12,2026-05-14,15000,3500,630,150,10720,Confirmed
+FAB-1008,Meera Iyer,2026-05-20,2026-05-22,14000,2800,504,140,10556,Confirmed
+FAB-9999,Test Stale Booking,2026-05-25,2026-05-26,7000,1400,252,70,5278,Confirmed

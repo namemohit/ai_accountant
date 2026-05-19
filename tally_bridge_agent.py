@@ -93,30 +93,52 @@ def fetch_local_ledgers(tally_url):
     return ledgers if ledgers else ["Cash", "Sales Account", "Purchase Account", "Bank Account"]
 
 def fetch_rich_ledgers(tally_url):
-    """Fetch full ledger details: name, parent group, closing balance."""
-    xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedgerCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="LedgerCol"><TYPE>Ledger</TYPE><FETCH>Name, Parent, ClosingBalance</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
+    """Fetch full ledger details: name, parent group, closing balance, bank details, GSTIN, PAN, email, phone."""
+    xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedgerCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="LedgerCol"><TYPE>Ledger</TYPE><FETCH>Name, Parent, ClosingBalance, OpeningBalance, BankingConfigBank, BankAccountNumber, IFSCCode, BankBranchName, GSTRegistrationType, PartyGSTIN, PANNo, Email, LedgerPhone, LedgerMobile, Address, CreditPeriod</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
     res = query_local_tally(tally_url, xml, timeout=30.0)
     if not res:
         return [
             {"name": "Cash", "parent": "Cash-in-Hand", "closing_balance": "50000.00"},
-            {"name": "Bank Account", "parent": "Bank Accounts", "closing_balance": "1250000.00"},
+            {"name": "Bank Account", "parent": "Bank Accounts", "closing_balance": "1250000.00", "bank_account_number": "1234567890", "ifsc_code": "HDFC0001234", "bank_name": "HDFC Bank"},
             {"name": "Sales Account", "parent": "Sales Accounts", "closing_balance": "-450000.00"},
             {"name": "Purchase Account", "parent": "Purchase Accounts", "closing_balance": "230000.00"},
             {"name": "GST Payable", "parent": "Duties & Taxes", "closing_balance": "-45000.00"},
             {"name": "Bank Charges A/c", "parent": "Indirect Expenses", "closing_balance": "1500.00"},
-            {"name": "Sharma Traders", "parent": "Sundry Creditors", "closing_balance": "-150000.00"},
-            {"name": "Gupta & Sons", "parent": "Sundry Debtors", "closing_balance": "280000.00"},
+            {"name": "Sharma Traders", "parent": "Sundry Creditors", "closing_balance": "-150000.00", "gstin": "07AAAAA0000A1Z5", "pan": "AAAAA0000A"},
+            {"name": "Gupta & Sons", "parent": "Sundry Debtors", "closing_balance": "280000.00", "gstin": "07BBBBB0000B1Z5", "pan": "BBBBB0000B"},
             {"name": "Rent Expense", "parent": "Indirect Expenses", "closing_balance": "40000.00"},
             {"name": "Salary Expense", "parent": "Indirect Expenses", "closing_balance": "120000.00"},
             {"name": "CGST Input", "parent": "Duties & Taxes", "closing_balance": "12000.00"},
             {"name": "SGST Input", "parent": "Duties & Taxes", "closing_balance": "12000.00"},
             {"name": "IGST Output", "parent": "Duties & Taxes", "closing_balance": "-35000.00"}
         ]
-    ledger_blocks = re.findall(
-        r'<LEDGER NAME="([^"]*)"[^>]*>.*?<PARENT[^>]*>(.*?)</PARENT>.*?<CLOSINGBALANCE[^>]*>(.*?)</CLOSINGBALANCE>.*?</LEDGER>',
-        res, re.DOTALL
-    )
-    return [{"name": name, "parent": parent.strip(), "closing_balance": bal.strip()} for name, parent, bal in ledger_blocks]
+    # Parse each ledger block with all available fields
+    ledger_blocks = re.findall(r'<LEDGER NAME="([^"]*)"[^>]*>(.*?)</LEDGER>', res, re.DOTALL)
+    results = []
+    for name, block in ledger_blocks:
+        def extract(tag, blk=block):
+            m = re.search(rf'<{tag}[^>]*>(.*?)</{tag}>', blk, re.DOTALL | re.IGNORECASE)
+            return m.group(1).strip() if m else ""
+        ledger = {
+            "name": name,
+            "parent": extract("PARENT"),
+            "closing_balance": extract("CLOSINGBALANCE"),
+            "opening_balance": extract("OPENINGBALANCE"),
+            "bank_name": extract("BANKINGCONFIGBANK"),
+            "bank_account_number": extract("BANKACCOUNTNUMBER"),
+            "ifsc_code": extract("IFSCCODE"),
+            "bank_branch": extract("BANKBRANCHNAME"),
+            "gst_type": extract("GSTREGISTRATIONTYPE"),
+            "gstin": extract("PARTYGSTIN"),
+            "pan": extract("PANNO"),
+            "email": extract("EMAIL"),
+            "phone": extract("LEDGERPHONE"),
+            "mobile": extract("LEDGERMOBILE"),
+            "credit_period": extract("CREDITPERIOD"),
+        }
+        # Only include non-empty extras
+        results.append({k: v for k, v in ledger.items() if v})
+    return results if results else [{"name": "Cash", "parent": "Cash-in-Hand", "closing_balance": "50000.00"}]
 
 def fetch_groups(tally_url):
     """Fetch all account groups."""
@@ -128,24 +150,127 @@ def fetch_groups(tally_url):
     return groups
 
 def fetch_vouchers(tally_url):
-    """Fetch all vouchers with date, type, number, party, amount."""
-    xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>VchCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="VchCol"><TYPE>Voucher</TYPE><FETCH>Date, VoucherTypeName, VoucherNumber, PartyLedgerName, Amount</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
-    res = query_local_tally(tally_url, xml, timeout=30.0)
+    """Fetch all vouchers with full details: date, type, number, party, amount, narration, GUID,
+    ledger entries (with bank allocations and bill allocations) for AI training."""
+    xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>VchCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="VchCol"><TYPE>Voucher</TYPE><FETCH>Date, VoucherTypeName, VoucherNumber, PartyLedgerName, Amount, Narration, GUID, ReferenceNumber, ReferenceDate, PlaceOfSupply, AllLedgerEntries, AllLedgerEntries.BankAllocations, AllLedgerEntries.BillAllocations</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
+    res = query_local_tally(tally_url, xml, timeout=60.0)
     if not res:
         return [
-            {"date": "20260501", "type": "Sales", "party": "Gupta & Sons", "number": "INV-2026-001", "amount": 45000.00},
-            {"date": "20260502", "type": "Purchase", "party": "Sharma Traders", "number": "PUR-101", "amount": 25000.00},
-            {"date": "20260503", "type": "Payment", "party": "Rent Expense", "number": "VCH-201", "amount": 40000.00},
-            {"date": "20260504", "type": "Receipt", "party": "Gupta & Sons", "number": "VCH-202", "amount": 20000.00},
-            {"date": "20260505", "type": "Sales", "party": "Cash", "number": "INV-2026-002", "amount": 15000.00}
+            {"date": "20260501", "type": "Sales", "party": "Gupta & Sons", "number": "INV-2026-001", "amount": 45000.00, "narration": "Sale of coffee beans"},
+            {"date": "20260502", "type": "Purchase", "party": "Sharma Traders", "number": "PUR-101", "amount": 25000.00, "narration": "Purchase of green tea"},
+            {"date": "20260503", "type": "Payment", "party": "Rent Expense", "number": "VCH-201", "amount": 40000.00, "narration": "Office rent May 2026",
+             "ledger_entries": [
+                 {"ledger_name": "Rent Expense", "amount": 40000.0},
+                 {"ledger_name": "Bank Account", "amount": -40000.0, "bank_allocations": [
+                     {"instrument_number": "CHQ001234", "instrument_date": "20260503", "bank_date": "20260505", "transaction_type": "Cheque", "payment_favouring": "Landlord Corp", "amount": 40000.0}
+                 ]}
+             ]},
+            {"date": "20260504", "type": "Receipt", "party": "Gupta & Sons", "number": "VCH-202", "amount": 20000.00, "narration": "Against INV-2026-001",
+             "ledger_entries": [
+                 {"ledger_name": "Bank Account", "amount": -20000.0, "bank_allocations": [
+                     {"instrument_number": "NEFT-REF-98765", "instrument_date": "20260504", "bank_date": "20260504", "transaction_type": "NEFT", "payment_favouring": "Gupta & Sons", "amount": 20000.0}
+                 ]},
+                 {"ledger_name": "Gupta & Sons", "amount": 20000.0}
+             ]},
+            {"date": "20260505", "type": "Sales", "party": "Cash", "number": "INV-2026-002", "amount": 15000.00, "narration": "Counter sale"}
         ]
-    voucher_blocks = re.findall(
-        r'<VOUCHER[^>]*>.*?<DATE[^>]*>(\d+)</DATE>.*?<VOUCHERTYPENAME>(.*?)</VOUCHERTYPENAME>.*?<PARTYLEDGERNAME[^>]*>(.*?)</PARTYLEDGERNAME>.*?<VOUCHERNUMBER>(.*?)</VOUCHERNUMBER>.*?</VOUCHER>',
-        res, re.DOTALL
-    )
+    # Parse voucher XML with regex for robustness (Tally XML is not always well-formed)
+    voucher_blocks = re.findall(r'<VOUCHER[^>]*>(.*?)</VOUCHER>', res, re.DOTALL)
     vouchers = []
-    for date_raw, vtype, party, vnum in voucher_blocks:
-        vouchers.append({"date": date_raw, "type": vtype, "party": party, "number": vnum})
+    for vblock in voucher_blocks:
+        def vext(tag, blk=vblock):
+            m = re.search(rf'<{tag}[^>]*>(.*?)</{tag}>', blk, re.DOTALL | re.IGNORECASE)
+            return m.group(1).strip() if m else ""
+
+        date_raw = vext("DATE")
+        vtype = vext("VOUCHERTYPENAME")
+        party = vext("PARTYLEDGERNAME")
+        vnum = vext("VOUCHERNUMBER")
+        narration = vext("NARRATION")
+        guid = vext("GUID")
+        ref_num = vext("REFERENCENUMBER")
+        ref_date = vext("REFERENCEDATE")
+        place_of_supply = vext("PLACEOFSUPPLY")
+
+        # Parse amount
+        amount_str = vext("AMOUNT")
+        try:
+            amount = abs(float(amount_str.replace(",", "")))
+        except:
+            amount = 0.0
+
+        # Parse ledger entries
+        ledger_entries = []
+        le_blocks = re.findall(r'<ALLLEDGERENTRIES\.LIST>(.*?)</ALLLEDGERENTRIES\.LIST>', vblock, re.DOTALL)
+        for le in le_blocks:
+            def le_ext(tag, blk=le):
+                m = re.search(rf'<{tag}[^>]*>(.*?)</{tag}>', blk, re.DOTALL | re.IGNORECASE)
+                return m.group(1).strip() if m else ""
+            le_name = le_ext("LEDGERNAME")
+            le_amt_str = le_ext("AMOUNT")
+            try:
+                le_amt = float(le_amt_str.replace(",", ""))
+            except:
+                le_amt = 0.0
+            le_entry = {"ledger_name": le_name, "amount": le_amt}
+
+            # Parse bank allocations
+            ba_blocks = re.findall(r'<BANKALLOCATIONS\.LIST>(.*?)</BANKALLOCATIONS\.LIST>', le, re.DOTALL)
+            if ba_blocks:
+                bank_allocs = []
+                for ba in ba_blocks:
+                    def ba_ext(tag, blk=ba):
+                        m = re.search(rf'<{tag}[^>]*>(.*?)</{tag}>', blk, re.DOTALL | re.IGNORECASE)
+                        return m.group(1).strip() if m else ""
+                    ba_amt_str = ba_ext("AMOUNT")
+                    try:
+                        ba_amt = abs(float(ba_amt_str.replace(",", "")))
+                    except:
+                        ba_amt = 0.0
+                    bank_allocs.append({
+                        "instrument_number": ba_ext("INSTRUMENTNUMBER"),
+                        "instrument_date": ba_ext("INSTRUMENTDATE"),
+                        "bank_date": ba_ext("BANKERSDATE") or ba_ext("BANKDATE"),
+                        "transaction_type": ba_ext("TRANSACTIONTYPE"),
+                        "payment_favouring": ba_ext("PAYMENTFAVOURING"),
+                        "amount": ba_amt
+                    })
+                le_entry["bank_allocations"] = bank_allocs
+
+            # Parse bill allocations
+            bill_blocks = re.findall(r'<BILLALLOCATIONS\.LIST>(.*?)</BILLALLOCATIONS\.LIST>', le, re.DOTALL)
+            if bill_blocks:
+                bill_allocs = []
+                for bill in bill_blocks:
+                    def bi_ext(tag, blk=bill):
+                        m = re.search(rf'<{tag}[^>]*>(.*?)</{tag}>', blk, re.DOTALL | re.IGNORECASE)
+                        return m.group(1).strip() if m else ""
+                    bi_amt_str = bi_ext("AMOUNT")
+                    try:
+                        bi_amt = float(bi_amt_str.replace(",", ""))
+                    except:
+                        bi_amt = 0.0
+                    bill_allocs.append({
+                        "bill_type": bi_ext("BILLTYPE"),
+                        "name": bi_ext("NAME"),
+                        "amount": bi_amt
+                    })
+                le_entry["bill_allocations"] = bill_allocs
+
+            ledger_entries.append(le_entry)
+
+        voucher = {"date": date_raw, "type": vtype, "party": party, "number": vnum, "amount": amount, "narration": narration}
+        if guid:
+            voucher["guid"] = guid
+        if ref_num:
+            voucher["reference_number"] = ref_num
+        if ref_date:
+            voucher["reference_date"] = ref_date
+        if place_of_supply:
+            voucher["place_of_supply"] = place_of_supply
+        if ledger_entries:
+            voucher["ledger_entries"] = ledger_entries
+        vouchers.append(voucher)
     return vouchers
 
 def fetch_tally_company_info(tally_url):

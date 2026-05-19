@@ -1,0 +1,120 @@
+{
+  "name": "Hotels — OTA Reconciliation",
+  "industry": "Hospitality",
+  "description": "Reconcile a hotel's consolidated booking file (from PMS) against transaction reports from OTAs like MakeMyTrip, Goibibo, OYO, Booking.com, Agoda. Verifies gross amounts, commission rates, GST on commission, TDS deductions, and net payouts.",
+  "supported_sources": [
+    "MakeMyTrip",
+    "Goibibo",
+    "OYO",
+    "Booking.com",
+    "Agoda",
+    "Direct"
+  ],
+  "master_schema": {
+    "booking_id": ["booking id", "booking ref", "pms ref", "confirmation number", "reservation id", "booking number"],
+    "guest_name": ["guest name", "customer name", "pax name", "primary guest", "name"],
+    "check_in": ["check in", "checkin", "arrival date", "arrival", "from date"],
+    "check_out": ["check out", "checkout", "departure date", "departure", "to date"],
+    "room_type": ["room type", "room category", "category"],
+    "room_nights": ["room nights", "nights", "no of nights"],
+    "gross_amount": ["amount", "gross amount", "total", "booking value", "room charges", "total amount"],
+    "source_platform": ["source", "channel", "platform", "booking source", "ota"]
+  },
+  "source_schema": {
+    "booking_id": ["booking id", "mmt booking id", "ota ref", "confirmation number", "booking reference", "reservation id"],
+    "guest_name": ["guest name", "customer name", "pax name"],
+    "check_in": ["check in", "checkin", "arrival date", "arrival"],
+    "check_out": ["check out", "checkout", "departure date", "departure"],
+    "gross_amount": ["hotel amount", "gross amount", "booking value", "total", "room charges", "total amount"],
+    "commission_amount": ["commission", "ota commission", "mmt commission", "commission amount", "agent commission"],
+    "gst_on_commission": ["gst on commission", "gst commission", "service tax on commission", "gst"],
+    "tds_amount": ["tds", "tds deducted", "tds amount", "withholding tax"],
+    "net_payout": ["net payout", "net payable", "settlement amount", "payout", "net amount"],
+    "booking_status": ["status", "booking status", "reservation status"]
+  },
+  "matching_rules": [
+    {
+      "strategy": "exact_id",
+      "field": "booking_id",
+      "priority": 1
+    },
+    {
+      "strategy": "fuzzy_text+date",
+      "fields": ["guest_name", "check_in"],
+      "name_similarity": 0.85,
+      "date_tolerance": 1,
+      "priority": 2
+    },
+    {
+      "strategy": "amount+date",
+      "fields": ["gross_amount", "check_in"],
+      "amount_tolerance": 1.0,
+      "date_tolerance": 2,
+      "priority": 3
+    }
+  ],
+  "variance_formulas": [
+    {
+      "name": "gross_variance",
+      "label": "Gross Amount Variance",
+      "formula": "master.gross_amount - external.gross_amount",
+      "tolerance": 1.0
+    },
+    {
+      "name": "commission_expected",
+      "label": "Expected Commission",
+      "formula": "external.gross_amount * config.commission_rate / 100"
+    },
+    {
+      "name": "commission_variance",
+      "label": "Commission Variance",
+      "formula": "external.commission_amount - (external.gross_amount * config.commission_rate / 100)",
+      "tolerance": 5.0
+    },
+    {
+      "name": "gst_expected",
+      "label": "Expected GST on Commission",
+      "formula": "external.commission_amount * 0.18"
+    },
+    {
+      "name": "gst_variance",
+      "label": "GST on Commission Variance",
+      "formula": "external.gst_on_commission - (external.commission_amount * 0.18)",
+      "tolerance": 1.0
+    },
+    {
+      "name": "tds_expected",
+      "label": "Expected TDS (1% u/s 194-O)",
+      "formula": "external.gross_amount * 0.01"
+    },
+    {
+      "name": "tds_variance",
+      "label": "TDS Variance",
+      "formula": "external.tds_amount - (external.gross_amount * 0.01)",
+      "tolerance": 1.0
+    },
+    {
+      "name": "net_payout_expected",
+      "label": "Expected Net Payout",
+      "formula": "external.gross_amount - external.commission_amount - external.gst_on_commission - external.tds_amount"
+    },
+    {
+      "name": "net_payout_variance",
+      "label": "Net Payout Variance",
+      "formula": "external.net_payout - (external.gross_amount - external.commission_amount - external.gst_on_commission - external.tds_amount)",
+      "tolerance": 1.0
+    }
+  ],
+  "default_config": {
+    "commission_rates": {
+      "MakeMyTrip": 20.0,
+      "Goibibo": 20.0,
+      "OYO": 25.0,
+      "Booking.com": 15.0,
+      "Agoda": 18.0,
+      "Direct": 0.0
+    },
+    "tds_rate": 1.0,
+    "gst_rate_on_commission": 18.0
+  }
+}

@@ -1,0 +1,9 @@
+Booking ID,Guest Name,Check In,Check Out,Room Type,Amount,Source
+FAB-1001,Rahul Kumar,2026-05-01,2026-05-03,Deluxe,8000,MakeMyTrip
+FAB-1002,Priya Sharma,2026-05-02,2026-05-04,Suite,12000,Goibibo
+FAB-1003,Amit Singh,2026-05-05,2026-05-06,Standard,5000,Direct
+FAB-1004,Neha Verma,2026-05-08,2026-05-10,Deluxe,9500,MakeMyTrip
+FAB-1005,Karan Mehta,2026-05-12,2026-05-14,Suite,15000,MakeMyTrip
+FAB-1006,Anjali Roy,2026-05-15,2026-05-17,Deluxe,10000,Booking.com
+FAB-1007,Sandeep Patel,2026-05-18,2026-05-19,Standard,4500,OYO
+FAB-1008,Meera Iyer,2026-05-20,2026-05-22,Suite,14000,MakeMyTrip
