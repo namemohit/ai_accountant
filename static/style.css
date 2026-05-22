@@ -25,6 +25,7 @@ body {
   color: var(--text);
   height: 100vh;
   height: 100dvh;
+  height: var(--app-height, 100dvh);   /* JS sets --app-height = visible innerHeight on mobile */
   overflow: hidden;
   display: flex;
   -webkit-font-smoothing: antialiased;
@@ -40,6 +41,7 @@ body {
   border-right: 1px solid var(--border);
   height: 100vh;
   height: 100dvh;
+  height: var(--app-height, 100dvh);
   padding: 24px;
   display: flex;
   flex-direction: column;
@@ -343,6 +345,7 @@ body {
   flex-direction: column;
   height: 100vh;
   height: 100dvh;
+  height: var(--app-height, 100dvh);
   overflow: hidden;
   min-width: 0;          /* allow flex children to shrink */
 }
@@ -761,55 +764,54 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
 
 .chat-input-wrapper {
   display: flex;
-  align-items: flex-end;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
   background: var(--bg-light);
   border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 8px 10px;
+  border-radius: 24px;
+  padding: 6px 8px 6px 6px;
   transition: border-color 0.2s;
 }
 .chat-input-wrapper:focus-within { border-color: rgba(218,119,86,0.4); }
 
 .chat-input-wrapper textarea {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;                 /* allow the field to shrink within the flex row */
   border: none;
   background: transparent;
   color: var(--text);
   font-family: 'Inter', sans-serif;
-  font-size: 0.9rem;
+  font-size: 0.95rem;
   resize: none;
   outline: none;
-  line-height: 1.5;
+  line-height: 1.4;
   max-height: 120px;
-  padding: 4px 0;
+  padding: 8px 4px;
+  overflow-y: auto;
 }
 .chat-input-wrapper textarea::placeholder { color: #6b6359; }
+/* hide the textarea scrollbar (the stray up/down arrows on mobile) */
+.chat-input-wrapper textarea { scrollbar-width: none; }
+.chat-input-wrapper textarea::-webkit-scrollbar { width: 0; height: 0; display: none; }
 
-/* Action buttons in input */
-.attachment-btn, .camera-btn {
+/* Action buttons in input — all the same circular size, vertically centered */
+.attachment-btn, .camera-btn, .mic-btn {
+  flex-shrink: 0;
+  width: 38px; height: 38px;
+  display: flex; align-items: center; justify-content: center;
   background: none;
   border: none;
   color: var(--text-secondary);
   font-size: 1.1rem;
-  padding: 6px;
+  padding: 0;
   cursor: pointer;
-  transition: color 0.2s;
-  border-radius: 6px;
+  transition: color 0.2s, background 0.2s;
+  border-radius: 50%;
 }
-.attachment-btn:hover, .camera-btn:hover { color: var(--primary); }
-
-.mic-btn {
-  background: none;
-  border: none;
-  color: var(--text-secondary);
-  font-size: 1.1rem;
-  padding: 6px;
-  cursor: pointer;
-  transition: all 0.2s;
-  border-radius: 6px;
+.attachment-btn:hover, .camera-btn:hover, .mic-btn:hover {
+  color: var(--primary);
+  background: rgba(218,119,86,0.1);
 }
-.mic-btn:hover { color: var(--primary); }
 .mic-btn.recording {
   color: #ef4444 !important;
   animation: pulse-red 1.2s infinite;
@@ -821,8 +823,8 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
 }
 
 .send-btn {
-  width: 34px; height: 34px;
-  border-radius: 10px;
+  width: 38px; height: 38px;
+  border-radius: 50%;
   border: none;
   background: var(--primary);
   color: white;
@@ -830,7 +832,7 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
   cursor: pointer;
   transition: all 0.2s;
   flex-shrink: 0;
-  font-size: 0.85rem;
+  font-size: 0.9rem;
 }
 .send-btn:hover { filter: brightness(1.15); }
 
@@ -870,6 +872,57 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
 }
 .attachment-tag .close { cursor: pointer; font-size: 0.7rem; opacity: 0.6; }
 .attachment-tag .close:hover { opacity: 1; }
+
+/* ===== "+" Add menu (Claude-style attachment menu) ===== */
+.add-menu-popup {
+  background: var(--bg-surface, #1e1b18);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 6px;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.5);
+}
+.add-menu-popup--sheet {
+  border: none;
+  border-top: 1px solid var(--border);
+  border-radius: 18px 18px 0 0;
+  box-shadow: 0 -10px 30px rgba(0,0,0,0.45);
+}
+.add-menu-popup .ami-handle {
+  width: 38px; height: 4px; border-radius: 2px;
+  background: rgba(255,255,255,0.18);
+  margin: 4px auto 10px;
+}
+.add-menu-popup .ami-section {
+  padding: 8px 12px 4px; color: #8a8178;
+  font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;
+}
+.add-menu-popup .ami-divider { height: 1px; background: rgba(255,255,255,0.06); margin: 6px 8px; }
+.add-menu-item {
+  display: flex; align-items: center; gap: 12px;
+  width: 100%; padding: 9px 10px;
+  background: none; border: none; color: var(--text);
+  text-align: left; cursor: pointer; border-radius: 12px;
+  transition: background 0.15s;
+}
+.add-menu-item:hover, .add-menu-item:active { background: rgba(218,119,86,0.12); }
+.add-menu-item .ami-ic {
+  flex-shrink: 0; width: 40px; height: 40px; border-radius: 11px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.25rem; background: var(--bg-light); border: 1px solid var(--border);
+}
+.add-menu-item .ami-txt { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.add-menu-item .ami-label { font-weight: 600; font-size: 0.92rem; }
+.add-menu-item .ami-hint { font-size: 0.74rem; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 768px) {
+  .add-menu-item { padding: 12px 12px; }
+  .add-menu-item .ami-ic { width: 44px; height: 44px; }
+  .add-menu-item .ami-label { font-size: 1rem; }
+}
+
+/* Sprint 41 — collapsible filter bar (mobile only).
+   Desktop: toggle hidden, controls always shown as a flex row. */
+.filter-toggle { display: none; }
+.filter-body { display: flex; }
 
 /* Interactive Table */
 .chat-ui-table-container {
@@ -1037,6 +1090,29 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
 
   .sidebar { display: none; }
 
+  /* Sprint 41 — collapse filter controls behind a toggle; stats stay slim */
+  .filter-toggle {
+    display: flex; justify-content: space-between; align-items: center;
+    width: 100%; padding: 9px 12px; cursor: pointer;
+    background: var(--bg-light); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--text); font-size: 0.85rem; font-weight: 600;
+  }
+  .filter-toggle .filter-count {
+    background: var(--primary); color: #fff; border-radius: 10px;
+    padding: 0 7px; font-size: 0.72rem; margin-left: 6px;
+  }
+  .filter-toggle .filter-count:empty { display: none; }
+  .filter-toggle .fa-chevron-down { transition: transform 0.2s; }
+  .card.filters-open .filter-toggle .fa-chevron-down { transform: rotate(180deg); }
+  .filter-body { display: none !important; margin-top: 10px; width: 100%; }
+  .card.filters-open .filter-body { display: flex !important; }
+  /* slim, one-line scrollable stats strip */
+  #bank-stats, #voucher-stats {
+    flex-wrap: nowrap !important; overflow-x: auto; -webkit-overflow-scrolling: touch;
+    white-space: nowrap; gap: 10px !important;
+  }
+  #bank-stats > span, #voucher-stats > span { flex-shrink: 0; }
+
   .mobile-header { display: flex; }
   .mobile-drawer { display: flex; }
 
@@ -1045,6 +1121,7 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
     padding-top: 52px;       /* height of mobile header */
     height: 100vh;
     height: 100dvh;
+    height: var(--app-height, 100dvh);
   }
 
   .dashboard-view { max-width: 100%; padding: 16px !important; }
@@ -1105,7 +1182,7 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
     border-top: 1px solid var(--border);
   }
 
-  .chat-input-wrapper { border-radius: 12px; padding: 6px 8px; }
+  .chat-input-wrapper { border-radius: 24px; padding: 5px 6px; }
   .chat-input-wrapper textarea { font-size: 16px; /* prevent iOS zoom */ }
 
   .chat-welcome { padding: 24px 16px; }

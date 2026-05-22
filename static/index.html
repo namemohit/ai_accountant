@@ -405,10 +405,10 @@
                             <div class="chat-input-wrapper">
                                 <input type="file" id="chat-file-input" style="display: none;" accept="image/*,.pdf,.csv,.xlsx,.xls"><!-- single-file by design; multi-attach goes through Bulk Excel -->
                                 <input type="file" id="chat-camera-input" style="display: none;" accept="image/*" capture="environment">
-                                <button type="button" class="attachment-btn" id="composer-add-btn" onclick="openAddMenu(this)" title="Add file, voice, statement…" style="cursor: pointer; display: flex; align-items: center; justify-content: center;"><i class="fas fa-plus"></i></button>
-                                <label class="camera-btn" for="chat-camera-input" title="Take photo" style="cursor: pointer; display: flex; align-items: center; justify-content: center;"><i class="fas fa-camera"></i></label>
-                                <textarea id="chat-input" placeholder="Ask about your accounts...  (type / to mention a party, item or ledger)" rows="1" onkeydown="handleChatKey(event)" oninput="handleChatSlashInput(event)"></textarea>
-                                <button class="mic-btn" id="chat-mic-btn" title="Voice Input (Hold to talk, Click to toggle)" style="cursor: pointer; display: flex; align-items: center; justify-content: center;"><i class="fas fa-microphone"></i></button>
+                                <button type="button" class="attachment-btn" id="composer-add-btn" onclick="openAddMenu(this)" title="Add file, voice, statement…"><i class="fas fa-plus"></i></button>
+                                <button type="button" class="camera-btn" id="composer-camera-btn" onclick="openCameraCapture()" title="Take photo"><i class="fas fa-camera"></i></button>
+                                <textarea id="chat-input" placeholder="Ask about your accounts…" rows="1" onkeydown="handleChatKey(event)" oninput="handleChatSlashInput(event)"></textarea>
+                                <button class="mic-btn" id="chat-mic-btn" title="Hold to talk · tap to toggle"><i class="fas fa-microphone"></i></button>
                                 <button class="send-btn" id="send-chat" onclick="sendMessage()" style="display:none;"><i class="fas fa-paper-plane"></i></button>
                                 <div id="chat-slash-menu" style="display:none;"></div>
                             </div>
@@ -491,11 +491,17 @@
                         <h3 style="margin-bottom: 4px;">👥 Business Party Profiles</h3>
                         <p style="color: #94a3b8; font-size: 0.85rem;">Autonomous accounts learned from invoice headers, containing verified GSTINs and bank payout configurations.</p>
                     </div>
-                    <div style="display: flex; gap: 12px; align-items: center;">
+                    <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+                        <button type="button" class="filter-toggle" onclick="toggleFilters(this)">
+                            <span><i class="fas fa-sliders-h"></i> Filters <span class="filter-count"></span></span>
+                            <i class="fas fa-chevron-down"></i>
+                        </button>
+                        <div class="filter-body" style="gap: 12px; align-items: center;">
                         <input type="text" id="party-search" placeholder="Search parties..." oninput="filterPartyMaster()" style="padding: 8px 14px; border-radius: 6px; background: var(--bg-light); color: white; border: 1px solid var(--border); font-size: 0.85rem; outline: none; width: 220px;">
                         <select id="party-ai-gap-filter" onchange="filterPartyMaster()" title="Filter to parties with a pending AI suggestion" style="padding: 8px 12px; border-radius: 6px; background: var(--bg-light); color: white; border: 1px solid var(--border); font-size: 0.85rem;">
                             <option value="">🤖 AI Gap: all</option>
                         </select>
+                        </div>
                         <button class="btn" onclick="openAddPartyModal()" style="padding: 8px 14px; border-radius: 6px; font-weight: bold; background: var(--accent); color: white; border: none; cursor: pointer; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 6px;"><i class="fas fa-plus"></i> Add Party</button>
                     </div>
                 </div>
@@ -527,11 +533,17 @@
                         <h3 style="margin-bottom: 4px;">📦 Inventory Item Master</h3>
                         <p style="color: #94a3b8; font-size: 0.85rem;">Autonomous items learned from confirmed invoices, grouped by name to track procuring prices and source vendors.</p>
                     </div>
-                    <div style="display: flex; gap: 12px; align-items: center;">
+                    <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+                        <button type="button" class="filter-toggle" onclick="toggleFilters(this)">
+                            <span><i class="fas fa-sliders-h"></i> Filters <span class="filter-count"></span></span>
+                            <i class="fas fa-chevron-down"></i>
+                        </button>
+                        <div class="filter-body" style="gap: 12px; align-items: center;">
                         <input type="text" id="item-search" placeholder="Search items..." oninput="filterItemMaster()" style="padding: 8px 14px; border-radius: 6px; background: var(--bg-light); color: white; border: 1px solid var(--border); font-size: 0.85rem; outline: none; width: 220px;">
                         <select id="item-ai-gap-filter" onchange="filterItemMaster()" title="Filter to items with a pending AI suggestion" style="padding: 8px 12px; border-radius: 6px; background: var(--bg-light); color: white; border: 1px solid var(--border); font-size: 0.85rem;">
                             <option value="">🤖 AI Gap: all</option>
                         </select>
+                        </div>
                     </div>
                 </div>
                 
@@ -597,8 +609,12 @@
                 <!-- Sticky controls block — filters + thin stats strip only -->
                 <div style="position: sticky; top: 56px; z-index: 40; background: var(--bg); padding-bottom: 4px;">
                 <div class="card" style="margin-top: 0; padding: 10px 14px;">
+                    <button type="button" class="filter-toggle" onclick="toggleFilters(this)">
+                        <span><i class="fas fa-sliders-h"></i> Filters <span class="filter-count"></span></span>
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
                     <!-- Filters + sort + view toggle -->
-                    <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                    <div class="filter-body" style="gap: 8px; flex-wrap: wrap; align-items: center;">
                         <!-- Sprint 15 — Source filter dropped; Bank Reco shows only tally+statement rows by server-side floor.
                              The hidden input preserves backward-compat for any code still reading the value. -->
                         <input type="hidden" id="bank-filter-source" value="">
@@ -1131,8 +1147,12 @@
                 <!-- Sticky controls (filters + thin stats strip) -->
                 <div style="position: sticky; top: 56px; z-index: 40; background: var(--bg); padding-bottom: 4px;">
                     <div class="card" style="margin-top: 0; padding: 10px 14px;">
+                        <button type="button" class="filter-toggle" onclick="toggleFilters(this)">
+                            <span><i class="fas fa-sliders-h"></i> Filters <span class="filter-count"></span></span>
+                            <i class="fas fa-chevron-down"></i>
+                        </button>
                         <!-- Sprint 21 — Rich filter bar (multi-type, date range, party, amount, sort) -->
-                        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                        <div class="filter-body" style="gap: 8px; flex-wrap: wrap; align-items: center;">
                             <!-- Sprint 21 — Multi-select voucher type as a button-popover.
                                  Native <select multiple> renders blank options on Windows/Chrome dark mode
                                  because <option> can't be CSS-styled. This custom popover sidesteps that. -->
@@ -1953,6 +1973,56 @@
         const API = window.location.origin;
         let currentSessionId = null;
         let selectedFile = null;
+
+        // ── Mobile viewport height fix ──────────────────────────────────
+        // Some mobile browsers/webviews report 100vh as the *tallest* layout
+        // viewport (toolbars hidden), which—combined with body{overflow:hidden}
+        // —pushes the chat composer below the visible area. Pin the app to the
+        // true visible height via a CSS var, updated on resize/orientation.
+        function setAppHeight() {
+            const h = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+            document.documentElement.style.setProperty('--app-height', h + 'px');
+        }
+        setAppHeight();
+        window.addEventListener('resize', setAppHeight);
+        window.addEventListener('orientationchange', () => setTimeout(setAppHeight, 100));
+        if (window.visualViewport) window.visualViewport.addEventListener('resize', setAppHeight);
+
+        // ── Sprint 41 — collapsible filter bars (mobile) ────────────────
+        function toggleFilters(btn) {
+            const card = btn.closest('.card');
+            if (card) card.classList.toggle('filters-open');
+        }
+        function updateFilterCount(card) {
+            if (!card) return;
+            const body = card.querySelector('.filter-body');
+            const badge = card.querySelector('.filter-toggle .filter-count');
+            if (!body || !badge) return;
+            let n = 0;
+            body.querySelectorAll('input, select').forEach(el => {
+                if (el.type === 'hidden' || el.type === 'radio') return;
+                const id = el.id || '';
+                if (id === 'bank-sort' || id === 'vf-sort') return;   // sort isn't a filter
+                if (el.tagName === 'SELECT') { if (el.selectedIndex > 0) n++; }
+                else if ((el.value || '').trim() !== '') n++;
+            });
+            // Voucher type popover button (not an <input>)
+            const vt = body.querySelector('#vf-types-label');
+            if (vt) { const t = vt.textContent.trim(); if (t && t !== 'All types') n++; }
+            badge.textContent = n > 0 ? String(n) : '';
+        }
+        function _refreshAllFilterCounts() {
+            document.querySelectorAll('.card .filter-body').forEach(b => updateFilterCount(b.closest('.card')));
+        }
+        document.addEventListener('input', e => {
+            const b = e.target.closest && e.target.closest('.filter-body');
+            if (b) updateFilterCount(b.closest('.card'));
+        });
+        document.addEventListener('change', e => {
+            const b = e.target.closest && e.target.closest('.filter-body');
+            if (b) updateFilterCount(b.closest('.card'));
+        });
+        window.addEventListener('load', () => setTimeout(_refreshAllFilterCounts, 300));
 
         // Global Media Viewer Modal logic
         window.openMediaModal = (src) => {
@@ -11217,23 +11287,18 @@
         // button on chat opens the SAME menu. One menu element, two triggers.
 
         function _addMenuItem(emoji, label, hint, handlerName) {
-            return `<button class="add-menu-item" onclick="closeAddMenu(); _addMenu.${handlerName}();" type="button"
-                            style="display:flex; align-items:center; gap:12px; padding:10px 14px; width:100%;
-                                   background:none; border:none; color:#e2e8f0; text-align:left; cursor:pointer;
-                                   font-size:0.9rem; border-radius:8px;"
-                            onmouseover="this.style.background='rgba(56,189,248,0.08)';"
-                            onmouseout="this.style.background='none';">
-                        <span style="font-size:1.4rem; flex-shrink:0;">${emoji}</span>
-                        <span style="display:flex; flex-direction:column; gap:2px;">
-                            <span style="font-weight:600;">${label}</span>
-                            <span style="font-size:0.72rem; color:#94a3b8;">${hint}</span>
+            return `<button class="add-menu-item" type="button" onclick="closeAddMenu(); _addMenu.${handlerName}();">
+                        <span class="ami-ic">${emoji}</span>
+                        <span class="ami-txt">
+                            <span class="ami-label">${label}</span>
+                            <span class="ami-hint">${hint}</span>
                         </span>
                     </button>`;
         }
 
         function _renderAddMenu() {
-            const sectionTitle = (t) => `<div style="padding:6px 14px 2px; color:#64748b; font-size:0.68rem; text-transform:uppercase; letter-spacing:0.08em;">${t}</div>`;
-            const divider = `<div style="height:1px; background:rgba(255,255,255,0.06); margin:4px 0;"></div>`;
+            const sectionTitle = (t) => `<div class="ami-section">${t}</div>`;
+            const divider = `<div class="ami-divider"></div>`;
             // Sprint 23 — GSTR 2A/2B and Form 26AS route to gated views (gstr-reco / tds);
             // hide those menu entries from non-super_admin so the menu doesn't advertise
             // features they can't reach.
@@ -11265,31 +11330,26 @@
                 pop.setAttribute('role', 'menu');
                 document.body.appendChild(pop);
             }
-            pop.innerHTML = _renderAddMenu();
-
             const isMobile = window.matchMedia('(max-width: 768px)').matches;
             if (isMobile) {
-                // Bottom sheet
+                // Bottom sheet with a grab handle
                 pop.className = 'add-menu-popup add-menu-popup--sheet';
+                pop.innerHTML = `<div class="ami-handle"></div>` + _renderAddMenu();
                 pop.style.cssText = `position:fixed; left:0; right:0; bottom:0; z-index:200;
-                                     background:#0f172a; border-top:1px solid var(--border);
-                                     border-radius:16px 16px 0 0; padding:14px 8px max(20px, env(safe-area-inset-bottom));
-                                     box-shadow:0 -10px 30px rgba(0,0,0,0.4); display:block;
-                                     max-height:75vh; overflow-y:auto;`;
+                                     padding:8px 10px max(18px, env(safe-area-inset-bottom)); display:block;
+                                     max-height:78vh; overflow-y:auto;`;
             } else {
                 // Anchored popup near the trigger
                 pop.className = 'add-menu-popup';
+                pop.innerHTML = _renderAddMenu();
                 const rect = triggerEl.getBoundingClientRect();
-                const w = 320;
+                const w = 330;
                 let left = rect.left;
                 if (left + w > window.innerWidth - 12) left = window.innerWidth - w - 12;
                 // Position above the trigger if it's in the lower half, otherwise below
                 const wantsAbove = rect.top > window.innerHeight / 2;
                 pop.style.cssText = `position:fixed; ${wantsAbove ? 'bottom:'+(window.innerHeight - rect.top + 8)+'px' : 'top:'+(rect.bottom + 8)+'px'};
-                                     left:${left}px; width:${w}px; z-index:200;
-                                     background:#0f172a; border:1px solid var(--border);
-                                     border-radius:10px; padding:6px;
-                                     box-shadow:0 12px 40px rgba(0,0,0,0.45); display:block;
+                                     left:${left}px; width:${w}px; z-index:200; display:block;
                                      max-height:75vh; overflow-y:auto;`;
             }
             // Click-outside + Esc to close
@@ -11330,17 +11390,34 @@
             }
         }
 
+        // Reliable camera entry — direct user gesture from the inline button OR
+        // the "+" menu. Mobile (or any touch device) → native camera via the
+        // capture file-input; desktop → in-app webcam modal.
+        function openCameraCapture() {
+            // Decide by DEVICE, not viewport width — a narrow laptop window is still
+            // a laptop (use the in-app webcam modal). Only real phones/tablets use the
+            // native capture file-input.
+            const ua = navigator.userAgent || '';
+            const isMobileDevice = /Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test(ua)
+                || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);  // iPadOS reports as Mac
+            if (isMobileDevice) {
+                const inp = document.getElementById('chat-camera-input');
+                if (inp) inp.click();
+            } else if (typeof openWebcamModal === 'function') {
+                openWebcamModal();
+            }
+        }
+
         const _addMenu = {
             photo() {
                 _goToChatThenRun(() => document.getElementById('chat-file-input')?.click());
             },
             camera() {
-                _goToChatThenRun(() => {
-                    // Mobile uses the file-input with capture; desktop uses the webcam modal
-                    const isMobile = window.matchMedia('(max-width: 768px)').matches;
-                    if (isMobile) document.getElementById('chat-camera-input')?.click();
-                    else if (typeof openWebcamModal === 'function') openWebcamModal();
-                });
+                // Already on chat → fire synchronously (preserves the user gesture so
+                // mobile lets the camera input open). Off chat → switch first.
+                const onChat = document.getElementById('chat-view')?.style.display !== 'none';
+                if (onChat) { openCameraCapture(); }
+                else { showView('chat'); setTimeout(openCameraCapture, 300); }
             },
             voice() {
                 _goToChatThenRun(() => {

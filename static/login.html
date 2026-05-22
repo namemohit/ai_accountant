@@ -8,8 +8,34 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
-<body style="display: flex; align-items: center; justify-content: center; height: 100vh; background: var(--bg-main);">
-    <div class="card" style="width: 420px; padding: 40px; text-align: center; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); border: 1px solid var(--border);">
+<style>
+        html, body { height: 100%; }
+        body {
+            margin: 0;
+            display: flex; align-items: center; justify-content: center;
+            min-height: 100vh; min-height: 100dvh;
+            padding: 24px 16px;
+            box-sizing: border-box;
+            overflow-y: auto;
+            background: var(--bg-main);
+        }
+        .login-card {
+            width: 100%; max-width: 420px;
+            padding: 36px 32px;
+            box-sizing: border-box;
+            text-align: center;
+            box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+            border: 1px solid var(--border);
+        }
+        .login-card input { box-sizing: border-box; }
+        @media (max-width: 480px) {
+            .login-card { padding: 26px 20px; }
+            .login-card h1 { font-size: 1.6rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="card login-card">
         <h1 style="background: linear-gradient(to right, #da7756, #e8a87c); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 24px; font-weight: 800;">YantrAI Cloud</h1>
         
         <!-- Tabs -->
