@@ -400,16 +400,18 @@
                                     <i class="fas fa-file-download"></i> 📥 Download Sample Bank Statement CSV
                                 </a>
                             </div>
+                            <div id="chat-attachment-preview" class="attachment-preview"></div>
+                            <div id="voice-pill" class="voice-pill" style="display:none;"></div>
                             <div class="chat-input-wrapper">
                                 <input type="file" id="chat-file-input" style="display: none;" accept="image/*,.pdf,.csv,.xlsx,.xls"><!-- single-file by design; multi-attach goes through Bulk Excel -->
                                 <input type="file" id="chat-camera-input" style="display: none;" accept="image/*" capture="environment">
                                 <button type="button" class="attachment-btn" id="composer-add-btn" onclick="openAddMenu(this)" title="Add file, voice, statement…" style="cursor: pointer; display: flex; align-items: center; justify-content: center;"><i class="fas fa-plus"></i></button>
                                 <label class="camera-btn" for="chat-camera-input" title="Take photo" style="cursor: pointer; display: flex; align-items: center; justify-content: center;"><i class="fas fa-camera"></i></label>
+                                <textarea id="chat-input" placeholder="Ask about your accounts...  (type / to mention a party, item or ledger)" rows="1" onkeydown="handleChatKey(event)" oninput="handleChatSlashInput(event)"></textarea>
                                 <button class="mic-btn" id="chat-mic-btn" title="Voice Input (Hold to talk, Click to toggle)" style="cursor: pointer; display: flex; align-items: center; justify-content: center;"><i class="fas fa-microphone"></i></button>
-                                <textarea id="chat-input" placeholder="Ask about your accounts..." rows="1" onkeydown="handleChatKey(event)"></textarea>
-                                <button class="send-btn" id="send-chat" onclick="sendMessage()"><i class="fas fa-paper-plane"></i></button>
+                                <button class="send-btn" id="send-chat" onclick="sendMessage()" style="display:none;"><i class="fas fa-paper-plane"></i></button>
+                                <div id="chat-slash-menu" style="display:none;"></div>
                             </div>
-                            <div id="chat-attachment-preview" class="attachment-preview"></div>
                         </div>
                     </div>
                 </div>
@@ -455,11 +457,31 @@
                 <button class="schema-tab-btn active" id="schema-tab-coa" onclick="switchSchemaSubView('coa')" style="background: none; border: none; color: var(--primary); font-weight: 600; font-size: 0.95rem; cursor: pointer; padding: 10px 20px; border-bottom: 2px solid var(--accent); transition: all 0.2s;">📋 Chart of Accounts</button>
                 <button class="schema-tab-btn" id="schema-tab-parties" onclick="switchSchemaSubView('parties')" style="background: none; border: none; color: #94a3b8; font-weight: 600; font-size: 0.95rem; cursor: pointer; padding: 10px 20px; transition: all 0.2s;">👥 Party Master Directory</button>
                 <button class="schema-tab-btn" id="schema-tab-items" onclick="switchSchemaSubView('items')" style="background: none; border: none; color: #94a3b8; font-weight: 600; font-size: 0.95rem; cursor: pointer; padding: 10px 20px; transition: all 0.2s;">📦 Item Master Directory</button>
+                <button class="schema-tab-btn" id="schema-tab-actionlog" onclick="switchSchemaSubView('actionlog')" style="background: none; border: none; color: #94a3b8; font-weight: 600; font-size: 0.95rem; cursor: pointer; padding: 10px 20px; transition: all 0.2s;">📋 Action Log</button>
+            </div>
+            <!-- Sprint 34 — Masters Action / Event Log -->
+            <div id="schema-subview-actionlog" class="card" style="display: none;">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:14px;">
+                    <div>
+                        <h3 style="margin-bottom:4px;">📋 Master Action Log</h3>
+                        <p style="color:#94a3b8; font-size:0.85rem;">Every AI-detected gap and master change — what needs your attention and what's already been actioned.</p>
+                    </div>
+                    <select id="masterlog-filter" onchange="loadMasterActionLog()" style="padding:6px 10px; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:6px; font-size:0.82rem;">
+                        <option value="pending">🔥 Action needed</option>
+                        <option value="accepted">✅ Applied</option>
+                        <option value="rejected">✖ Dismissed</option>
+                        <option value="all">All</option>
+                    </select>
+                </div>
+                <div id="masterlog-body" style="color:#94a3b8; font-size:0.85rem;">Loading…</div>
             </div>
             
             <div id="schema-subview-coa" class="card">
-                <h3 style="margin-bottom: 8px;">Tally Chart of Accounts (AI Category Context)</h3>
-                <p style="color: #94a3b8; font-size: 0.85rem; margin-bottom: 20px;">This category list is synchronized with Tally Prime and serves as primary semantic mapping weights for automated AI bookkeeping.</p>
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:8px;">
+                    <h3 style="margin:0;">📋 Chart of Accounts</h3>
+                    <input type="text" id="coa-search" placeholder="Search ledgers…" oninput="_filterCoa()" style="padding:7px 12px; border-radius:6px; background:var(--bg-light); color:white; border:1px solid var(--border); font-size:0.82rem; width:220px;">
+                </div>
+                <p style="color: #94a3b8; font-size: 0.85rem; margin-bottom: 18px;">Your complete Tally chart of accounts — every ledger grouped by its account group. Read-only mirror of Tally Prime.</p>
                 <div id="kb-ledgers"></div>
             </div>
             
@@ -471,6 +493,9 @@
                     </div>
                     <div style="display: flex; gap: 12px; align-items: center;">
                         <input type="text" id="party-search" placeholder="Search parties..." oninput="filterPartyMaster()" style="padding: 8px 14px; border-radius: 6px; background: var(--bg-light); color: white; border: 1px solid var(--border); font-size: 0.85rem; outline: none; width: 220px;">
+                        <select id="party-ai-gap-filter" onchange="filterPartyMaster()" title="Filter to parties with a pending AI suggestion" style="padding: 8px 12px; border-radius: 6px; background: var(--bg-light); color: white; border: 1px solid var(--border); font-size: 0.85rem;">
+                            <option value="">🤖 AI Gap: all</option>
+                        </select>
                         <button class="btn" onclick="openAddPartyModal()" style="padding: 8px 14px; border-radius: 6px; font-weight: bold; background: var(--accent); color: white; border: none; cursor: pointer; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 6px;"><i class="fas fa-plus"></i> Add Party</button>
                     </div>
                 </div>
@@ -504,6 +529,9 @@
                     </div>
                     <div style="display: flex; gap: 12px; align-items: center;">
                         <input type="text" id="item-search" placeholder="Search items..." oninput="filterItemMaster()" style="padding: 8px 14px; border-radius: 6px; background: var(--bg-light); color: white; border: 1px solid var(--border); font-size: 0.85rem; outline: none; width: 220px;">
+                        <select id="item-ai-gap-filter" onchange="filterItemMaster()" title="Filter to items with a pending AI suggestion" style="padding: 8px 12px; border-radius: 6px; background: var(--bg-light); color: white; border: 1px solid var(--border); font-size: 0.85rem;">
+                            <option value="">🤖 AI Gap: all</option>
+                        </select>
                     </div>
                 </div>
                 
@@ -1834,6 +1862,81 @@
         </div>
     </div>
 
+    <!-- Edit Voucher Modal -->
+    <div id="voucher-edit-modal" class="webcam-modal" style="display: none; justify-content: center; align-items: center; z-index: 100000; background: rgba(15, 23, 42, 0.85); backdrop-filter: blur(8px);">
+        <div style="background: var(--bg-surface); border: 1px solid var(--border); width: 92%; max-width: 720px; max-height: 90vh; overflow-y: auto; padding: 28px; border-radius: 16px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);">
+            <h3 id="voucher-edit-title" style="margin-top: 0; margin-bottom: 6px; font-size: 1.3rem; display: flex; align-items: center; gap: 8px; color: white;">📝 Edit Voucher</h3>
+            <div id="voucher-edit-doc-link" style="margin-bottom: 8px;"></div>
+            <p style="margin-top: 0; margin-bottom: 18px; font-size: 0.78rem; color: #94a3b8;">Edits are saved in YantrAI only. The voucher is flagged <strong style="color:#f59e0b;">needs resync</strong> until you push it back to Tally.</p>
+
+            <form id="voucher-edit-form" onsubmit="saveVoucherEdit(event)">
+                <input type="hidden" id="voucher-edit-id">
+                <input type="hidden" id="voucher-edit-master-id">
+
+                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 16px;">
+                    <div class="form-group">
+                        <label style="display:block; font-size:0.75rem; color:#94a3b8; margin-bottom:6px; font-weight:500;">Date</label>
+                        <input type="date" id="voucher-edit-date" style="width:100%; padding:10px 12px; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; font-size:0.9rem; outline:none;">
+                    </div>
+                    <div class="form-group">
+                        <label style="display:block; font-size:0.75rem; color:#94a3b8; margin-bottom:6px; font-weight:500;">Voucher #</label>
+                        <input type="text" id="voucher-edit-number" style="width:100%; padding:10px 12px; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; font-size:0.9rem; outline:none;">
+                    </div>
+                    <div class="form-group">
+                        <label style="display:block; font-size:0.75rem; color:#94a3b8; margin-bottom:6px; font-weight:500;">Type</label>
+                        <select id="voucher-edit-type" style="width:100%; padding:10px 12px; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; font-size:0.9rem; outline:none;">
+                            <option>Sales</option><option>Purchase</option><option>Payment</option>
+                            <option>Receipt</option><option>Journal</option><option>Contra</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group" style="margin-bottom:16px;">
+                    <label style="display:block; font-size:0.75rem; color:#94a3b8; margin-bottom:6px; font-weight:500;">Party / Ledger</label>
+                    <input type="text" id="voucher-edit-party" list="voucher-party-datalist" placeholder="e.g. Sun Pharmaceutical Industries Ltd." style="width:100%; padding:10px 14px; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; font-size:0.9rem; outline:none;">
+                </div>
+
+                <div class="form-group" style="margin-bottom:16px;">
+                    <label style="display:block; font-size:0.75rem; color:#94a3b8; margin-bottom:6px; font-weight:500;">Narration</label>
+                    <textarea id="voucher-edit-narration" rows="2" style="width:100%; padding:10px 14px; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; font-size:0.9rem; outline:none; resize:none; font-family:inherit;"></textarea>
+                </div>
+
+                <div style="border-top:1px solid var(--border); padding-top:14px; margin-bottom:8px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                        <div style="font-size:0.8rem; font-weight:600; color:var(--primary); display:flex; align-items:center; gap:6px;"><i class="fas fa-layer-group"></i> Ledger Entries (Dr = Cr)</div>
+                        <button type="button" onclick="addVoucherLeg()" style="background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.35); border-radius:6px; padding:5px 10px; font-size:0.75rem; cursor:pointer;">+ Add line</button>
+                    </div>
+                    <table style="width:100%; border-collapse:collapse; font-size:0.82rem;">
+                        <thead>
+                            <tr style="color:#64748b; border-bottom:1px solid var(--border);">
+                                <th style="text-align:left; padding:4px 6px; font-weight:600;">Ledger</th>
+                                <th style="text-align:right; padding:4px 6px; font-weight:600; width:130px;">Debit (₹)</th>
+                                <th style="text-align:right; padding:4px 6px; font-weight:600; width:130px;">Credit (₹)</th>
+                                <th style="width:32px;"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="voucher-edit-legs"></tbody>
+                        <tfoot>
+                            <tr style="border-top:1px solid var(--border); font-weight:600;">
+                                <td style="padding:6px; color:#cbd5e1;">Totals</td>
+                                <td id="voucher-edit-dr-total" style="text-align:right; padding:6px; color:#f87171; font-family:monospace;">₹0.00</td>
+                                <td id="voucher-edit-cr-total" style="text-align:right; padding:6px; color:#4ade80; font-family:monospace;">₹0.00</td>
+                                <td></td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                    <div id="voucher-edit-balance-warn" style="display:none; margin-top:8px; font-size:0.75rem; color:#f59e0b;"><i class="fas fa-exclamation-triangle"></i> Debit and Credit totals must match before you can save.</div>
+                </div>
+
+                <div style="display:flex; justify-content:flex-end; gap:12px; margin-top:22px;">
+                    <button type="button" class="btn" onclick="closeVoucherEditModal()" style="background:rgba(255,255,255,0.06); border:1px solid var(--border); color:var(--text); padding:10px 20px; font-weight:600;">Cancel</button>
+                    <button type="submit" class="btn confirm-btn" style="padding:10px 24px; font-weight:600;">Save (needs resync)</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <datalist id="voucher-party-datalist"></datalist>
+
     <!-- Webcam Capture Modal (Laptops/Desktops fallback) -->
     <div id="webcam-modal" class="webcam-modal" style="display: none;">
         <div class="webcam-container">
@@ -2131,7 +2234,7 @@
             }
             
             if (view === 'schema') {
-                fetchTallySummary();
+                loadChartOfAccounts();   // Sprint 36 — default COA tab loads on entry
                 loadPartyMaster();
                 loadItemMaster();
             }
@@ -2304,25 +2407,41 @@
                 const isDebit = ['Purchase', 'Payment'].includes(vType);
                 const typeColors = { Sales: '#4ade80', Purchase: '#f87171', Payment: '#fbbf24', Receipt: '#38bdf8', Journal: '#a78bfa', Contra: '#94a3b8' };
 
-                // Source document link
+                // Source document link — Sprint 38.
+                // 1) If an uploaded file exists (PDF/image) show it FIRST — even for
+                //    a Tally-synced voucher that originated from an upload.
+                // 2) Else if the voucher came from Tally (no file) → generated
+                //    printable voucher PDF.
+                // 3) Else "-".
                 let sourceDocHtml = '';
-                if (v.source === 'tally') {
-                    sourceDocHtml = `<span style="color: #38bdf8; font-weight: 500; display: inline-flex; align-items: center; gap: 4px;"><i class="fas fa-sync-alt"></i> Tally</span>`;
-                } else if (v.file_url) {
+                if (v.file_url) {
                     const cleanUrl = v.file_url.startsWith('http') ? v.file_url : `${API}/${v.file_url.replace(/^\/+/, '')}`;
-                    const isPdf = cleanUrl.toLowerCase().endsWith('.pdf') || cleanUrl.toLowerCase().includes('.pdf');
+                    const isPdf = cleanUrl.toLowerCase().includes('.pdf');
                     sourceDocHtml = isPdf
-                        ? `<a href="${cleanUrl}" target="_blank" style="color: var(--primary); text-decoration: none; font-weight: 500; display: inline-flex; align-items: center; gap: 4px;"><i class="fas fa-file-pdf"></i> PDF</a>`
-                        : `<a href="javascript:void(0)" onclick="openMediaModal('${cleanUrl}')" style="color: var(--primary); text-decoration: none; font-weight: 500; display: inline-flex; align-items: center; gap: 4px;"><i class="fas fa-image"></i> Image</a>`;
+                        ? `<a href="javascript:void(0)" onclick="event.stopPropagation(); viewSourceFile('${cleanUrl}','${v.id}',true)" style="color: var(--primary); text-decoration: none; font-weight: 500; display: inline-flex; align-items: center; gap: 4px;"><i class="fas fa-file-pdf"></i> PDF</a>`
+                        : `<a href="javascript:void(0)" onclick="event.stopPropagation(); viewSourceFile('${cleanUrl}','${v.id}',false)" style="color: var(--primary); text-decoration: none; font-weight: 500; display: inline-flex; align-items: center; gap: 4px;"><i class="fas fa-image"></i> Image</a>`;
+                } else if (v.source === 'tally') {
+                    sourceDocHtml = `<a href="javascript:void(0)" onclick="event.stopPropagation(); openVoucherPrintView('${v.id}')" title="View / print this voucher" style="color: #38bdf8; text-decoration: none; font-weight: 500; display: inline-flex; align-items: center; gap: 4px;"><i class="fas fa-receipt"></i> PDF</a>`;
                 } else {
                     sourceDocHtml = `<span style="color: #64748b;">-</span>`;
                 }
 
                 // Status badge
+                const needsResync = !!v.needs_resync;
                 const isSynced = v.source === 'tally' || v.status === 'synced';
-                const badgeBg = isSynced ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)';
-                const badgeColor = isSynced ? '#10b981' : '#f59e0b';
-                const badgeText = isSynced ? 'Synced 🟢' : 'Pending 🟡';
+                let badgeBg = isSynced ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)';
+                let badgeColor = isSynced ? '#10b981' : '#f59e0b';
+                let badgeText = isSynced ? 'Synced 🟢' : 'Pending 🟡';
+                if (needsResync) { badgeBg = 'rgba(245, 158, 11, 0.15)'; badgeColor = '#f59e0b'; badgeText = 'Edited – needs resync 🟠'; }
+
+                // Sprint 37 — edit available on every voucher (tally + invoice/PDF/manual)
+                const canEdit = true;
+                const editBtn = canEdit
+                    ? `<button onclick="event.stopPropagation(); openEditVoucherModal('${v.id}')" title="Edit voucher" style="margin-left:6px; padding:3px 8px; background:rgba(59,130,246,0.15); color:#60a5fa; border:1px solid rgba(59,130,246,0.3); border-radius:4px; font-size:0.7rem; cursor:pointer;"><i class="fas fa-edit"></i></button>`
+                    : '';
+                const resyncBtn = needsResync
+                    ? `<button onclick="event.stopPropagation(); resyncVoucher('${v.id}')" title="Push edit to Tally" style="margin-left:4px; padding:3px 8px; background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.35); border-radius:4px; font-size:0.7rem; cursor:pointer;"><i class="fas fa-sync-alt"></i> Resync</button>`
+                    : '';
 
                 // Sprint 26 — AI Gap chips (clickable; opens review popover)
                 const aiSugs = (window._aiSuggestionsByVoucherId || {})[v.id] || [];
@@ -2365,7 +2484,7 @@
                     <td style="padding: 10px; text-align: right; color: ${isDebit ? '#f87171' : '#64748b'}; font-family: monospace;">${isDebit ? '₹' + amount.toLocaleString('en-IN') : ''}</td>
                     <td style="padding: 10px; text-align: right; color: ${!isDebit ? '#4ade80' : '#64748b'}; font-family: monospace;">${!isDebit ? '₹' + amount.toLocaleString('en-IN') : ''}</td>
                     <td style="padding: 10px;">${sourceDocHtml}</td>
-                    <td style="padding: 10px;"><span style="background: ${badgeBg}; color: ${badgeColor}; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">${badgeText}</span>${aiChips}</td>
+                    <td style="padding: 10px; white-space: nowrap;"><span style="background: ${badgeBg}; color: ${badgeColor}; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">${badgeText}</span>${aiChips}${editBtn}${resyncBtn}</td>
                 `;
                 if (hasDetail) {
                     tr.style.cursor = 'pointer';
@@ -3091,6 +3210,8 @@
                     const j2 = await r2.json();
                     window._masterAiCounts = j2.counts || { party: {}, item: {} };
                 }
+                // Sprint 34 — refresh the AI-gap filter dropdowns with the new counts
+                if (typeof _refreshMasterAiGapDropdowns === 'function') _refreshMasterAiGapDropdowns();
             } catch (e) { console.warn('master suggestions load failed', e); }
         }
 
@@ -4743,156 +4864,187 @@
         const chatAttachmentPreview = document.getElementById('chat-attachment-preview');
         const chatMicBtn = document.getElementById('chat-mic-btn');
         
-        // --- Walkie-Talkie Voice Input Logic ---
-        let mediaRecorder = null;
-        let audioChunks = [];
-        let isRecording = false;
-        let micStream = null;
-        let pressTimer = null;
-        let isHoldMode = false;
+        // ── Sprint 40 — Walkie-talkie voice: live transcription + swipe-cancel ──
+        // Prefers the browser Web Speech API (live interim text). Falls back to
+        // MediaRecorder → /api/voice-transcribe when unavailable. Either way the
+        // result FILLS the input (never auto-sends); swipe-left / Esc cancels.
+        let mediaRecorder = null, audioChunks = [], micStream = null;
+        let _voiceActive = false;          // a capture session is running
+        let _voiceCancelled = false;       // swipe/Esc armed cancel
+        let _voiceFinal = '';              // accumulated final transcript
+        let _voiceRecog = null;            // SpeechRecognition instance (if used)
+        let pressTimer = null, isHoldMode = false, _voiceStartX = 0, _voiceUsingSpeech = false;
 
-        async function startVoiceRecording() {
-            if (isRecording) return;
+        function _speechCtor() { return window.SpeechRecognition || window.webkitSpeechRecognition || null; }
+
+        function _renderVoicePill(text, cancelArmed) {
+            const pill = document.getElementById('voice-pill');
+            if (!pill) return;
+            pill.className = 'voice-pill' + (cancelArmed ? ' cancel-armed' : '');
+            pill.innerHTML = cancelArmed
+                ? `<span class="vp-dot"></span><span class="vp-text">Release to cancel</span>`
+                : `<span class="vp-dot"></span><span class="vp-text">${text ? escapeHtml(text) : 'Listening…'}</span><span class="vp-hint">← swipe left to cancel</span>`;
+            pill.style.display = 'flex';
+        }
+        function _hideVoicePill() {
+            const pill = document.getElementById('voice-pill');
+            if (pill) pill.style.display = 'none';
+        }
+
+        function _fillVoiceResult(text) {
+            const t = (text || '').trim();
+            if (!t) return;
+            const cur = chatInput.value;
+            chatInput.value = cur ? (cur.replace(/\s+$/, '') + ' ' + t) : t;
+            if (typeof autoResizeTextarea === 'function') autoResizeTextarea();
+            _updateComposerButtons();
+            chatInput.focus();
+        }
+
+        async function startVoiceCapture() {
+            if (_voiceActive) return;
+            _voiceActive = true; _voiceCancelled = false; _voiceFinal = '';
+            chatMicBtn.classList.add('recording');
+            _renderVoicePill('', false);
+
+            const Ctor = _speechCtor();
+            if (Ctor) {
+                _voiceUsingSpeech = true;
+                try {
+                    _voiceRecog = new Ctor();
+                    _voiceRecog.continuous = true;
+                    _voiceRecog.interimResults = true;
+                    _voiceRecog.lang = 'en-IN';
+                    _voiceRecog.onresult = (ev) => {
+                        let interim = '';
+                        for (let i = ev.resultIndex; i < ev.results.length; i++) {
+                            const r = ev.results[i];
+                            if (r.isFinal) _voiceFinal += r[0].transcript;
+                            else interim += r[0].transcript;
+                        }
+                        if (!_voiceCancelled) _renderVoicePill((_voiceFinal + ' ' + interim).trim(), false);
+                    };
+                    _voiceRecog.onerror = (e) => { console.warn('speech error', e.error); };
+                    _voiceRecog.onend = () => {
+                        // Fires after stop(); finalize here.
+                        chatMicBtn.classList.remove('recording');
+                        _hideVoicePill();
+                        if (!_voiceCancelled) _fillVoiceResult(_voiceFinal);
+                        _voiceActive = false; _voiceRecog = null;
+                    };
+                    _voiceRecog.start();
+                    return;
+                } catch (err) {
+                    console.warn('SpeechRecognition failed, falling back', err);
+                    _voiceUsingSpeech = false;
+                }
+            }
+            // ── Fallback: MediaRecorder → server transcription ──
+            _voiceUsingSpeech = false;
             try {
                 audioChunks = [];
                 micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                
-                let options = {};
-                if (MediaRecorder.isTypeSupported('audio/webm')) {
-                    options = { mimeType: 'audio/webm' };
-                }
-                
+                const options = MediaRecorder.isTypeSupported('audio/webm') ? { mimeType: 'audio/webm' } : {};
                 mediaRecorder = new MediaRecorder(micStream, options);
-                
-                mediaRecorder.ondataavailable = (event) => {
-                    if (event.data.size > 0) {
-                        audioChunks.push(event.data);
-                    }
-                };
-                
+                mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
                 mediaRecorder.onstop = async () => {
-                    const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
-                    await uploadAndSubmitVoice(audioBlob);
+                    if (micStream) micStream.getTracks().forEach(t => t.stop());
+                    chatMicBtn.classList.remove('recording');
+                    if (_voiceCancelled) { _hideVoicePill(); _voiceActive = false; return; }
+                    _renderVoicePill('Transcribing…', false);
+                    const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+                    await uploadAndFillVoice(blob);
+                    _hideVoicePill(); _voiceActive = false;
                 };
-                
                 mediaRecorder.start();
-                isRecording = true;
-                chatMicBtn.classList.add('recording');
-                chatInput.placeholder = "Listening... Speak now!";
             } catch (err) {
-                console.error('Error starting audio recording:', err);
+                console.error('mic error', err);
                 alert('Could not access microphone. Please check permissions.');
-                resetMicState();
+                _voiceActive = false; chatMicBtn.classList.remove('recording'); _hideVoicePill();
             }
         }
 
-        function stopVoiceRecording() {
-            if (!isRecording) return;
-            try {
-                if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-                    mediaRecorder.stop();
-                }
-            } catch (e) {
-                console.error(e);
+        function stopVoiceCapture(cancelled) {
+            if (!_voiceActive) return;
+            _voiceCancelled = !!cancelled;
+            if (_voiceUsingSpeech && _voiceRecog) {
+                try { _voiceRecog.stop(); } catch (_) {}   // onend finalizes
+            } else if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                try { mediaRecorder.stop(); } catch (_) {}  // onstop finalizes
+            } else {
+                chatMicBtn.classList.remove('recording'); _hideVoicePill(); _voiceActive = false;
             }
-            if (micStream) {
-                micStream.getTracks().forEach(track => track.stop());
-            }
-            isRecording = false;
-            chatMicBtn.classList.remove('recording');
-            chatInput.placeholder = "Ask about your accounts...";
         }
 
-        function resetMicState() {
-            isRecording = false;
-            isHoldMode = false;
-            if (chatMicBtn) chatMicBtn.classList.remove('recording');
-            if (chatInput) chatInput.placeholder = "Ask about your accounts...";
-        }
-
-        async function uploadAndSubmitVoice(blob) {
-            chatInput.placeholder = "Transcribing voice...";
+        async function uploadAndFillVoice(blob) {
             const user = JSON.parse(localStorage.getItem('currentUser'));
             const companyName = user ? user.company_name : 'Acme Corp';
-            
             const formData = new FormData();
             formData.append('file', blob, 'voice.webm');
             formData.append('company_name', companyName);
-            
             try {
-                const res = await fetch(`${API}/api/voice-transcribe`, {
-                    method: 'POST',
-                    body: formData
-                });
-                
-                if (!res.ok) throw new Error("Transcription server error");
-                
+                const res = await fetch(`${API}/api/voice-transcribe`, { method: 'POST', body: formData });
+                if (!res.ok) throw new Error('Transcription server error');
                 const data = await res.json();
-                if (data.status === 'success' && data.text.trim()) {
-                    chatInput.value = data.text;
-                    if (typeof autoResizeTextarea === 'function') {
-                        autoResizeTextarea();
-                    }
-                    sendMessage();
-                } else {
-                    console.log("No text transcribed from voice note.");
-                }
+                if (data.status === 'success' && (data.text || '').trim()) _fillVoiceResult(data.text);
             } catch (err) {
-                console.error("Voice transcription failed:", err);
-            } finally {
-                chatInput.placeholder = "Ask about your accounts...";
+                console.error('Voice transcription failed:', err);
             }
         }
 
         if (chatMicBtn) {
-            // Mousedown / Touchstart
-            chatMicBtn.addEventListener('mousedown', (e) => {
-                e.preventDefault();
-                isHoldMode = false;
-                pressTimer = setTimeout(() => {
-                    isHoldMode = true;
-                    startVoiceRecording();
-                }, 300); // 300ms threshold for hold mode
-            });
-
-            // Mouseup / Touchend / Mouseleave
-            const handleRelease = (e) => {
-                if (pressTimer) {
-                    clearTimeout(pressTimer);
-                    pressTimer = null;
-                }
-                
-                if (isHoldMode) {
-                    stopVoiceRecording();
-                    isHoldMode = false;
-                } else if (e.type === 'mouseup' || e.type === 'touchend') {
-                    if (!isRecording) {
-                        startVoiceRecording();
-                    } else {
-                        stopVoiceRecording();
-                    }
+            const SWIPE_CANCEL_PX = 60;
+            const beginPress = (clientX) => {
+                isHoldMode = false; _voiceStartX = clientX;
+                pressTimer = setTimeout(() => { isHoldMode = true; startVoiceCapture(); }, 300);
+            };
+            const movePress = (clientX) => {
+                if (!_voiceActive) return;
+                const armed = (_voiceStartX - clientX) > SWIPE_CANCEL_PX;
+                _voiceCancelled = armed;
+                if (_voiceUsingSpeech) _renderVoicePill((_voiceFinal || '').trim(), armed);
+                else _renderVoicePill('', armed);
+            };
+            const endPress = (e, isTap) => {
+                if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+                if (isHoldMode) { stopVoiceCapture(_voiceCancelled); isHoldMode = false; }
+                else if (isTap) {
+                    // Quick tap toggles a session (no hold).
+                    if (!_voiceActive) startVoiceCapture(); else stopVoiceCapture(false);
                 }
             };
 
-            chatMicBtn.addEventListener('mouseup', handleRelease);
-            chatMicBtn.addEventListener('mouseleave', () => {
-                if (isHoldMode) {
-                    stopVoiceRecording();
-                    isHoldMode = false;
-                }
-            });
+            chatMicBtn.addEventListener('mousedown', (e) => { e.preventDefault(); beginPress(e.clientX); });
+            window.addEventListener('mousemove', (e) => { if (isHoldMode) movePress(e.clientX); });
+            chatMicBtn.addEventListener('mouseup', (e) => endPress(e, true));
+            chatMicBtn.addEventListener('mouseleave', () => { if (isHoldMode && _voiceActive) { /* keep recording; cancel only via swipe */ } });
 
-            // Touch support for mobile devices
-            chatMicBtn.addEventListener('touchstart', (e) => {
-                e.preventDefault();
-                isHoldMode = false;
-                pressTimer = setTimeout(() => {
-                    isHoldMode = true;
-                    startVoiceRecording();
-                }, 300);
+            chatMicBtn.addEventListener('touchstart', (e) => { e.preventDefault(); beginPress(e.touches[0].clientX); });
+            chatMicBtn.addEventListener('touchmove', (e) => { if (isHoldMode) movePress(e.touches[0].clientX); }, { passive: true });
+            chatMicBtn.addEventListener('touchend', (e) => endPress(e, true));
+
+            // Esc cancels an active hold session
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' && _voiceActive) { stopVoiceCapture(true); isHoldMode = false; }
             });
-            chatMicBtn.addEventListener('touchend', handleRelease);
         }
+
+        // Back-compat aliases (other callers may invoke these names)
+        function startVoiceRecording() { startVoiceCapture(); }
+        function stopVoiceRecording() { stopVoiceCapture(false); }
+        function resetMicState() { _voiceActive = false; isHoldMode = false; if (chatMicBtn) chatMicBtn.classList.remove('recording'); _hideVoicePill(); }
+
+        // Initial composer button state (mic when empty)
+        if (typeof _updateComposerButtons === 'function') _updateComposerButtons();
+
+        // Sprint 40 — pre-warm the "/" mention cache so the first open is instant.
+        function prewarmSlashIndex() {
+            const co = _activeCompanyName();
+            if (co && _slashIndexCompany !== co && !_slashBuilding) _buildSlashIndex(co);
+        }
+        setTimeout(prewarmSlashIndex, 1500);
+        // Re-warm shortly after the user lands on the Chat view / switches company.
+        window.addEventListener('focus', prewarmSlashIndex);
 
         // --- Laptop Webcam Capturing Logic ---
         let webcamStream = null;
@@ -5060,21 +5212,36 @@
             }, 5000);
         }
 
+        let _selectedFileUrl = null;   // object URL for the clickable preview
         function handleFileSelect(file) {
             selectedFile = file;
+            // Revoke any prior object URL before creating a new one
+            if (_selectedFileUrl) { try { URL.revokeObjectURL(_selectedFileUrl); } catch (_) {} _selectedFileUrl = null; }
             if (selectedFile) {
-                let fileIcon = 'image';
-                if (selectedFile.name.match(/\.pdf$/i)) {
-                    fileIcon = 'file-pdf';
-                } else if (selectedFile.name.match(/\.(xlsx|xls|csv)$/i)) {
-                    fileIcon = 'file-excel';
-                }
+                const isImage = (selectedFile.type || '').startsWith('image/');
+                const isPdf = (selectedFile.type === 'application/pdf') || /\.pdf$/i.test(selectedFile.name);
+                _selectedFileUrl = URL.createObjectURL(selectedFile);
+                let fileIcon = 'file';
+                if (isPdf) fileIcon = 'file-pdf';
+                else if (/\.(xlsx|xls|csv)$/i.test(selectedFile.name)) fileIcon = 'file-excel';
+                else if (isImage) fileIcon = 'image';
+                // Click opens the file (image → media modal, others → new tab)
+                const openExpr = isImage
+                    ? `openMediaModal('${_selectedFileUrl}')`
+                    : `window.open('${_selectedFileUrl}','_blank')`;
+                const thumb = isImage
+                    ? `<img src="${_selectedFileUrl}" alt="" style="width:34px;height:34px;border-radius:6px;object-fit:cover;flex-shrink:0;">`
+                    : `<i class="fas fa-${fileIcon}" style="font-size:1.1rem;"></i>`;
                 chatAttachmentPreview.innerHTML = `
-                    <div class="attachment-tag">
-                        <i class="fas fa-${fileIcon}"></i> ${selectedFile.name}
+                    <div class="attachment-tag" title="Click to view">
+                        <span style="display:flex;align-items:center;gap:8px;cursor:pointer;" onclick="${openExpr}">
+                            ${thumb}
+                            <span style="max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(selectedFile.name)}</span>
+                        </span>
                         <i class="fas fa-times close" onclick="clearAttachment()"></i>
                     </div>`;
             }
+            _updateComposerButtons();
         }
         
         chatFileInput.onchange = (e) => handleFileSelect(e.target.files[0]);
@@ -5115,6 +5282,7 @@
 
         // Ensure Enter reliably sends the chat across all browsers
         chatInput.addEventListener('keydown', (e) => {
+            if (_slashOpen) return;   // the "/" mention menu owns Enter while open
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 sendMessage();
@@ -5123,29 +5291,241 @@
 
         function clearAttachment() {
             selectedFile = null;
+            if (_selectedFileUrl) { try { URL.revokeObjectURL(_selectedFileUrl); } catch (_) {} _selectedFileUrl = null; }
             chatFileInput.value = '';
             chatCameraInput.value = '';
             chatAttachmentPreview.innerHTML = '';
+            _updateComposerButtons();
+        }
+
+        // ── Sprint 40 — WhatsApp-style send/voice toggle ─────────────────
+        function _updateComposerButtons() {
+            const mic = document.getElementById('chat-mic-btn');
+            const send = document.getElementById('send-chat');
+            if (!mic || !send) return;
+            const hasContent = (chatInput.value.trim().length > 0) || !!selectedFile;
+            mic.style.display = hasContent ? 'none' : 'flex';
+            send.style.display = hasContent ? 'flex' : 'none';
         }
 
         function handleChatKey(e) {
+            // Sprint 39 — when the "/" mention menu is open, it captures nav keys.
+            if (_slashOpen) {
+                if (e.key === 'ArrowDown') { e.preventDefault(); e.stopImmediatePropagation(); _slashMove(1); return; }
+                if (e.key === 'ArrowUp')   { e.preventDefault(); e.stopImmediatePropagation(); _slashMove(-1); return; }
+                if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); e.stopImmediatePropagation(); _slashSelect(_slashSel); return; }
+                if (e.key === 'Escape')    { e.preventDefault(); e.stopImmediatePropagation(); closeSlashMenu(); return; }
+            }
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 sendMessage();
             }
         }
 
+        // ── Sprint 39 — Chat "/" mention autocomplete ────────────────────
+        let _slashOpen = false, _slashSel = 0, _slashItems = [], _slashStart = -1;
+        let _slashIndex = null, _slashIndexCompany = null, _slashBuilding = false;
+
+        async function _buildSlashIndex(company) {
+            if (_slashBuilding) return;
+            _slashBuilding = true;
+            const out = [];
+            const seen = new Set();
+            const add = (type, name, sub, icon) => {
+                const n = (name || '').trim();
+                if (!n) return;
+                const key = type + '|' + n.toLowerCase();
+                if (seen.has(key)) return;
+                seen.add(key);
+                out.push({ type, name: n, sub: sub || '', icon });
+            };
+            const qco = encodeURIComponent(company || '');
+            try {
+                const [pRes, lRes, iRes] = await Promise.allSettled([
+                    fetch(`${API}/api/parties?company_name=${qco}&limit=500`),
+                    fetch(`${API}/api/tally/ledgers?company_name=${qco}`),
+                    fetch(`${API}/items/master?company_name=${qco}`),
+                ]);
+                if (pRes.status === 'fulfilled' && pRes.value.ok) {
+                    const j = await pRes.value.json();
+                    (j.data || j.parties || j || []).forEach(p => add('party', p.name || p.display_name, p.parent_group, '👤'));
+                }
+                if (lRes.status === 'fulfilled' && lRes.value.ok) {
+                    const j = await lRes.value.json();
+                    (j.data || j.ledgers || j || []).forEach(l => add('ledger', l.name || l.display_name, l.parent_group, '📒'));
+                }
+                if (iRes.status === 'fulfilled' && iRes.value.ok) {
+                    const j = await iRes.value.json();
+                    const ti = j.tally_items || [];
+                    const ii = j.invoice_items || [];
+                    ti.forEach(it => add('item', it.name || it.description, it.hsn_code || it.unit, '📦'));
+                    ii.forEach(it => add('item', it.name || it.description, it.hsn_sac || it.hsn_code, '📦'));
+                }
+            } catch (err) { console.warn('slash index build failed', err); }
+            _slashIndex = out;
+            _slashIndexCompany = company;
+            _slashBuilding = false;
+        }
+
+        function _activeCompanyName() {
+            try {
+                const u = JSON.parse(localStorage.getItem('currentUser'));
+                return (u && u.company_name) || '';
+            } catch (_) { return ''; }
+        }
+
+        function handleChatSlashInput(e) {
+            _updateComposerButtons();
+            const ta = e.target;
+            const val = ta.value;
+            const caret = ta.selectionStart;
+            // Find a "/" at start-of-string or preceded by whitespace, with no
+            // whitespace between it and the caret.
+            let i = caret - 1, slashPos = -1;
+            while (i >= 0) {
+                const ch = val[i];
+                if (ch === '/') {
+                    if (i === 0 || /\s/.test(val[i - 1])) { slashPos = i; }
+                    break;
+                }
+                if (/\s/.test(ch)) break;   // whitespace before any slash → not a mention
+                i--;
+            }
+            if (slashPos === -1) { closeSlashMenu(); return; }
+            const query = val.slice(slashPos + 1, caret);
+            if (/\s/.test(query)) { closeSlashMenu(); return; }
+            _slashStart = slashPos;
+            _openSlashMenu(query);
+        }
+
+        async function _openSlashMenu(query) {
+            const company = _activeCompanyName();
+            if (!_slashIndex || _slashIndexCompany !== company) {
+                _renderSlashMenu([], query, true);   // show loading
+                await _buildSlashIndex(company);
+            }
+            const q = (query || '').toLowerCase();
+            const idx = _slashIndex || [];
+            let matches;
+            if (!q) {
+                matches = idx.slice();               // show the entire list (scrollable)
+            } else {
+                const starts = [], contains = [];
+                for (const it of idx) {
+                    const nl = it.name.toLowerCase();
+                    if (nl.startsWith(q)) starts.push(it);
+                    else if (nl.includes(q)) contains.push(it);
+                }
+                matches = starts.concat(contains);    // all matches, ranked
+            }
+            _slashItems = matches;
+            _slashSel = 0;
+            _renderSlashMenu(matches, query, false);
+        }
+
+        function _renderSlashMenu(items, query, loading) {
+            const menu = document.getElementById('chat-slash-menu');
+            if (!menu) return;
+            if (loading) {
+                menu.innerHTML = `<div style="padding:10px 12px; color:#94a3b8; font-size:0.82rem;">Loading…</div>`;
+            } else if (!items.length) {
+                menu.innerHTML = `<div style="padding:10px 12px; color:#94a3b8; font-size:0.82rem;">No match for "/${escapeHtml(query)}"</div>`;
+            } else {
+                menu.innerHTML = items.map((it, i) => `
+                    <div class="slash-row${i === _slashSel ? ' sel' : ''}" data-i="${i}"
+                         onmousedown="event.preventDefault(); _slashSelect(${i})"
+                         onmouseenter="_slashHover(${i})"
+                         style="display:flex; align-items:center; gap:8px; padding:8px 12px; cursor:pointer; font-size:0.85rem; ${i === _slashSel ? 'background:rgba(56,189,248,0.15);' : ''}">
+                        <span style="font-size:1rem;">${it.icon}</span>
+                        <span style="color:#e2e8f0; font-weight:500; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(it.name)}</span>
+                        ${it.sub ? `<span style="color:#64748b; font-size:0.72rem; white-space:nowrap;">${escapeHtml(it.sub)}</span>` : ''}
+                    </div>`).join('');
+            }
+            // Position above the textarea
+            const ta = document.getElementById('chat-input');
+            const r = ta.getBoundingClientRect();
+            menu.style.position = 'fixed';
+            menu.style.left = r.left + 'px';
+            menu.style.width = Math.min(r.width, 420) + 'px';
+            menu.style.bottom = (window.innerHeight - r.top + 6) + 'px';
+            menu.style.maxHeight = '340px';
+            menu.style.overflowY = 'auto';
+            menu.style.background = 'var(--bg-surface, #1e293b)';
+            menu.style.border = '1px solid var(--border, #334155)';
+            menu.style.borderRadius = '10px';
+            menu.style.boxShadow = '0 12px 30px rgba(0,0,0,0.45)';
+            menu.style.zIndex = '70';
+            menu.style.display = 'block';
+            _slashOpen = true;
+        }
+
+        function _slashHover(i) {
+            _slashSel = i;
+            const rows = document.querySelectorAll('#chat-slash-menu .slash-row');
+            rows.forEach((el, idx) => el.style.background = idx === i ? 'rgba(56,189,248,0.15)' : '');
+        }
+
+        function _slashMove(dir) {
+            if (!_slashItems.length) return;
+            _slashSel = (_slashSel + dir + _slashItems.length) % _slashItems.length;
+            _slashHover(_slashSel);
+            const sel = document.querySelector('#chat-slash-menu .slash-row.sel');
+            const rows = document.querySelectorAll('#chat-slash-menu .slash-row');
+            rows.forEach((el, idx) => el.classList.toggle('sel', idx === _slashSel));
+            const cur = document.querySelectorAll('#chat-slash-menu .slash-row')[_slashSel];
+            if (cur) cur.scrollIntoView({ block: 'nearest' });
+        }
+
+        function _slashSelect(i) {
+            const it = _slashItems[i];
+            if (!it) { closeSlashMenu(); return; }
+            const ta = document.getElementById('chat-input');
+            const val = ta.value;
+            const caret = ta.selectionStart;
+            const before = val.slice(0, _slashStart);
+            const after = val.slice(caret);
+            const insert = it.name + ' ';
+            ta.value = before + insert + after;
+            const newCaret = (before + insert).length;
+            ta.setSelectionRange(newCaret, newCaret);
+            closeSlashMenu();
+            ta.focus();
+            if (typeof autoResizeTextarea === 'function') autoResizeTextarea();
+            if (typeof _updateComposerButtons === 'function') _updateComposerButtons();
+        }
+
+        function closeSlashMenu() {
+            _slashOpen = false;
+            _slashItems = [];
+            _slashStart = -1;
+            const menu = document.getElementById('chat-slash-menu');
+            if (menu) menu.style.display = 'none';
+        }
+
+        // Dismiss on click outside / blur
+        document.addEventListener('click', (e) => {
+            if (!_slashOpen) return;
+            const menu = document.getElementById('chat-slash-menu');
+            const ta = document.getElementById('chat-input');
+            if (menu && !menu.contains(e.target) && e.target !== ta) closeSlashMenu();
+        });
+
         async function sendMessage() {
             const msg = chatInput.value.trim();
             if (!msg && !selectedFile) return;
+
+            // Capture the file, then clear the composer IMMEDIATELY so a quick
+            // second Enter can't re-send the same attachment (Sprint 40 fix).
+            const fileToSend = selectedFile;
 
             document.getElementById('chat-welcome').style.display = 'none';
             document.getElementById('chat-messages').style.display = 'flex';
             document.getElementById('chat-suggestions').style.display = 'none';
 
-            const userMsg = msg || `Uploaded document: ${selectedFile.name}`;
-            appendUserMessage(userMsg, selectedFile);
+            const userMsg = msg || `Uploaded document: ${fileToSend.name}`;
+            appendUserMessage(userMsg, fileToSend);
             chatInput.value = '';
+            clearAttachment();          // resets selectedFile + preview + buttons now
             autoResizeTextarea();
 
             const thinking = appendThinking();
@@ -5154,7 +5534,7 @@
                 const formData = new FormData();
                 formData.append('message', msg);
                 // AI auto-classifies — no manual txn_type needed
-                if (selectedFile) formData.append('file', selectedFile);
+                if (fileToSend) formData.append('file', fileToSend);
                 if (currentSessionId) formData.append('session_id', currentSessionId);
 
                 const currentUser = JSON.parse(localStorage.getItem('currentUser'));
@@ -5172,7 +5552,6 @@
                 currentSessionId = data.session_id;
                 appendAIMessage(data);
                 if (data.suggested_questions) showSuggestions(data.suggested_questions);
-                clearAttachment();
                 loadChatSessions();
             } catch (err) {
                 thinking.remove();
@@ -5262,8 +5641,11 @@
                 if (meta.category) category = meta.category;
                 if (meta.invoice_total) invoiceTotal = parseFloat(meta.invoice_total) || 0;
                 if (meta.invoice_gst) invoiceGST = parseFloat(meta.invoice_gst) || 0;
-                
-                return { billedToPartyName, billingPartyName, billingPartyGSTIN, billedToPartyGSTIN, invoiceNumber, dateVal, category, invoiceTotal, invoiceGST };
+                // Sprint 33 — carry the real voucher_type (Payment/Receipt/Sales/…)
+                const voucherType = meta.voucher_type || meta.category || 'Sales';
+                const counterLedger = meta.counter_ledger || '';
+                const paymentMode = meta.payment_mode || '';
+                return { billedToPartyName, billingPartyName, billingPartyGSTIN, billedToPartyGSTIN, invoiceNumber, dateVal, category, invoiceTotal, invoiceGST, voucherType, counterLedger, paymentMode };
             }
 
             try {
@@ -5344,8 +5726,13 @@
                 const tableId = `table-${Date.now()}`;
                 const fileUrlAttr = data.file_url ? ` data-file-url="${escapeHtml(data.file_url)}"` : '';
                 const msgIdAttr = data.id ? ` data-message-id="${data.id}"` : '';
-                
+
                 const meta = extractMetadata(data);
+                // Sprint 33 — persist voucher_type + counter ledger on the table so
+                // Confirm & Sync sends the correct type (Payment/Receipt/etc.) to Tally.
+                const vtypeAttr = ` data-voucher-type="${escapeHtml(meta.voucherType || meta.category || 'Sales')}"`
+                    + ` data-counter-ledger="${escapeHtml(meta.counterLedger || '')}"`
+                    + ` data-payment-mode="${escapeHtml(meta.paymentMode || '')}"`;
 
                 // Heads-up warnings banner (Sprint 8 follow-up) — AI flags concerns inline
                 const warnings = (data.ui_data && Array.isArray(data.ui_data.warnings)) ? data.ui_data.warnings : [];
@@ -5362,25 +5749,49 @@
                     </div>`;
                 }
 
+                // Sprint 33 — voucher-type-aware card. Payment/Receipt/Contra/Journal
+                // are NOT invoices, so relabel fields, retitle the card, and hide
+                // the GSTIN row (irrelevant for money movements).
+                const _vt = (meta.voucherType || meta.category || 'Sales').toString();
+                const _vtLower = _vt.toLowerCase();
+                const _isMoney = ['payment','receipt','contra','journal'].includes(_vtLower);
+                const _titleMap = {
+                    payment: 'Review & Edit Payment Voucher',
+                    receipt: 'Review & Edit Receipt Voucher',
+                    contra:  'Review & Edit Contra Voucher',
+                    journal: 'Review & Edit Journal Voucher',
+                };
+                const _cardTitle = _titleMap[_vtLower] || 'Review & Edit Invoice Overview (AI Memory Loop)';
+                // Field labels per voucher type
+                const _lblParty1 = _vtLower === 'payment' ? 'Paid To (Party)'
+                                 : _vtLower === 'receipt' ? 'Received From (Party)'
+                                 : 'Billing Party (Supplier)';
+                const _lblParty2 = _vtLower === 'payment' ? 'Paid From (Cash / Bank)'
+                                 : _vtLower === 'receipt' ? 'Received Into (Cash / Bank)'
+                                 : 'Billed To Party (Client)';
+                const _lblNumber = _isMoney ? 'Voucher Number' : 'Invoice Number';
+                // For money vouchers, the 2nd party field shows the payment_mode (Cash/Bank)
+                const _party2Val = _isMoney ? (meta.paymentMode || meta.counterLedger || 'Cash') : meta.billedToPartyName;
+
                 let metaFormHtml = warningsHtml + `
                 <div class="invoice-header-editor" id="meta-${tableId}" style="margin-top: 16px; margin-bottom: 16px; padding: 16px; background: rgba(30, 41, 59, 0.4); border: 1px solid var(--border); border-radius: 8px;">
                     <div style="font-weight: 600; margin-bottom: 12px; font-size: 0.95rem; color: white; display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-                        <span style="display: flex; align-items: center; gap: 8px;"><i class="fas fa-edit" style="color: var(--primary);"></i> Review & Edit Invoice Overview (AI Memory Loop)</span>
+                        <span style="display: flex; align-items: center; gap: 8px;"><i class="fas fa-edit" style="color: var(--primary);"></i> ${_cardTitle}${_isMoney ? ` · <span style="font-size:0.7rem; background:rgba(245,158,11,0.18); color:#f59e0b; padding:1px 8px; border-radius:10px;">${escapeHtml(_vt)}</span>` : ''}</span>
                         <span class="wa-status-badge" style="display: flex; align-items: center; gap: 6px; font-size: 0.8rem; font-weight: 500; background: rgba(255,255,255,0.03); padding: 4px 8px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.05); color: ${isSynced ? '#38bdf8' : '#94a3b8'}; transition: all 0.3s ease;">
                             ${isSynced ? '<i class="fas fa-check-double" style="color: #38bdf8; font-size: 0.95rem;"></i> Synced with Tally' : '<i class="fas fa-clock" style="color: #94a3b8; font-size: 0.95rem;"></i> Pending Sync'}
                         </span>
                     </div>
                     <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 12px; margin-bottom: 12px;">
                         <div>
-                            <label style="font-size: 0.75rem; color: #94a3b8; display: block; margin-bottom: 6px; font-weight: 500;">Billing Party (Supplier)</label>
+                            <label style="font-size: 0.75rem; color: #94a3b8; display: block; margin-bottom: 6px; font-weight: 500;">${_lblParty1}</label>
                             <input type="text" class="meta-billing-party-name" value="${escapeHtml(meta.billingPartyName)}" style="width: 100%; padding: 8px 12px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.85rem; outline: none; transition: border-color 0.2s;" data-original="${escapeHtml(meta.billingPartyName)}"${disabledAttr}>
                         </div>
                         <div>
-                            <label style="font-size: 0.75rem; color: #94a3b8; display: block; margin-bottom: 6px; font-weight: 500;">Billed To Party (Client)</label>
-                            <input type="text" class="meta-billed-to-party-name" value="${escapeHtml(meta.billedToPartyName)}" style="width: 100%; padding: 8px 12px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.85rem; outline: none; transition: border-color 0.2s;" data-original="${escapeHtml(meta.billedToPartyName)}"${disabledAttr}>
+                            <label style="font-size: 0.75rem; color: #94a3b8; display: block; margin-bottom: 6px; font-weight: 500;">${_lblParty2}</label>
+                            <input type="text" class="meta-billed-to-party-name" value="${escapeHtml(_party2Val)}" style="width: 100%; padding: 8px 12px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.85rem; outline: none; transition: border-color 0.2s;" data-original="${escapeHtml(_party2Val)}"${disabledAttr}>
                         </div>
                         <div>
-                            <label style="font-size: 0.75rem; color: #94a3b8; display: block; margin-bottom: 6px; font-weight: 500;">Invoice Number</label>
+                            <label style="font-size: 0.75rem; color: #94a3b8; display: block; margin-bottom: 6px; font-weight: 500;">${_lblNumber}</label>
                             <input type="text" class="meta-invoice-number" value="${escapeHtml(meta.invoiceNumber)}" style="width: 100%; padding: 8px 12px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.85rem; outline: none; transition: border-color 0.2s;" data-original="${escapeHtml(meta.invoiceNumber)}"${disabledAttr}>
                         </div>
                         <div>
@@ -5388,7 +5799,7 @@
                             <input type="text" class="meta-date" value="${escapeHtml(meta.dateVal)}" style="width: 100%; padding: 8px 12px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.85rem; outline: none; transition: border-color 0.2s;" data-original="${escapeHtml(meta.dateVal)}"${disabledAttr}>
                         </div>
                     </div>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                    ${_isMoney ? '' : `<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
                         <div>
                             <label style="font-size: 0.75rem; color: #94a3b8; display: block; margin-bottom: 6px; font-weight: 500;">Billing Party GSTIN</label>
                             <input type="text" class="meta-billing-party-gstin" value="${escapeHtml(meta.billingPartyGSTIN)}" style="width: 100%; padding: 8px 12px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.85rem; outline: none; transition: border-color 0.2s;" data-original="${escapeHtml(meta.billingPartyGSTIN)}" placeholder="Enter Billing Party GSTIN"${disabledAttr}>
@@ -5397,7 +5808,8 @@
                             <label style="font-size: 0.75rem; color: #94a3b8; display: block; margin-bottom: 6px; font-weight: 500;">Billed To Party GSTIN</label>
                             <input type="text" class="meta-billed-to-party-gstin" value="${escapeHtml(meta.billedToPartyGSTIN)}" style="width: 100%; padding: 8px 12px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.85rem; outline: none; transition: border-color 0.2s;" data-original="${escapeHtml(meta.billedToPartyGSTIN)}" placeholder="Enter Billed To Party GSTIN"${disabledAttr}>
                         </div>
-                    </div>
+                    </div>`}
+                    ${_isMoney ? `<input type="hidden" class="meta-billing-party-gstin" value="${escapeHtml(meta.billingPartyGSTIN||'')}" data-original="${escapeHtml(meta.billingPartyGSTIN||'')}"><input type="hidden" class="meta-billed-to-party-gstin" value="${escapeHtml(meta.billedToPartyGSTIN||'')}" data-original="${escapeHtml(meta.billedToPartyGSTIN||'')}">` : ''}
                 </div>
                 `;
 
@@ -5416,7 +5828,7 @@
 
                 let actionHeaderHtml = isSynced ? '' : '<th>Actions</th>';
                 let tableHtml = metaFormHtml + `<div class="chat-ui-table-container">
-                    <table id="${tableId}"${fileUrlAttr}${msgIdAttr}>
+                    <table id="${tableId}"${fileUrlAttr}${msgIdAttr}${vtypeAttr}>
                         <thead><tr>`;
                 cleanHeaders.forEach(h => tableHtml += `<th>${h}</th>`);
                 tableHtml += `${actionHeaderHtml}</tr></thead><tbody>`;
@@ -6191,6 +6603,23 @@
                 const currentUser = JSON.parse(localStorage.getItem('currentUser'));
                 const fileUrl = table.getAttribute('data-file-url') || '';
                 const messageId = table.getAttribute('data-message-id') || '';
+                // Sprint 33 — pull the real voucher_type (Payment/Receipt/Sales/…)
+                const voucherType = table.getAttribute('data-voucher-type') || category || 'Sales';
+                let counterLedger = table.getAttribute('data-counter-ledger') || '';
+                let paymentMode = table.getAttribute('data-payment-mode') || '';
+                const _vtl = voucherType.toLowerCase();
+                if (['payment','receipt','contra','journal'].includes(_vtl)) {
+                    // For money vouchers the relabeled fields are:
+                    //   .meta-billing-party-name  = the actual Party (Paid To / Received From)
+                    //   .meta-billed-to-party-name = the Cash/Bank ledger (Paid From / Into)
+                    // So the party is billingPartyName, and payment_mode is what the
+                    // user has in the 2nd field (falls back to the data-attr).
+                    partyName = billingPartyName || partyName;
+                    if (partyName) paymentMode = paymentMode; // unchanged
+                    const pmField = metaContainer ? metaContainer.querySelector('.meta-billed-to-party-name') : null;
+                    if (pmField && pmField.value.trim()) paymentMode = pmField.value.trim();
+                    if (!counterLedger) counterLedger = partyName; // default head = party
+                }
                 // Send complete payload to Tally and save to DB history
                 const payload = {
                     party_name: partyName,
@@ -6201,6 +6630,9 @@
                     date: dateVal,
                     total_amount: totalAmount,
                     category: category,
+                    voucher_type: voucherType,        // Sprint 33 — correct Tally voucher type
+                    counter_ledger: counterLedger,
+                    payment_mode: paymentMode,
                     items: items,
                     company_name: currentUser ? currentUser.company_name : 'Acme Corp',
                     file_url: fileUrl,
@@ -6630,7 +7062,18 @@
                 });
                 const j = await res.json();
                 if (!res.ok || j.status !== 'success') throw new Error(j.detail || 'delete failed');
-                if (typeof showChatToast === 'function') showChatToast(`🗑️ Deleted ${j.deleted} voucher(s) from YantrAI.`);
+                // Sprint 36 — surface partial failures instead of silently doing nothing
+                const failed = Array.isArray(j.failed) ? j.failed : [];
+                if (j.deleted > 0 && typeof showChatToast === 'function') {
+                    showChatToast(`🗑️ Deleted ${j.deleted} voucher(s) from YantrAI.`);
+                }
+                if (failed.length) {
+                    const lines = failed.slice(0, 6).map(f => `• ${f.voucher_number || f.id}: ${f.reason}`).join('\n');
+                    const more = failed.length > 6 ? `\n…and ${failed.length - 6} more` : '';
+                    alert(`Could not delete ${failed.length} of ${items.length} voucher(s):\n\n${lines}${more}`);
+                } else if (j.deleted === 0) {
+                    alert('Nothing was deleted — the selected rows could not be found.');
+                }
                 refreshVouchers();
                 // Sprint 33 — Tally-sourced rows still exist in the customer's
                 // Tally Prime. Show a manual-cleanup checklist with exact steps.
@@ -8606,10 +9049,14 @@
                                             ~17 MB · Windows 10/11 · auto-starts as a Windows service · auto-updates
                                         </div>
                                     </div>
-                                    <a href="/tally_bridge_agent/download" download
-                                       style="background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%); color:white; padding:12px 22px; border-radius:8px; text-decoration:none; font-weight:700; font-size:0.95rem; display:inline-flex; align-items:center; gap:8px; box-shadow:0 4px 18px rgba(56,189,248,0.35); white-space:nowrap;">
-                                        <i class="fas fa-download"></i> Download for Windows
-                                    </a>
+                                    <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
+                                        <a href="/tally_bridge_agent/download" download
+                                           style="background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%); color:white; padding:12px 22px; border-radius:8px; text-decoration:none; font-weight:700; font-size:0.95rem; display:inline-flex; align-items:center; gap:8px; box-shadow:0 4px 18px rgba(56,189,248,0.35); white-space:nowrap;">
+                                            <i class="fas fa-download"></i> Download for Windows
+                                        </a>
+                                        <!-- Sprint 34 — show the version you'd download -->
+                                        <span id="bridge-agent-version" style="font-size:0.72rem; color:#94a3b8;"></span>
+                                    </div>
                                 </div>
 
                                 <!-- 3-step setup -->
@@ -9034,6 +9481,155 @@
             return `${d}d ago`;
         }
 
+        // Sprint 36 — Real Chart of Accounts: every ledger grouped by Tally group.
+        async function loadChartOfAccounts() {
+            const box = document.getElementById('kb-ledgers');
+            if (!box) return;
+            const u = JSON.parse(localStorage.getItem('currentUser') || '{}');
+            const company = u.company_name || 'Acme Corp';
+            box.innerHTML = '<div style="color:#94a3b8; padding:20px; text-align:center;"><i class="fas fa-spinner fa-spin"></i> Loading chart of accounts…</div>';
+            try {
+                const res = await fetch(`${API}/api/tally/ledgers?company_name=${encodeURIComponent(company)}`);
+                const j = await res.json();
+                const rows = j.data || [];
+                if (!rows.length) {
+                    box.innerHTML = '<div style="color:#64748b; padding:24px; text-align:center;">No ledgers synced yet. Run a Tally sync to pull your chart of accounts.</div>';
+                    return;
+                }
+                // Group by parent_group
+                const groups = {};
+                rows.forEach(l => {
+                    const g = (l.parent_group || 'Ungrouped').trim() || 'Ungrouped';
+                    (groups[g] = groups[g] || []).push(l);
+                });
+                const fmtINR = n => (n == null) ? '' : '₹' + Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+                const groupNames = Object.keys(groups).sort((a, b) => a.localeCompare(b));
+                let html = `<div style="color:#cbd5e1; font-size:0.82rem; margin-bottom:12px;">${rows.length} ledgers · ${groupNames.length} account groups · <span style="color:#64748b;">click a group to expand</span></div>`;
+                groupNames.forEach((g, gi) => {
+                    const items = groups[g].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+                    // group net balance (sum of ledger closing balances)
+                    const net = items.reduce((s, l) => s + (Number(l.closing_balance) || 0), 0);
+                    const bodyId = `coa-grp-body-${gi}`;
+                    const chevId = `coa-grp-chev-${gi}`;
+                    html += `<div class="coa-group" style="margin-bottom:8px; border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+                        <div onclick="_toggleCoaGroup('${bodyId}','${chevId}')"
+                             style="display:flex; align-items:center; gap:10px; padding:11px 14px; cursor:pointer; background:rgba(30,41,59,0.4); user-select:none;">
+                            <span id="${chevId}" style="color:var(--primary); transition:transform 0.15s; display:inline-block;">▸</span>
+                            <span style="font-weight:700; color:#e2e8f0; font-size:0.9rem;">${escapeHtml(g)}</span>
+                            <span style="font-size:0.72rem; font-weight:500; color:#64748b;">${items.length} ledger${items.length!==1?'s':''}</span>
+                            <span style="margin-left:auto; font-size:0.78rem; color:${net<0?'#f87171':'#10b981'};">${net ? fmtINR(net) : ''}</span>
+                        </div>
+                        <div id="${bodyId}" class="coa-grp-body" style="display:none; padding:12px 14px; flex-wrap:wrap; gap:8px;">
+                            ${items.map(l => {
+                                const bal = (l.closing_balance != null && l.closing_balance !== 0)
+                                    ? `<span style="color:#64748b; margin-left:6px; font-size:0.72rem;">${fmtINR(l.closing_balance)}</span>` : '';
+                                const gst = l.gstin ? ` title="GSTIN: ${escapeHtml(l.gstin)}"` : '';
+                                const nameAttr = (l.name || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                                return `<span class="coa-ledger" onclick="openLedgerDetail('${nameAttr}')" data-name="${escapeHtml((l.name||'').toLowerCase())}" data-group="${escapeHtml(g.toLowerCase())}"${gst}
+                                    style="background:rgba(56,189,248,0.08); color:#38bdf8; border:1px solid rgba(56,189,248,0.2); padding:5px 10px; border-radius:6px; font-size:0.82rem; display:inline-flex; align-items:center; cursor:pointer;">
+                                    <i class="fas fa-tag" style="font-size:0.7rem; margin-right:6px;"></i>${escapeHtml(l.name || '')}${bal}</span>`;
+                            }).join('')}
+                        </div>
+                    </div>`;
+                });
+                box.innerHTML = html;
+            } catch (e) {
+                box.innerHTML = `<div style="color:#ef4444; padding:20px;">Could not load chart of accounts: ${e.message}</div>`;
+            }
+        }
+
+        // Sprint 36 — Ledger drill-down: master fields + recent transactions
+        window.openLedgerDetail = async function(name) {
+            const u = JSON.parse(localStorage.getItem('currentUser') || '{}');
+            const company = u.company_name || 'Acme Corp';
+            const old = document.getElementById('ledger-detail-modal');
+            if (old) old.remove();
+            const modal = document.createElement('div');
+            modal.id = 'ledger-detail-modal';
+            modal.style.cssText = 'position:fixed; inset:0; z-index:400; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center;';
+            modal.innerHTML = `<div style="background:#0f172a; border:1px solid var(--border); border-radius:12px; max-width:760px; width:92%; max-height:85vh; overflow:auto; padding:22px; box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+                <div style="color:#94a3b8;"><i class="fas fa-spinner fa-spin"></i> Loading ${escapeHtml(name)}…</div></div>`;
+            modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+            document.body.appendChild(modal);
+            try {
+                const j = await fetch(`${API}/api/ledger/detail?company_name=${encodeURIComponent(company)}&name=${encodeURIComponent(name)}`).then(r => r.json());
+                const m = j.master || {}; const txns = j.transactions || [];
+                const fmtINR = n => (n == null) ? '—' : '₹' + Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+                const field = (label, val) => val ? `<div style="font-size:0.78rem; color:#94a3b8;">${label}: <span style="color:#cbd5e1;">${escapeHtml(String(val))}</span></div>` : '';
+                const txnRows = txns.length ? txns.map(t => `<tr style="border-top:1px solid rgba(255,255,255,0.05);">
+                        <td style="padding:5px 8px; color:#94a3b8;">${t.date ? new Date(t.date).toLocaleDateString('en-IN',{dateStyle:'medium'}) : '—'}</td>
+                        <td style="padding:5px 8px; font-family:monospace; color:#cbd5e1;">${escapeHtml(t.voucher_number||'—')}</td>
+                        <td style="padding:5px 8px;">${escapeHtml(t.voucher_type||'—')}</td>
+                        <td style="padding:5px 8px; color:#cbd5e1;">${escapeHtml((t.narration||'').slice(0,50))}</td>
+                        <td style="padding:5px 8px; text-align:right; color:${(t.amount||0)<0?'#f87171':'#10b981'};">${fmtINR(t.amount)}</td>
+                    </tr>`).join('') : `<tr><td colspan="5" style="padding:14px; text-align:center; color:#64748b;">No transactions found for this ledger.</td></tr>`;
+                modal.querySelector('div').innerHTML = `
+                    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:14px;">
+                        <div>
+                            <h3 style="margin:0 0 2px 0; color:#fff;">${escapeHtml(m.name || name)}</h3>
+                            <div style="font-size:0.8rem; color:#64748b;">${escapeHtml(m.parent_group || '')}</div>
+                        </div>
+                        <button onclick="document.getElementById('ledger-detail-modal').remove()" style="background:none; border:none; color:#94a3b8; font-size:1.3rem; cursor:pointer;">&times;</button>
+                    </div>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:16px;">
+                        <div style="background:rgba(30,41,59,0.4); border:1px solid var(--border); border-radius:8px; padding:12px;">
+                            <div style="font-size:0.72rem; color:#64748b; text-transform:uppercase; margin-bottom:6px;">Balance</div>
+                            <div style="font-size:1.2rem; font-weight:700; color:${(m.closing_balance||0)<0?'#f87171':'#10b981'};">${fmtINR(m.closing_balance)}</div>
+                            ${field('Opening', m.opening_balance != null ? fmtINR(m.opening_balance) : '')}
+                        </div>
+                        <div style="background:rgba(30,41,59,0.4); border:1px solid var(--border); border-radius:8px; padding:12px;">
+                            ${field('GSTIN', m.gstin)}${field('PAN', m.pan)}
+                            ${field('Reg type', m.gst_registration_type)}${field('Place of supply', m.place_of_supply)}
+                            ${field('TDS applicable', m.tds_applicable ? 'Yes' : '')}
+                            ${field('Bank', m.bank_name)}${field('A/c', m.account_number)}${field('IFSC', m.ifsc_code)}
+                            ${field('Address', m.address)}
+                            ${(!m.gstin && !m.pan && !m.bank_name && !m.address) ? '<div style="font-size:0.78rem; color:#64748b;">No extra master details.</div>' : ''}
+                        </div>
+                    </div>
+                    <div style="font-weight:600; color:#cbd5e1; font-size:0.85rem; margin-bottom:8px;">Recent transactions (${txns.length})</div>
+                    <div style="overflow:auto; max-height:38vh;"><table style="width:100%; border-collapse:collapse; font-size:0.78rem;">
+                        <thead><tr style="color:#64748b; text-align:left;">
+                            <th style="padding:5px 8px;">Date</th><th style="padding:5px 8px;">Voucher #</th>
+                            <th style="padding:5px 8px;">Type</th><th style="padding:5px 8px;">Narration</th>
+                            <th style="padding:5px 8px; text-align:right;">Amount</th>
+                        </tr></thead><tbody>${txnRows}</tbody></table></div>`;
+            } catch (e) {
+                modal.querySelector('div').innerHTML = `<div style="color:#ef4444;">Could not load ledger details: ${e.message}</div>
+                    <button onclick="document.getElementById('ledger-detail-modal').remove()" style="margin-top:12px; padding:6px 14px; background:var(--primary); border:none; border-radius:6px; cursor:pointer;">Close</button>`;
+            }
+        };
+
+        // Sprint 36 — expand/collapse a Chart-of-Accounts group
+        window._toggleCoaGroup = function(bodyId, chevId) {
+            const body = document.getElementById(bodyId);
+            const chev = document.getElementById(chevId);
+            if (!body) return;
+            const open = body.style.display !== 'none';
+            body.style.display = open ? 'none' : 'flex';
+            if (chev) chev.style.transform = open ? 'rotate(0deg)' : 'rotate(90deg)';
+        };
+
+        // Sprint 36 — live filter the COA ledger chips; auto-expand groups with matches
+        function _filterCoa() {
+            const q = (document.getElementById('coa-search')?.value || '').toLowerCase().trim();
+            document.querySelectorAll('#kb-ledgers .coa-group').forEach(grp => {
+                let anyVisible = false;
+                grp.querySelectorAll('.coa-ledger').forEach(chip => {
+                    const match = !q || (chip.dataset.name || '').includes(q) || (chip.dataset.group || '').includes(q);
+                    chip.style.display = match ? '' : 'none';
+                    if (match) anyVisible = true;
+                });
+                grp.style.display = anyVisible ? '' : 'none';
+                // When searching, auto-open matching groups; when cleared, collapse all
+                const body = grp.querySelector('.coa-grp-body');
+                const chev = grp.querySelector('span[id^="coa-grp-chev"]');
+                if (body) {
+                    if (q && anyVisible) { body.style.display = 'flex'; if (chev) chev.style.transform = 'rotate(90deg)'; }
+                    else if (!q) { body.style.display = 'none'; if (chev) chev.style.transform = 'rotate(0deg)'; }
+                }
+            });
+        }
+
         async function fetchTallySummary() {
             const currentUser = JSON.parse(localStorage.getItem('currentUser'));
             const companyName = currentUser ? currentUser.company_name : 'Acme Corp';
@@ -9111,7 +9707,7 @@
                     btn.style.color = 'var(--accent)';
                 }
                 document.getElementById('schema-subview-coa').style.display = 'block';
-                fetchTallySummary();
+                loadChartOfAccounts();   // Sprint 36 — real grouped chart of accounts
             } else if (subview === 'parties') {
                 const btn = document.getElementById('schema-tab-parties');
                 if (btn) {
@@ -9130,6 +9726,73 @@
                 }
                 document.getElementById('schema-subview-items').style.display = 'block';
                 loadItemMaster();
+            } else if (subview === 'actionlog') {
+                const btn = document.getElementById('schema-tab-actionlog');
+                if (btn) {
+                    btn.classList.add('active');
+                    btn.style.borderBottom = '2px solid var(--accent)';
+                    btn.style.color = 'var(--accent)';
+                }
+                document.getElementById('schema-subview-actionlog').style.display = 'block';
+                loadMasterActionLog();
+            }
+        }
+
+        // Sprint 34 — Masters Action / Event Log
+        async function loadMasterActionLog() {
+            const body = document.getElementById('masterlog-body');
+            if (!body) return;
+            const u = JSON.parse(localStorage.getItem('currentUser')||'{}');
+            const company = u.company_name || '';
+            const status = document.getElementById('masterlog-filter')?.value ?? 'pending';
+            body.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading…';
+            try {
+                const url = `${API}/api/masters/ai-suggestions?company_name=${encodeURIComponent(company)}${status ? '&status='+status : ''}`;
+                const res = await fetch(url);
+                const j = await res.json();
+                const rows = j.data || [];
+                if (!rows.length) {
+                    body.innerHTML = `<div style="padding:24px; text-align:center; color:#64748b;">No ${status||''} items. Run <strong>🔬 AI Master Gap Scan</strong> to detect gaps.</div>`;
+                    return;
+                }
+                const labels = {
+                    missing_gstin:['🪪','Missing GSTIN'], missing_pan:['📇','Missing PAN'],
+                    missing_pos:['📍','Missing Place of Supply'], missing_gst_registration_type:['🏷️','Missing Reg Type'],
+                    missing_address:['📮','Missing Address'], party_type:['🏢','Party type (B2B/B2C)'],
+                    duplicate_party:['👯','Duplicate party'], missing_hsn_code:['🔢','Missing HSN'],
+                    missing_gst_rate:['%','Missing GST rate'], missing_unit:['📏','Missing Unit'],
+                    missing_standard_rate:['₹','Missing Std Rate'], missing_parent_group:['📁','Missing Group'],
+                    clean_name:['✨','Clean item name'], duplicate_item:['👯','Duplicate item'],
+                    invoice_price:['🧾','Price from invoices'], source_suppliers:['🚚','Sourced from'],
+                };
+                const rowsHtml = rows.map(s => {
+                    const [icon, lbl] = labels[s.gap_type] || ['🤖', s.gap_type];
+                    const conf = Math.round((s.confidence||0)*100);
+                    const name = s.record_name || s.current_value || s.record_id;
+                    const actions = s.status === 'pending'
+                        ? `<button onclick="acceptMasterAISuggestion('${s.id}'); setTimeout(loadMasterActionLog,400);" style="padding:3px 9px; background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.35); border-radius:4px; font-size:0.72rem; cursor:pointer;">✓ Apply</button>
+                           <button onclick="rejectMasterAISuggestion('${s.id}'); setTimeout(loadMasterActionLog,400);" style="padding:3px 9px; background:rgba(239,68,68,0.12); color:#ef4444; border:1px solid rgba(239,68,68,0.3); border-radius:4px; font-size:0.72rem; cursor:pointer; margin-left:4px;">✖</button>`
+                        : `<span style="color:#64748b; font-size:0.72rem;">${s.status}</span>`;
+                    return `<tr style="border-top:1px solid rgba(255,255,255,0.05);">
+                        <td style="padding:7px 8px;"><span style="text-transform:uppercase; font-size:0.65rem; color:#64748b;">${s.master_type}</span></td>
+                        <td style="padding:7px 8px; color:#e2e8f0;">${escapeHtml(String(name||'—'))}</td>
+                        <td style="padding:7px 8px;">${icon} ${lbl}</td>
+                        <td style="padding:7px 8px; color:#10b981;">${escapeHtml(String(s.suggested_value ?? '—'))}</td>
+                        <td style="padding:7px 8px; color:#64748b;">${conf}%</td>
+                        <td style="padding:7px 8px; color:#94a3b8; font-size:0.75rem;">${escapeHtml(s.rationale||'')}</td>
+                        <td style="padding:7px 8px; text-align:right;">${actions}</td>
+                    </tr>`;
+                }).join('');
+                body.innerHTML = `<div style="margin-bottom:8px; color:#cbd5e1;">${rows.length} item(s)</div>
+                  <div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:0.8rem;">
+                    <thead><tr style="color:#64748b; text-align:left;">
+                        <th style="padding:6px 8px;">Master</th><th style="padding:6px 8px;">Record</th>
+                        <th style="padding:6px 8px;">Gap</th><th style="padding:6px 8px;">Suggested</th>
+                        <th style="padding:6px 8px;">Conf</th><th style="padding:6px 8px;">Why</th>
+                        <th style="padding:6px 8px; text-align:right;">Action</th>
+                    </tr></thead><tbody>${rowsHtml}</tbody></table></div>`;
+            } catch (e) {
+                body.innerHTML = `<span style="color:#ef4444;">Could not load: ${e.message}</span>`;
             }
         }
 
@@ -9147,6 +9810,14 @@
                 if (result.status === 'success') {
                     allPartiesData = result.parties || [];
                     renderPartyTable(allPartiesData);
+                    // Sprint 34 — ensure AI suggestions are loaded so chips +
+                    // gap-filter dropdown populate, then re-render once.
+                    if (!window._masterAiSuggestions && typeof _loadMasterAiSuggestions === 'function') {
+                        await _loadMasterAiSuggestions();
+                        renderPartyTable(allPartiesData);
+                    } else if (typeof _refreshMasterAiGapDropdowns === 'function') {
+                        _refreshMasterAiGapDropdowns();
+                    }
                 } else {
                     throw new Error(result.message || 'Failed to load parties');
                 }
@@ -9275,7 +9946,8 @@
                 tr.onmouseover = () => tr.style.background = 'rgba(255,255,255,0.02)';
                 tr.onmouseout = () => tr.style.background = 'none';
                 
-                const safeName = escapeHtml(p.name || '');
+                const safeName = escapeHtml(p.display_name || p.name || '');
+                const safeOrigName = p.display_name ? escapeHtml(p.name || '') : '';
                 const safeGstin = escapeHtml(p.gstin || 'N/A');
                 const safePan = escapeHtml(p.pan || 'N/A');
                 const safeAddress = escapeHtml(p.address || 'N/A');
@@ -9299,6 +9971,11 @@
                 
                 // Sprint 27 — AI chips for this party
                 const aiChips = (typeof _masterAiChipsHTML === 'function') ? _masterAiChipsHTML('party', p.id) : '';
+                // Sprint 34 — tag the row with its AI gap types for filtering
+                const _pGaps = ((window._masterAiSuggestions?.party || {})[p.id] || []).map(s => s.gap_type);
+                tr.dataset.recordId = p.id;
+                tr.dataset.gaps = _pGaps.join(',');
+                tr.classList.add('party-master-row');
                 tr.innerHTML = `
                     <td style="padding: 14px 10px; font-weight: 600; color: white;">
                         <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 4px;">
@@ -9306,6 +9983,7 @@
                             ${badgeHtml}
                             ${aiChips}
                         </div>
+                        ${safeOrigName ? `<div style="font-size: 0.7rem; color: #64748b; font-style: italic; font-weight: 400;">Tally: ${safeOrigName}</div>` : ''}
                     </td>
                     <td style="padding: 14px 10px; font-family: monospace; font-size: 0.8rem; color: #38bdf8;">${safeGstin}</td>
                     <td style="padding: 14px 10px; font-family: monospace; font-size: 0.8rem; color: #94a3b8;">${safePan}</td>
@@ -9479,12 +10157,7 @@
 
         function filterPartyMaster() {
             const query = document.getElementById('party-search').value.toLowerCase().trim();
-            if (!query) {
-                renderPartyTable(allPartiesData);
-                return;
-            }
-            
-            const filtered = allPartiesData.filter(p => {
+            const filtered = !query ? allPartiesData : allPartiesData.filter(p => {
                 return (p.name || '').toLowerCase().includes(query) ||
                        (p.gstin || '').toLowerCase().includes(query) ||
                        (p.pan || '').toLowerCase().includes(query) ||
@@ -9493,6 +10166,50 @@
                        (p.account_number || '').toLowerCase().includes(query);
             });
             renderPartyTable(filtered);
+            _applyMasterAiGapFilter('party');   // Sprint 34
+        }
+
+        // Sprint 34 — hide rows that don't match the selected AI-gap filter.
+        function _applyMasterAiGapFilter(masterType) {
+            const sel = document.getElementById(`${masterType}-ai-gap-filter`);
+            const gap = sel ? sel.value : '';
+            const rows = document.querySelectorAll(`.${masterType}-master-row`);
+            rows.forEach(tr => {
+                if (!gap) { tr.style.display = ''; return; }
+                const gaps = (tr.dataset.gaps || '').split(',').filter(Boolean);
+                const match = gap === 'any' ? gaps.length > 0 : gaps.includes(gap);
+                tr.style.display = match ? '' : 'none';
+            });
+        }
+
+        // Sprint 34 — populate the AI-gap filter dropdowns from the scan counts.
+        function _refreshMasterAiGapDropdowns() {
+            const counts = window._masterAiCounts || { party: {}, item: {} };
+            const labels = {
+                missing_gstin:'🪪 Missing GSTIN', missing_pan:'📇 Missing PAN',
+                missing_pos:'📍 Missing PoS', missing_gst_registration_type:'🏷️ Reg Type',
+                missing_address:'📮 Missing Address', party_type:'🏢 B2B/B2C type',
+                duplicate_party:'👯 Duplicate party',
+                missing_hsn_code:'🔢 Missing HSN', missing_gst_rate:'% GST rate',
+                missing_unit:'📏 Missing Unit', missing_standard_rate:'₹ Std Rate',
+                missing_parent_group:'📁 Group', clean_name:'✨ Clean name',
+                duplicate_item:'👯 Duplicate item', invoice_price:'🧾 Price from invoices',
+            };
+            ['party','item'].forEach(mt => {
+                const sel = document.getElementById(`${mt}-ai-gap-filter`);
+                if (!sel) return;
+                const cur = sel.value;
+                const c = counts[mt] || {};
+                const total = Object.values(c).reduce((a,b)=>a+(b||0),0);
+                const opts = [`<option value="">🤖 AI Gap: all</option>`];
+                if (total) opts.push(`<option value="any">⤷ Any pending (${total})</option>`);
+                Object.entries(c).forEach(([gt,n]) => {
+                    if (!n) return;
+                    opts.push(`<option value="${gt}">${labels[gt] || gt} (${n})</option>`);
+                });
+                sel.innerHTML = opts.join('');
+                if (cur && Array.from(sel.options).some(o => o.value === cur)) sel.value = cur;
+            });
         }
 
         // ==========================================
@@ -9515,11 +10232,18 @@
                     // Prefer Tally stock-item master if available; fall back to invoice-derived items
                     const tally = result.tally_items || [];
                     const invoice = result.invoice_items || result.items || [];
-                    if (tally.length > 0) {
-                        renderTallyStockTable(tally, invoice.length);
-                    } else {
-                        allItemsData = invoice;
-                        renderItemTable(allItemsData);
+                    window._itemMasterTally = tally; window._itemMasterInvoice = invoice;
+                    const _renderItems = () => {
+                        if (tally.length > 0) renderTallyStockTable(tally, invoice.length);
+                        else { allItemsData = invoice; renderItemTable(allItemsData); }
+                    };
+                    _renderItems();
+                    // Sprint 34 — ensure AI suggestions loaded, then re-render + filter
+                    if (!window._masterAiSuggestions && typeof _loadMasterAiSuggestions === 'function') {
+                        await _loadMasterAiSuggestions();
+                        _renderItems();
+                    } else if (typeof _refreshMasterAiGapDropdowns === 'function') {
+                        _refreshMasterAiGapDropdowns();
                     }
                 } else {
                     throw new Error(result.message || 'Failed to load items');
@@ -9540,10 +10264,13 @@
                 const closeQty = it.closing_qty != null ? Number(it.closing_qty).toLocaleString('en-IN') : '-';
                 // Sprint 27 — AI chips beside the item name
                 const chips = (typeof _masterAiChipsHTML === 'function') ? _masterAiChipsHTML('item', it.id) : '';
+                // Sprint 34 — tag row with gap types for filtering
+                const _iGaps = ((window._masterAiSuggestions?.item || {})[it.id] || []).map(s => s.gap_type).join(',');
                 return `
-                    <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                    <tr class="item-master-row" data-record-id="${it.id}" data-gaps="${_iGaps}" style="border-bottom: 1px solid rgba(255,255,255,0.05);">
                         <td style="padding: 10px 8px;">
-                            <div style="font-weight: 600; color: #e2e8f0;">${escapeHtml(it.name || '')}${chips}</div>
+                            <div style="font-weight: 600; color: #e2e8f0;">${escapeHtml(it.display_name || it.name || '')}${chips}</div>
+                            ${it.display_name ? `<div style="font-size: 0.7rem; color: #64748b; font-style: italic;">Tally: ${escapeHtml(it.name)}</div>` : ''}
                             <div style="font-size: 0.75rem; color: #64748b;">${escapeHtml(it.parent_group || '')} · ${escapeHtml(it.unit || 'unit')}</div>
                         </td>
                         <td style="padding: 10px 8px; font-family: monospace; color: #94a3b8;">${escapeHtml(it.hsn_code || '-')}</td>
@@ -9691,17 +10418,20 @@
 
         window.filterItemMaster = function() {
             const query = document.getElementById('item-search').value.toLowerCase().trim();
-            if (!query) {
+            // Only re-render the invoice-derived table on text search. When the
+            // table is Tally-sourced (rendered via renderTallyStockTable) or the
+            // query is empty, we keep the DOM and just apply the AI-gap filter.
+            if (query && allItemsData && allItemsData.length) {
+                const filtered = allItemsData.filter(it => {
+                    return (it.description || it.name || '').toLowerCase().includes(query) ||
+                           (it.hsn_sac || it.hsn_code || '').toLowerCase().includes(query) ||
+                           (it.source_party || '').toLowerCase().includes(query);
+                });
+                renderItemTable(filtered);
+            } else if (!query && allItemsData && allItemsData.length) {
                 renderItemTable(allItemsData);
-                return;
             }
-            
-            const filtered = allItemsData.filter(it => {
-                return (it.description || '').toLowerCase().includes(query) ||
-                       (it.hsn_sac || '').toLowerCase().includes(query) ||
-                       (it.source_party || '').toLowerCase().includes(query);
-            });
-            renderItemTable(filtered);
+            _applyMasterAiGapFilter('item');   // Sprint 34
         };
 
         window.openAddPartyModal = () => {
@@ -9770,6 +10500,275 @@
                 }
             } catch (err) {
                 alert(`Error saving party: ${err.message}`);
+            }
+        };
+
+        // ── Sprint 38: open a source file, falling back to the printable
+        // voucher when the file is missing (404 / placeholder) ───────────
+        window.viewSourceFile = async (url, voucherId, isPdf) => {
+            try {
+                const r = await fetch(url, { method: 'HEAD' });
+                if (r.ok) {
+                    if (isPdf) { window.open(url, '_blank'); }
+                    else { openMediaModal(url); }
+                    return;
+                }
+            } catch (_) { /* network/HEAD failure → fall through */ }
+            // File not reachable — show the generated voucher instead.
+            openVoucherPrintView(voucherId);
+        };
+
+        // ── Sprint 38: Printable voucher view (browser → Save as PDF) ─────
+        window.openVoucherPrintView = async (voucherId) => {
+            try {
+                const res = await fetch(`${API}/api/vouchers/${voucherId}`);
+                if (!res.ok) { alert('Could not load voucher'); return; }
+                const { data: v } = await res.json();
+
+                const inr = (n) => '₹' + (parseFloat(n || 0)).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                const esc = (s) => escapeHtml(String(s == null ? '' : s));
+                const company = esc(v.company_name || (typeof currentCompany !== 'undefined' ? currentCompany : '') || '');
+                const vtype = esc(v.voucher_type || 'Voucher');
+                const vnum = esc(v.voucher_number || '');
+                const vdate = esc((v.date || '').slice(0, 10));
+                const party = esc(v.party_name || '');
+                const narration = esc(v.narration || '');
+
+                const legs = (v.ledger_entries || []).map(e => {
+                    const amt = parseFloat(e.amount || 0);
+                    const isDr = ('is_debit' in e) ? !!e.is_debit : (amt >= 0);
+                    return { name: e.ledger_name || e.ledger || '', amount: Math.abs(amt), is_debit: isDr };
+                });
+                let drTotal = 0, crTotal = 0;
+                const rowsHtml = legs.map(l => {
+                    if (l.is_debit) drTotal += l.amount; else crTotal += l.amount;
+                    return `<tr>
+                        <td>${esc(l.name)}</td>
+                        <td class="amt">${l.is_debit ? inr(l.amount) : ''}</td>
+                        <td class="amt">${!l.is_debit ? inr(l.amount) : ''}</td>
+                    </tr>`;
+                }).join('');
+                const totalAmt = v.amount != null ? v.amount : (drTotal || crTotal);
+
+                const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
+                <title>${vtype} ${vnum}</title>
+                <style>
+                  * { box-sizing: border-box; }
+                  body { font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; color:#111; margin:0; padding:32px; background:#f1f5f9; }
+                  .sheet { background:#fff; max-width:760px; margin:0 auto; padding:36px 40px; border:1px solid #e2e8f0; border-radius:8px; }
+                  .hd { text-align:center; border-bottom:2px solid #111; padding-bottom:12px; margin-bottom:18px; }
+                  .hd h1 { margin:0; font-size:1.4rem; }
+                  .hd .vt { margin-top:4px; font-size:1rem; color:#475569; text-transform:uppercase; letter-spacing:1px; }
+                  .meta { display:flex; justify-content:space-between; font-size:0.9rem; margin-bottom:16px; }
+                  .meta div { line-height:1.6; }
+                  table { width:100%; border-collapse:collapse; margin-top:8px; font-size:0.9rem; }
+                  th, td { border:1px solid #cbd5e1; padding:8px 10px; text-align:left; }
+                  th { background:#f1f5f9; }
+                  td.amt, th.amt { text-align:right; font-family:monospace; }
+                  tfoot td { font-weight:bold; background:#f8fafc; }
+                  .narr { margin-top:16px; font-size:0.85rem; color:#334155; }
+                  .narr strong { color:#111; }
+                  .footer { margin-top:36px; display:flex; justify-content:space-between; font-size:0.8rem; color:#64748b; }
+                  .toolbar { text-align:center; margin-bottom:18px; }
+                  .toolbar button { font-size:0.95rem; padding:9px 22px; background:#0ea5e9; color:#fff; border:none; border-radius:6px; cursor:pointer; }
+                  @media print {
+                    body { background:#fff; padding:0; }
+                    .sheet { border:none; border-radius:0; max-width:none; }
+                    .toolbar { display:none; }
+                  }
+                </style></head><body>
+                <div class="toolbar"><button onclick="window.print()">🖨 Print / Save as PDF</button></div>
+                <div class="sheet">
+                  <div class="hd">
+                    <h1>${company || 'Voucher'}</h1>
+                    <div class="vt">${vtype} Voucher</div>
+                  </div>
+                  <div class="meta">
+                    <div><strong>Voucher No:</strong> ${vnum || '—'}<br><strong>Party:</strong> ${party || '—'}</div>
+                    <div style="text-align:right;"><strong>Date:</strong> ${vdate || '—'}</div>
+                  </div>
+                  <table>
+                    <thead><tr><th>Particulars</th><th class="amt">Debit</th><th class="amt">Credit</th></tr></thead>
+                    <tbody>${rowsHtml || `<tr><td>${party || '—'}</td><td class="amt">${inr(totalAmt)}</td><td class="amt"></td></tr>`}</tbody>
+                    <tfoot><tr><td>Total</td><td class="amt">${inr(drTotal || totalAmt)}</td><td class="amt">${inr(crTotal || totalAmt)}</td></tr></tfoot>
+                  </table>
+                  ${narration ? `<div class="narr"><strong>Narration:</strong> ${narration}</div>` : ''}
+                  <div class="footer"><span>Generated by YantrAI</span><span>Authorised Signatory</span></div>
+                </div>
+                </body></html>`;
+
+                const w = window.open('', '_blank');
+                if (!w) { alert('Please allow pop-ups to view the voucher.'); return; }
+                w.document.open(); w.document.write(html); w.document.close();
+            } catch (e) {
+                console.error(e); alert('Error loading voucher: ' + e.message);
+            }
+        };
+
+        // ── Edit Voucher ────────────────────────────────────────────────
+        let _voucherEditLegs = [];
+
+        window.openEditVoucherModal = async (voucherId) => {
+            try {
+                const res = await fetch(`${API}/api/vouchers/${voucherId}`);
+                if (!res.ok) { alert('Could not load voucher'); return; }
+                const { data: v } = await res.json();
+
+                document.getElementById('voucher-edit-id').value = v.id || '';
+                document.getElementById('voucher-edit-master-id').value = v.tally_master_id || '';
+                document.getElementById('voucher-edit-title').innerHTML =
+                    `📝 Edit Voucher <span style="color:var(--accent);">${escapeHtml(v.voucher_number || '')}</span>`;
+                document.getElementById('voucher-edit-date').value = (v.date || '').slice(0, 10);
+                document.getElementById('voucher-edit-number').value = v.voucher_number || '';
+                document.getElementById('voucher-edit-type').value = v.voucher_type || 'Sales';
+                document.getElementById('voucher-edit-party').value = v.party_name || '';
+                document.getElementById('voucher-edit-narration').value = v.narration || '';
+
+                // Sprint 38 — source document link (uploaded file or printable voucher)
+                const docEl = document.getElementById('voucher-edit-doc-link');
+                if (docEl) {
+                    if (v.file_url) {
+                        const cleanUrl = v.file_url.startsWith('http') ? v.file_url : `${API}/${v.file_url.replace(/^\/+/, '')}`;
+                        const isPdf = cleanUrl.toLowerCase().includes('.pdf');
+                        docEl.innerHTML = `<a href="javascript:void(0)" onclick="viewSourceFile('${cleanUrl}','${v.id}',${isPdf})" style="color:var(--primary); text-decoration:none; font-size:0.82rem; font-weight:500;"><i class="fas fa-${isPdf ? 'file-pdf' : 'image'}"></i> View source file</a>`;
+                    } else {
+                        docEl.innerHTML = `<a href="javascript:void(0)" onclick="openVoucherPrintView('${v.id}')" style="color:#38bdf8; text-decoration:none; font-size:0.82rem; font-weight:500;"><i class="fas fa-receipt"></i> View voucher (PDF)</a>`;
+                    }
+                }
+
+                // Seed legs from stored ledger_entries; fall back to a 2-line stub.
+                _voucherEditLegs = (v.ledger_entries || []).map(e => {
+                    const amt = parseFloat(e.amount || 0);
+                    const isDr = ('is_debit' in e) ? !!e.is_debit : (amt >= 0);
+                    return { ledger_name: e.ledger_name || e.ledger || '', amount: Math.abs(amt), is_debit: isDr };
+                });
+                if (_voucherEditLegs.length === 0) {
+                    _voucherEditLegs = [
+                        { ledger_name: v.party_name || '', amount: parseFloat(v.amount || 0) || 0, is_debit: true },
+                        { ledger_name: '', amount: parseFloat(v.amount || 0) || 0, is_debit: false },
+                    ];
+                }
+                _renderVoucherLegs();
+
+                // Populate the party datalist from the loaded master list, if present.
+                try {
+                    const dl = document.getElementById('voucher-party-datalist');
+                    if (dl && typeof allPartiesData !== 'undefined' && Array.isArray(allPartiesData)) {
+                        dl.innerHTML = allPartiesData.map(p => `<option value="${escapeHtml(p.display_name || p.name || '')}"></option>`).join('');
+                    }
+                } catch (_) {}
+
+                document.getElementById('voucher-edit-modal').style.display = 'flex';
+            } catch (e) {
+                console.error(e); alert('Error loading voucher: ' + e.message);
+            }
+        };
+
+        window.closeVoucherEditModal = () => {
+            document.getElementById('voucher-edit-modal').style.display = 'none';
+            _voucherEditLegs = [];
+        };
+
+        function _renderVoucherLegs() {
+            const tb = document.getElementById('voucher-edit-legs');
+            tb.innerHTML = _voucherEditLegs.map((leg, i) => `
+                <tr>
+                    <td style="padding:4px 6px;"><input type="text" value="${escapeHtml(leg.ledger_name || '')}" oninput="_updateVoucherLeg(${i},'ledger_name',this.value)" list="voucher-party-datalist" style="width:100%; padding:7px 9px; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:6px; font-size:0.82rem; outline:none;"></td>
+                    <td style="padding:4px 6px;"><input type="number" step="0.01" min="0" value="${leg.is_debit ? (leg.amount || '') : ''}" oninput="_updateVoucherLeg(${i},'debit',this.value)" style="width:100%; padding:7px 9px; text-align:right; background:var(--bg-light); color:#f87171; border:1px solid var(--border); border-radius:6px; font-size:0.82rem; font-family:monospace; outline:none;"></td>
+                    <td style="padding:4px 6px;"><input type="number" step="0.01" min="0" value="${!leg.is_debit ? (leg.amount || '') : ''}" oninput="_updateVoucherLeg(${i},'credit',this.value)" style="width:100%; padding:7px 9px; text-align:right; background:var(--bg-light); color:#4ade80; border:1px solid var(--border); border-radius:6px; font-size:0.82rem; font-family:monospace; outline:none;"></td>
+                    <td style="text-align:center;"><button type="button" onclick="removeVoucherLeg(${i})" title="Remove" style="background:none; border:none; color:#ef4444; cursor:pointer; font-size:0.9rem;"><i class="fas fa-times"></i></button></td>
+                </tr>`).join('');
+            _recomputeVoucherTotals();
+        }
+
+        window._updateVoucherLeg = (i, field, value) => {
+            const leg = _voucherEditLegs[i];
+            if (!leg) return;
+            if (field === 'ledger_name') {
+                leg.ledger_name = value;
+            } else if (field === 'debit') {
+                const n = parseFloat(value || 0);
+                if (n > 0) { leg.amount = n; leg.is_debit = true; }
+                else if (leg.is_debit) { leg.amount = 0; }
+            } else if (field === 'credit') {
+                const n = parseFloat(value || 0);
+                if (n > 0) { leg.amount = n; leg.is_debit = false; }
+                else if (!leg.is_debit) { leg.amount = 0; }
+            }
+            _recomputeVoucherTotals();
+        };
+
+        window.addVoucherLeg = () => {
+            _voucherEditLegs.push({ ledger_name: '', amount: 0, is_debit: true });
+            _renderVoucherLegs();
+        };
+
+        window.removeVoucherLeg = (i) => {
+            _voucherEditLegs.splice(i, 1);
+            _renderVoucherLegs();
+        };
+
+        function _recomputeVoucherTotals() {
+            let dr = 0, cr = 0;
+            _voucherEditLegs.forEach(l => {
+                if (l.is_debit) dr += (parseFloat(l.amount) || 0);
+                else cr += (parseFloat(l.amount) || 0);
+            });
+            document.getElementById('voucher-edit-dr-total').textContent = '₹' + dr.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            document.getElementById('voucher-edit-cr-total').textContent = '₹' + cr.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            const balanced = Math.abs(dr - cr) < 0.01;
+            document.getElementById('voucher-edit-balance-warn').style.display = balanced ? 'none' : 'block';
+            return balanced;
+        }
+
+        window.saveVoucherEdit = async (event) => {
+            if (event) event.preventDefault();
+            const id = document.getElementById('voucher-edit-id').value;
+            if (!id) return;
+
+            const legs = _voucherEditLegs
+                .filter(l => (l.ledger_name || '').trim() && (parseFloat(l.amount) || 0) > 0)
+                .map(l => ({ ledger_name: l.ledger_name.trim(), amount: l.is_debit ? Math.abs(l.amount) : -Math.abs(l.amount), is_debit: l.is_debit }));
+
+            if (legs.length && !_recomputeVoucherTotals()) {
+                alert('Debit and Credit totals must match before saving.');
+                return;
+            }
+
+            const user = JSON.parse(localStorage.getItem('currentUser') || '{}');
+            const payload = {
+                date: document.getElementById('voucher-edit-date').value || null,
+                voucher_number: document.getElementById('voucher-edit-number').value.trim(),
+                voucher_type: document.getElementById('voucher-edit-type').value,
+                party_name: document.getElementById('voucher-edit-party').value.trim(),
+                narration: document.getElementById('voucher-edit-narration').value,
+                ledger_entries: legs,
+                username: user.username || user.name || null,
+            };
+            try {
+                const res = await fetch(`${API}/api/vouchers/${id}`, {
+                    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const j = await res.json();
+                if (!res.ok) { alert(j.detail || 'Save failed'); return; }
+                closeVoucherEditModal();
+                loadVouchers();
+            } catch (e) {
+                alert('Error saving voucher: ' + e.message);
+            }
+        };
+
+        window.resyncVoucher = async (voucherId) => {
+            if (!confirm('Push this edited voucher to Tally now? If it was synced before, Tally will update the same voucher.')) return;
+            try {
+                const res = await fetch(`${API}/api/vouchers/${voucherId}/resync`, { method: 'POST' });
+                const j = await res.json();
+                if (!res.ok) { alert(j.detail || 'Resync failed'); return; }
+                alert(`Resync queued (${j.action}). Track progress in Event Logs; the bridge agent will push it to Tally.`);
+                loadVouchers();
+            } catch (e) {
+                alert('Error queuing resync: ' + e.message);
             }
         };
 
@@ -10117,6 +11116,25 @@
                         detail.innerHTML = `Agent has never connected from this company. Install it on the Windows PC where Tally Prime runs, then sign in once.`;
                     }
                 }
+                // Sprint 34 — show the downloadable agent version + compare to
+                // the running agent's heartbeat version.
+                const verEl = document.getElementById('bridge-agent-version');
+                if (verEl && !verEl.dataset.loaded) {
+                    verEl.dataset.loaded = '1';
+                    try {
+                        const vr = await fetch(`${API}/tally_bridge_agent/version`).then(r => r.json());
+                        if (vr && vr.version) {
+                            const built = vr.exe_built_at ? ` · built ${vr.exe_built_at}` : (vr.exe_available ? '' : ' · (source build)');
+                            let line = `Latest: <strong>v${vr.version}</strong>${built}`;
+                            if (j.agent_online && j.agent_version && j.agent_version !== vr.version) {
+                                line += ` · ⚠️ running v${j.agent_version} — update available`;
+                            } else if (j.agent_online && j.agent_version === vr.version) {
+                                line += ` · ✅ up to date`;
+                            }
+                            verEl.innerHTML = line;
+                        }
+                    } catch (ve) { /* silent */ }
+                }
             } catch (e) { /* silent */ }
         }
 
@@ -10235,10 +11253,7 @@
                 divider,
                 sectionTitle('Specialized imports'),
                 ...specializedItems,
-                divider,
-                sectionTitle('Bulk + text'),
-                _addMenuItem('📊', 'Bulk Excel (vouchers)', '100+ rows → column-mapped import',            'bulk'),
-                _addMenuItem('✍️', 'Type a voucher',        '"Paid ₹50,000 to Sharma Traders…"',           'typeVoucher'),
+                // Sprint 37 — removed "Bulk Excel (vouchers)" + "Type a voucher" (per user)
             ].join('');
         }
 
@@ -10329,8 +11344,7 @@
             },
             voice() {
                 _goToChatThenRun(() => {
-                    const mic = document.getElementById('chat-mic-btn');
-                    if (mic) mic.click();
+                    if (typeof startVoiceCapture === 'function') startVoiceCapture();
                 });
             },
             bank() {

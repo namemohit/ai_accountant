@@ -232,11 +232,61 @@ async def tally_ledgers_list(company_name: str):
     name, because rapid-fire probes crash Tally with c0000005."""
     try:
         rows = db.get_ledger_master_for_company(company_name=company_name) or []
-        # Keep payload small: just name + parent_group + gstin
+        # Slim payload: name + parent_group + gstin + closing_balance (Sprint 36).
+        def _num(v):
+            try: return float(v) if v is not None else None
+            except Exception: return None
         slim = [{"name": r.get("name"),
+                 "display_name": r.get("display_name"),
                  "parent_group": r.get("parent_group"),
-                 "gstin": r.get("gstin")} for r in rows if r.get("name")]
+                 "gstin": r.get("gstin"),
+                 "closing_balance": _num(r.get("closing_balance"))} for r in rows if r.get("name")]
         return {"status": "success", "data": slim, "count": len(slim)}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/ledger/detail")
+async def ledger_detail(company_name: str, name: str, limit: int = 50):
+    """Sprint 36 — Chart-of-Accounts drill-down. Returns a ledger's master
+    fields + its recent transactions (vouchers where it's the party leg OR
+    appears in any ledger entry)."""
+    try:
+        from psycopg2.extras import RealDictCursor
+        conn = db.get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT name, parent_group, opening_balance, closing_balance, gstin, pan,
+                   address, gst_registration_type, place_of_supply, tds_applicable,
+                   bank_name, account_number, ifsc_code, ledger_type
+            FROM tally_ledgers
+            WHERE company_name = %s AND name = %s LIMIT 1
+        """, (company_name, name))
+        master = cur.fetchone() or {"name": name}
+        for k in ("opening_balance", "closing_balance"):
+            if master.get(k) is not None:
+                try: master[k] = float(master[k])
+                except Exception: master[k] = None
+        cur.execute("""
+            SELECT date, voucher_number, voucher_type, ledger_name, amount,
+                   narration, reference_no
+            FROM tally_vouchers
+            WHERE company_name = %s
+              AND (ledger_name = %s OR ledger_entries::text ILIKE %s)
+            ORDER BY date DESC NULLS LAST
+            LIMIT %s
+        """, (company_name, name, f'%{name}%', limit))
+        txns = []
+        for r in cur.fetchall():
+            r["date"] = str(r["date"]) if r.get("date") else None
+            if r.get("amount") is not None:
+                try: r["amount"] = float(r["amount"])
+                except Exception: r["amount"] = None
+            txns.append(r)
+        cur.close(); conn.close()
+        return {"status": "success", "master": master, "transactions": txns,
+                "txn_count": len(txns)}
     except Exception as e:
         import traceback; traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -315,24 +365,57 @@ async def tally_outbox_invoice_status(invoice_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _read_agent_version():
+    """Sprint 34 — Read AGENT_VERSION straight from the agent source so the web
+    download always reports the version that's actually shipping."""
+    import os, re
+    src = os.path.join(os.path.dirname(__file__), "tally_agent", "tally_bridge_agent.py")
+    try:
+        with open(src, "r", encoding="utf-8") as f:
+            content = f.read()
+        m = re.search(r'AGENT_VERSION\s*=\s*["\']([^"\']+)["\']', content)
+        if m: return m.group(1)
+    except Exception:
+        pass
+    return "unknown"
+
+
+@app.get("/tally_bridge_agent/version")
+async def tally_bridge_agent_version():
+    """Returns the agent version + .exe build time so the UI can show what
+    you'd download and let you correlate it to the running agent's heartbeat."""
+    import os, datetime
+    base = os.path.dirname(__file__)
+    exe_path = os.path.join(base, "tally_agent", "dist", "tally_bridge_agent.exe")
+    info = {"version": _read_agent_version(), "exe_available": os.path.exists(exe_path)}
+    if info["exe_available"]:
+        st = os.stat(exe_path)
+        info["exe_size_bytes"] = st.st_size
+        info["exe_built_at"] = datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+    return {"status": "success", **info}
+
+
 @app.get("/tally_bridge_agent/download")
 async def download_tally_bridge_agent():
     """Sprint 30 — Agent files live under tally_agent/. The .exe is rebuilt from
-    the latest source after every Sprint that touches tally_bridge_agent.py."""
+    the latest source after every Sprint that touches tally_bridge_agent.py.
+    Sprint 34 — the download filename now carries the version so users can
+    correlate the binary they have to what's live."""
     import os
     base = os.path.dirname(__file__)
+    ver = _read_agent_version()
     exe_path = os.path.join(base, "tally_agent", "dist", "tally_bridge_agent.exe")
     if os.path.exists(exe_path):
         return FileResponse(
             exe_path,
             media_type="application/vnd.microsoft.portable-executable",
-            filename="tally_bridge_agent.exe",
+            filename=f"tally_bridge_agent_v{ver}.exe",
         )
     # Dev fallback — return the Python source so a developer can run it directly
     file_path = os.path.join(base, "tally_agent", "tally_bridge_agent.py")
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Agent not found. Build with: pyinstaller tally_agent/tally_bridge_agent.spec --workpath tally_agent/build --distpath tally_agent/dist --noconfirm")
-    return FileResponse(file_path, media_type="text/plain", filename="tally_bridge_agent.py")
+    return FileResponse(file_path, media_type="text/plain", filename=f"tally_bridge_agent_v{ver}.py")
 
 # WhatsApp Settings
 VERIFY_TOKEN = "yantrai_accounting_secret"
@@ -798,7 +881,23 @@ If on second thought this is actually just a regular accounting question (NOT a 
         USER QUESTION: "{user_msg}"
 
         BEHAVIOR — be a real accountant, not a silent extractor:
-        • If the user is ASKING you to BUILD a voucher (e.g. "bill 14 units of X to Y", "paid ₹50k to Sharma", "raise invoice for…") and you have enough info, generate the editable invoice card (ui_type:"table") with values looked up from the REAL ACCOUNTING DATA above (stock standard_rate, gst_rate, hsn_code, party GSTIN).
+        • CLARIFY FIRST, BUILD SECOND (default behavior). When the user asks you to record a
+          voucher, do NOT jump straight to a card if ANY essential detail is unstated or guessed.
+          Instead reply with ui_type:"text" and ask a SHORT batch of clarifying questions (group
+          2–4 together so the user answers once). Essentials to confirm before building ANY voucher:
+            1. The exact party/ledger — does the named person/entity exist in the masters above?
+               If a name like "Rakesh" isn't a ledger, ask who/what it maps to (an employee? a
+               vendor? paid on behalf of which party? which expense ledger?).
+            2. Payment/receipt mode — Cash or which Bank ledger?
+            3. The counter ledger / head — which expense, income, or party ledger is the other leg?
+            4. Date — if not given, ask or confirm whether it's today's date.
+            5. For Sales/Purchase: GST applicability + intra/inter-state, item & rate if relevant.
+          Only once the essentials are clear do you draw the editable card (ui_type:"table").
+          Example — user says "cash given to rakesh Rs. 500": Rakesh is not a ledger, so ASK:
+          "Who is Rakesh — an employee, a vendor, or are you paying him on behalf of a party? And
+           which expense ledger should this Payment hit (e.g. Staff Advances, Wages, Sundry
+           Expenses)? Paid from Cash, correct?" — do NOT invent "Paid To: Aadinath Proteins".
+        • If the user is ASKING you to BUILD a voucher (e.g. "bill 14 units of X to Y", "paid ₹50k to Sharma", "raise invoice for…") and ALL essentials above are already clear/confirmed, generate the editable invoice card (ui_type:"table") with values looked up from the REAL ACCOUNTING DATA above (stock standard_rate, gst_rate, hsn_code, party GSTIN).
         • If a CRITICAL field is ambiguous or missing, DO NOT silently guess. Reply with ui_type:"text" and ASK the specific question. Examples:
             - User says "bill X to Y" but Y is a Sundry Creditor (supplier) → ask: "Aadinath Proteins is in your Sundry Creditors group — they supply you. Did you mean to record a Purchase from them (they invoiced you) instead of a Sales to them?"
             - User says "paid 50k to Sharma" without specifying ledger / mode → ask: "Was this paid by Cash or Bank? Which Sharma — Sharma Traders or Sharma Industries?"
@@ -811,6 +910,18 @@ If on second thought this is actually just a regular accounting question (NOT a 
             - Stock would go negative (closing_qty 80 - sale 100 = -20)
             - Voucher_number autogenerated (since user didn't supply one) — say what number was picked
         • The warning array is OPTIONAL. Only include when there's something real to flag. Don't pad with noise.
+
+        ⛔ NEVER CLAIM A VOUCHER IS SYNCED / POSTED / DONE. You (the AI) cannot push to Tally.
+           Syncing only happens when the USER reviews the editable card and clicks "Confirm & Sync",
+           which queues it to the Tally Bridge Agent. So:
+           - Do NOT add a "Sync Status", "Status: Success", "Posted to Tally", "Done ✅", or any
+             similar field/line to cards or text that implies the entry is already saved or synced.
+           - For ANY voucher the user wants to RECORD (Payment, Receipt, Sales, Purchase, Journal,
+             Contra — including simple ones like "paid ₹500 to X" or "cash given to Y"), you MUST use
+             ui_type:"table" (the editable, confirmable card) — NOT ui_type:"cards". Only "table"
+             produces the real Confirm & Sync button.
+           - Use ui_type:"cards" ONLY for read-only summaries that are explicitly NOT actionable
+             (e.g. "here's a summary of this party's ledger"), and never put a sync/posted claim in them.
 
         RESPONSE FORMAT (JSON):
         {{
@@ -831,9 +942,12 @@ If on second thought this is actually just a regular accounting question (NOT a 
                "billing_party_gstin": "Extract the GST number of the billing party",
                "billed_to_party_name": "Extract the billed to party name (buyer / client / customer / party_name)",
                "billed_to_party_gstin": "Extract the GST number of the billed to party",
-               "category": "Sales or Purchase",
-               "invoice_total": "Extract total invoice amount as a numeric decimal/float (e.g. 25272.00)",
-               "invoice_gst": "Extract total GST amount (CGST+SGST or IGST) as a numeric decimal/float (e.g. 3855.06)"
+               "voucher_type": "REQUIRED. One of: Sales | Purchase | Payment | Receipt | Contra | Journal. Pick the ACTUAL accounting voucher type. 'cash/bank given/paid to X' = Payment; 'cash/bank received from X' = Receipt; goods/services billed by us = Sales; billed to us = Purchase; bank<->cash or bank<->bank transfer = Contra; pure adjustment between two ledgers = Journal. NEVER default to Sales/Purchase for a money payment/receipt.",
+               "category": "Mirror of voucher_type for backward-compat: use 'Sales' or 'Purchase' for those; otherwise repeat the voucher_type value (Payment/Receipt/Contra/Journal).",
+               "counter_ledger": "The DEBIT-side head, and it must NEVER equal payment_mode. For Payment: the party/expense being settled (e.g. the Sundry Creditor 'Aadinath Proteins', or an expense like 'Wages'/'Rent') — NOT Cash/Bank. For Receipt: the party/income being received against (e.g. the Sundry Debtor, or 'Sales'/'Interest Income') — NOT Cash/Bank. For Sales: 'Sales Account'. For Purchase: 'Purchase Account'. If unsure, set it to the party name.",
+               "payment_mode": "For Payment/Receipt ONLY: the Cash/Bank ledger the money moved through — 'Cash' or the exact Bank ledger name. This is the OTHER leg from counter_ledger; they must differ. Empty for Sales/Purchase/Journal/Contra.",
+               "invoice_total": "Total amount as a numeric decimal/float (e.g. 990.00)",
+               "invoice_gst": "Total GST amount (CGST+SGST or IGST) as a numeric decimal/float; 0 for non-GST Payment/Receipt/Contra/Journal"
              }},
              "party_master": {{
                "billing_party": {{
@@ -981,6 +1095,36 @@ If on second thought this is actually just a regular accounting question (NOT a 
                         ui_data["duplicate_detected"] = True
         except Exception as dup_err:
             print(f"Error checking duplicate invoice: {dup_err}")
+
+        # Sprint 33 — Guard against the AI fabricating a "synced/posted/done"
+        # claim. Syncing only happens via Confirm & Sync → tally_outbox. Strip
+        # any card that asserts the entry is already in Tally so the UI never
+        # shows a fake "done". Also: a voucher rendered as read-only "cards"
+        # has no Confirm button — flag that the user must re-issue as a real card.
+        try:
+            if ai_response.get("ui_type") == "cards" and isinstance(ai_response.get("ui_data"), list):
+                _bad = ("sync", "posted to tally", "synced", "success ✅", "done ✅",
+                        "saved to tally", "pushed to tally")
+                cleaned = []
+                had_fake = False
+                for card in ai_response["ui_data"]:
+                    t = str((card or {}).get("title", "")).lower()
+                    v = str((card or {}).get("value", "")).lower()
+                    if any(b in t or b in v for b in _bad):
+                        had_fake = True
+                        continue   # drop the fabricated sync card
+                    cleaned.append(card)
+                ai_response["ui_data"] = cleaned
+                if had_fake:
+                    # Tell the user the truth: nothing was synced from this card.
+                    note = ("\n\n🟠 *Heads-up: this was only a preview — nothing has been "
+                            "saved or synced to Tally yet. To actually record it, type "
+                            "the voucher again and use the editable card's **Confirm & Sync** "
+                            "button.*")
+                    if note.strip() not in (ai_response.get("text") or ""):
+                        ai_response["text"] = (ai_response.get("text") or "") + note
+        except Exception as guard_err:
+            print(f"[chat] sync-claim guard error: {guard_err}", flush=True)
 
         msg_id = db.save_chat_message(
             session_id, "assistant", ai_response.get("text", ""),
@@ -2611,6 +2755,97 @@ async def create_manual_voucher(payload: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.put("/api/vouchers/{voucher_id}")
+async def edit_voucher_endpoint(voucher_id: str, payload: dict):
+    """Apply a local edit to a posted voucher (full ledger entries supported).
+    This updates YantrAI's books only and flags the voucher 'needs resync' — it
+    does NOT push to Tally. Use POST /api/vouchers/{id}/resync to push the edit."""
+    try:
+        # Tally-sourced voucher → existing path (full ledger entries + resync flag)
+        if db.get_tally_voucher(voucher_id):
+            res = db.update_tally_voucher(
+                voucher_id, payload,
+                edited_by=payload.get("username") or payload.get("edited_by"),
+            )
+            if res.get("error"):
+                raise HTTPException(status_code=400, detail=res["error"])
+            return {"status": "success", "data": db.get_tally_voucher(voucher_id)}
+        # Sprint 37 — invoice-source row → update the invoices table core fields.
+        conn = db.get_conn(); cur = conn.cursor()
+        amt = payload.get("amount")
+        if amt is None and isinstance(payload.get("ledger_entries"), list):
+            # derive from the debit legs if amount not supplied
+            try: amt = sum(abs(float(e.get("amount") or 0)) for e in payload["ledger_entries"] if e.get("is_debit"))
+            except Exception: amt = None
+        cur.execute("""
+            UPDATE invoices SET
+                party_name    = COALESCE(%s, party_name),
+                date          = COALESCE(%s, date),
+                voucher_type  = COALESCE(%s, voucher_type),
+                category      = COALESCE(%s, category),
+                total_amount  = COALESCE(%s, total_amount)
+            WHERE id = %s
+        """, (payload.get("party_name"),
+              payload.get("date"),
+              payload.get("voucher_type"),
+              payload.get("voucher_type") or payload.get("category"),
+              amt,
+              voucher_id))
+        updated = cur.rowcount
+        conn.commit(); cur.close(); conn.close()
+        if not updated:
+            raise HTTPException(status_code=404, detail="Voucher not found")
+        return {"status": "success", "data": {"id": voucher_id, "source": "invoice"}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/vouchers/{voucher_id}/resync")
+async def resync_voucher_endpoint(voucher_id: str):
+    """Re-push an edited voucher to Tally. When the voucher has a stored Tally
+    master id, the push uses ACTION=Alter so Tally UPDATES the same voucher
+    instead of creating a duplicate. Otherwise it falls back to a Create."""
+    try:
+        v = db.get_tally_voucher(voucher_id)
+        if not v:
+            raise HTTPException(status_code=404, detail="Voucher not found")
+
+        master_id = v.get("tally_master_id")
+        payload = {
+            "voucher_type": v.get("voucher_type"),
+            "date": v.get("date"),
+            "voucher_number": v.get("voucher_number"),
+            "party_name": v.get("party_name"),
+            "narration": v.get("narration"),
+            "ledger_entries": v.get("ledger_entries") or [],
+            "amount": v.get("amount"),
+            "total_amount": v.get("amount"),
+            "taxable_value": v.get("taxable_value"),
+            "cgst_amount": v.get("cgst_amount"),
+            "sgst_amount": v.get("sgst_amount"),
+            "igst_amount": v.get("igst_amount"),
+            "company_name": v.get("company_name"),
+            # Edit-voucher: tell the bridge agent to alter the existing Tally voucher
+            "tally_action": "Alter" if master_id else "Create",
+            "tally_master_id": master_id,
+        }
+        q = db.enqueue_tally_push(
+            payload=payload, voucher_id=voucher_id,
+            company_name=v.get("company_name"), enqueued_by="web-edit",
+        )
+        db.mark_voucher_resynced(voucher_id)
+        return {"status": "success", "outbox": q,
+                "action": payload["tally_action"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/vouchers/upload")
 async def upload_voucher_file(
     file: UploadFile = File(...),
@@ -2718,6 +2953,7 @@ async def delete_vouchers_endpoint(payload: dict):
         deleted = 0
         outbox_cleared = 0
         tally_cleanup = []   # Sprint 33 — tally-sourced rows the user must also remove in Tally Prime
+        failed = []          # Sprint 36 — per-item failures surfaced to the UI
         for it in items:
             vid = it.get("id"); src = (it.get("source") or "invoice").lower()
             vnum = it.get("voucher_number")
@@ -2756,21 +2992,36 @@ async def delete_vouchers_endpoint(payload: dict):
                     cur.execute("DELETE FROM tally_vouchers WHERE id = %s AND (company_id = %s OR company_name = %s)",
                                 (vid, company_id, company_name))
                 else:
+                    # Sprint 36 — delete child line items first to satisfy the
+                    # items_invoice_id_fkey FK (otherwise the invoice delete
+                    # silently fails with a ForeignKeyViolation → deleted=0).
+                    cur.execute("DELETE FROM items WHERE invoice_id = %s", (vid,))
                     cur.execute("DELETE FROM invoices WHERE id = %s AND company_name = %s",
                                 (vid, company_name))
-                deleted += cur.rowcount
+                row_deleted = cur.rowcount
+                deleted += row_deleted
                 # Clear matching outbox rows by invoice/voucher number
                 if vnum:
                     cur.execute("DELETE FROM tally_outbox WHERE company_name = %s AND payload->>'invoice_number' = %s",
                                 (company_name, vnum))
                     outbox_cleared += cur.rowcount
+                conn.commit()  # commit per item so one failure doesn't lose the rest
+                # Sprint 36 — if nothing matched, tell the user (e.g. wrong company / already gone)
+                if row_deleted == 0:
+                    failed.append({"id": vid, "voucher_number": vnum,
+                                   "reason": "Not found (already deleted or different company)."})
             except Exception as ie:
                 print(f"[delete_vouchers] item {vid} ({src}) failed: {ie}", flush=True)
                 conn.rollback()
-        conn.commit()
+                # Sprint 36 — surface a human-readable reason instead of silent deleted=0
+                msg = str(ie)
+                if "ForeignKeyViolation" in ie.__class__.__name__ or "foreign key" in msg.lower():
+                    msg = "Linked records still reference it (could not remove)."
+                failed.append({"id": vid, "voucher_number": vnum, "reason": msg[:160]})
         cur.close(); dcur.close(); conn.close()
         return {"status": "success", "deleted": deleted,
-                "outbox_cleared": outbox_cleared, "tally_cleanup": tally_cleanup}
+                "outbox_cleared": outbox_cleared, "tally_cleanup": tally_cleanup,
+                "failed": failed}
     except HTTPException:
         raise
     except Exception as e:
@@ -3301,6 +3552,73 @@ async def voucher_events_endpoint(company_name: str, company_id: str = None, lim
         rows = rows[:limit]
         cur.close(); conn.close()
         return {"status": "success", "data": rows}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# NOTE: declared after all literal /api/vouchers/* GET routes so the {voucher_id}
+# path param doesn't shadow them (FastAPI matches routes in declaration order).
+@app.get("/api/vouchers/{voucher_id}")
+async def get_voucher_endpoint(voucher_id: str):
+    """Fetch a single voucher for the edit modal. Sprint 37 — handles BOTH a
+    Tally-sourced voucher (tally_vouchers) AND an invoice/PDF/manual row
+    (invoices), so the edit button works on every row."""
+    try:
+        row = db.get_tally_voucher(voucher_id)
+        if row:
+            row["source"] = "tally"
+            # Sprint 38 — a voucher synced from Tally may still have originated
+            # from an uploaded file; surface that file if one exists for the
+            # same company + voucher number.
+            try:
+                if not row.get("file_url"):
+                    co = row.get("company_name")
+                    vno = row.get("voucher_number")
+                    if co and vno:
+                        conn2 = db.get_conn(); cur2 = conn2.cursor()
+                        cur2.execute("""
+                            SELECT file_url FROM invoices
+                            WHERE company_name=%s AND invoice_number=%s
+                              AND file_url IS NOT NULL
+                            LIMIT 1
+                        """, (co, vno))
+                        fr = cur2.fetchone()
+                        cur2.close(); conn2.close()
+                        if fr and fr[0]:
+                            row["file_url"] = fr[0]
+            except Exception as fe:
+                print(f"[get_voucher] tally file_url lookup failed: {fe}", flush=True)
+            return {"status": "success", "data": row}
+        # Fallback: invoice-source row
+        from psycopg2.extras import RealDictCursor
+        conn = db.get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT id, invoice_number, date, party_name, total_amount,
+                   COALESCE(voucher_type, category) AS voucher_type, category,
+                   billing_party_name, billing_party_gstin, billed_to_party_gstin,
+                   file_url
+            FROM invoices WHERE id = %s LIMIT 1
+        """, (voucher_id,))
+        inv = cur.fetchone(); cur.close(); conn.close()
+        if not inv:
+            raise HTTPException(status_code=404, detail="Voucher not found")
+        data = {
+            "id": str(inv["id"]),
+            "voucher_number": inv.get("invoice_number"),
+            "date": str(inv.get("date")) if inv.get("date") else None,
+            "party_name": inv.get("party_name") or inv.get("billing_party_name"),
+            "amount": float(inv["total_amount"]) if inv.get("total_amount") is not None else 0,
+            "voucher_type": inv.get("voucher_type") or "Sales",
+            "narration": "",
+            "ledger_entries": [],
+            "tally_master_id": "",
+            "source": "invoice",
+            "file_url": inv.get("file_url"),
+        }
+        return {"status": "success", "data": data}
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback; traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -5210,7 +5528,7 @@ async def get_items_master(company_name: str = "Acme Corp"):
 
         # 1) Tally stock-item master (HSN, GST rate, closing qty/value)
         cursor.execute("""
-            SELECT name, parent_group, unit, hsn_code, gst_rate,
+            SELECT id, name, display_name, parent_group, unit, hsn_code, gst_rate,
                    closing_qty, closing_value, standard_rate
             FROM tally_stock_items
             WHERE company_name = %s

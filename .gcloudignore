@@ -18,10 +18,14 @@ static/uploads/
 # Archived agent binaries + PyInstaller build artifacts (17MB+ each)
 agent_dump/
 tally_agent/build/
-tally_agent/dist/
 build/
 dist/
 *.exe
+
+# Sprint 34 — EXCEPT the live agent binary: it MUST ship in the Cloud Run
+# image so /tally_bridge_agent/download serves the latest .exe in production.
+!tally_agent/dist/
+!tally_agent/dist/tally_bridge_agent.exe
 
 # One-shot backfill / debug scripts (not needed in prod image)
 backfill_*.py

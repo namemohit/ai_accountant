@@ -541,7 +541,7 @@ from tkinter import scrolledtext, messagebox
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.2.0"
+AGENT_VERSION = "0.3.0"   # Sprint 34 — push pipeline (pacing, ledger resolution, Dr=Cr, voucher types)
 
 
 def _post_json(url, body, timeout=15.0):
@@ -606,12 +606,15 @@ def _build_voucher_xml(payload, company_name):
                 "Journal": "Journal", "Contra": "Contra"}
     vt_tally = type_map.get(vt, vt)
     is_outflow = vt_tally in ("Purchase", "Payment")
+    # Sprint 33 — caller-supplied ledgers for Payment/Receipt
+    payment_mode = (payload.get("payment_mode") or "").strip()   # Cash / Bank ledger
+    counter_ledger_in = (payload.get("counter_ledger") or "").strip()
     # Counter ledger: Sales by default for Sales voucher; Purchase Account for Purchase
     counter_default = {
         "Sales":    "Sales Account",
         "Purchase": "Purchase Account",
-        "Payment":  "Cash",
-        "Receipt":  "Cash",
+        "Payment":  payment_mode or "Cash",
+        "Receipt":  payment_mode or "Cash",
         "Journal":  "Suspense A/c",
         "Contra":   "Cash",
     }.get(vt_tally, "Sales Account")
@@ -657,9 +660,27 @@ def _build_voucher_xml(payload, company_name):
         # Sprint 32 — Force Dr=Cr exactly. Party leg = sum of other legs so
         # 0.08-rupee rounding mismatches between taxable_value and total_amount
         # don't trigger Tally's silent EXCEPTIONS=1 rejection.
-        gross = round(taxable + cgst + sgst + igst, 2)
-        if is_outflow:
-            # Purchase/Payment: party is Cr, counter+tax are Dr
+        gross = round(taxable + cgst + sgst + igst, 2) or total
+        if vt_tally == "Payment":
+            # Sprint 33 — Payment (money OUT): Dr Party/Expense, Cr Cash/Bank.
+            cr_name = payment_mode or "Cash"
+            dr_name = counter_ledger_in or party
+            # Guard: counter must not collapse onto the cash/bank leg (e.g. AI
+            # mistakenly set counter_ledger=Cash). Fall back to the party.
+            if not dr_name or dr_name.strip().lower() == cr_name.strip().lower():
+                dr_name = party if party.strip().lower() != cr_name.strip().lower() else (counter_ledger_in or party)
+            legs.append((dr_name, gross, "Yes"))    # Dr
+            legs.append((cr_name, -gross, "No"))    # Cr
+        elif vt_tally == "Receipt":
+            # Sprint 33 — Receipt (money IN): Dr Cash/Bank, Cr Party/Income.
+            dr_name = payment_mode or "Cash"
+            cr_name = counter_ledger_in or party
+            if not cr_name or cr_name.strip().lower() == dr_name.strip().lower():
+                cr_name = party if party.strip().lower() != dr_name.strip().lower() else (counter_ledger_in or party)
+            legs.append((dr_name, gross, "Yes"))    # Dr
+            legs.append((cr_name, -gross, "No"))    # Cr
+        elif is_outflow:
+            # Purchase: party is Cr, counter+tax are Dr
             legs.append((party, -gross, "No"))
             if taxable > 0:
                 legs.append((counter_default, taxable, "Yes"))
@@ -667,7 +688,7 @@ def _build_voucher_xml(payload, company_name):
             if sgst > 0: legs.append(("SGST Input", sgst, "Yes"))
             if igst > 0: legs.append(("IGST Input", igst, "Yes"))
         else:
-            # Sales/Receipt: party is Dr, counter+tax are Cr
+            # Sales: party is Dr, counter+tax are Cr
             legs.append((party, gross, "Yes"))
             if taxable > 0:
                 legs.append((counter_default, -taxable, "No"))
@@ -684,6 +705,16 @@ def _build_voucher_xml(payload, company_name):
         for (name, amt, is_pos) in legs
     ])
 
+    # Edit-voucher: when re-pushing an edited voucher, the web layer sets
+    # tally_action="Alter" + tally_master_id so Tally UPDATES the existing
+    # voucher (matched by its master id) instead of creating a duplicate.
+    action = (payload.get("tally_action") or "Create").strip().capitalize()
+    if action not in ("Create", "Alter"):
+        action = "Create"
+    master_id = payload.get("tally_master_id")
+    masterid_node = (f"<MASTERID>{_xml_escape(str(master_id))}</MASTERID>"
+                     if action == "Alter" and master_id else "")
+
     envelope = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<ENVELOPE>'
@@ -698,7 +729,8 @@ def _build_voucher_xml(payload, company_name):
               '</REQUESTDESC>'
               '<REQUESTDATA>'
                 '<TALLYMESSAGE xmlns:UDF="TallyUDF">'
-                  f'<VOUCHER VCHTYPE="{_xml_escape(vt_tally)}" ACTION="Create" OBJVIEW="Accounting Voucher View">'
+                  f'<VOUCHER VCHTYPE="{_xml_escape(vt_tally)}" ACTION="{action}" OBJVIEW="Accounting Voucher View">'
+                    f'{masterid_node}'
                     f'<DATE>{date_str}</DATE>'
                     f'<VOUCHERNUMBER>{_xml_escape(voucher_num)}</VOUCHERNUMBER>'
                     f'<VOUCHERTYPENAME>{_xml_escape(vt_tally)}</VOUCHERTYPENAME>'
@@ -1159,7 +1191,7 @@ import urllib.parse
 class TallyBridgeApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("YantrAI Tally Bridge Agent")
+        self.root.title(f"YantrAI Tally Bridge Agent · v{AGENT_VERSION}")
         self.root.geometry("560x560")
         self.root.resizable(False, False)
 

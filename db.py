@@ -44,6 +44,7 @@ def init_db():
         cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS billing_party_name TEXT")
         cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS billing_party_gstin TEXT")
         cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS billed_to_party_gstin TEXT")
+        cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS voucher_type TEXT")  # Sprint 35
     except:
         pass
     
@@ -175,6 +176,10 @@ def init_db():
         "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
         # Sprint 7 — audit trail (who created this voucher / TDS deduction)
         "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS created_by TEXT",
+        # Edit-voucher: local edits flag a voucher dirty until it's re-pushed to Tally
+        "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS needs_resync BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS last_edited_at TIMESTAMP",
+        "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS last_edited_by TEXT",
         "ALTER TABLE tds_deductions ADD COLUMN IF NOT EXISTS created_by TEXT",
         "CREATE INDEX IF NOT EXISTS idx_tally_voucher_date ON tally_vouchers(company_name, date)",
         "CREATE INDEX IF NOT EXISTS idx_tally_voucher_type ON tally_vouchers(company_name, voucher_type)",
@@ -593,6 +598,9 @@ def init_db():
     )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_tally_stock_company ON tally_stock_items(company_name)")
+
+    cursor.execute("ALTER TABLE tally_ledgers ADD COLUMN IF NOT EXISTS display_name TEXT")
+    cursor.execute("ALTER TABLE tally_stock_items ADD COLUMN IF NOT EXISTS display_name TEXT")
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS tally_groups (
@@ -1362,23 +1370,25 @@ def save_invoice(data):
         cursor.execute("DELETE FROM items WHERE invoice_id = %s", (inv_id,))
         # Update invoice
         cursor.execute("""
-        UPDATE invoices 
-        SET date = %s, party_name = %s, total_amount = %s, discount_amount = %s, gst_amount = %s, 
+        UPDATE invoices
+        SET date = %s, party_name = %s, total_amount = %s, discount_amount = %s, gst_amount = %s,
             category = %s, file_url = %s, billing_party_name = %s, billing_party_gstin = %s, billed_to_party_gstin = %s,
-            created_at = CURRENT_TIMESTAMP
+            voucher_type = %s, created_at = CURRENT_TIMESTAMP
         WHERE id = %s
         """, (data.get('date'), data.get('party_name'), data.get('total_amount'), data.get('discount_amount', 0), data.get('gst_amount', 0),
               data.get('category'), data.get('file_url'), data.get('billing_party_name'), data.get('billing_party_gstin'), data.get('billed_to_party_gstin'),
+              data.get('voucher_type') or data.get('category'),
               inv_id))
     else:
         inv_id = str(uuid.uuid4())
         # Insert new invoice
         cursor.execute("""
-        INSERT INTO invoices (id, invoice_number, date, party_name, total_amount, discount_amount, gst_amount, category, company_name, file_url, billing_party_name, billing_party_gstin, billed_to_party_gstin)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (inv_id, invoice_number, data.get('date'), data.get('party_name'), 
+        INSERT INTO invoices (id, invoice_number, date, party_name, total_amount, discount_amount, gst_amount, category, company_name, file_url, billing_party_name, billing_party_gstin, billed_to_party_gstin, voucher_type)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (inv_id, invoice_number, data.get('date'), data.get('party_name'),
               data.get('total_amount'), data.get('discount_amount', 0), data.get('gst_amount', 0), data.get('category'), company_name, data.get('file_url'),
-              data.get('billing_party_name'), data.get('billing_party_gstin'), data.get('billed_to_party_gstin')))
+              data.get('billing_party_name'), data.get('billing_party_gstin'), data.get('billed_to_party_gstin'),
+              data.get('voucher_type') or data.get('category')))
     
     # Save Items
     if 'items' in data:
@@ -1439,6 +1449,7 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                cost_centres::text AS cost_centres, bill_refs::text AS bill_refs,
                taxable_value, cgst_amount, sgst_amount, igst_amount,
                tally_master_id, instrument_number, reconciled,
+               COALESCE(needs_resync, FALSE) AS needs_resync, last_edited_at,
                'tally' AS source, updated_at
         FROM tally_vouchers
         WHERE {' AND '.join(tally_where)}
@@ -1486,20 +1497,22 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
     # vs the end-to-end Tally sync state shown in Event Logs.
     cursor.execute(f"""
         SELECT i.id, i.created_at AS date, i.invoice_number AS voucher_number,
-               i.category AS voucher_type, i.party_name,
+               COALESCE(i.voucher_type, i.category) AS voucher_type, i.party_name,
                i.total_amount AS amount, '' AS narration,
                '[]' AS ledger_entries, '' AS reference_no,
                '' AS place_of_supply, 'INR' AS currency,
                '[]' AS cost_centres, '[]' AS bill_refs,
                0 AS taxable_value, 0 AS cgst_amount, 0 AS sgst_amount, 0 AS igst_amount,
                NULL AS tally_master_id, '' AS instrument_number, FALSE AS reconciled,
+               FALSE AS needs_resync, NULL AS last_edited_at,
                'invoice' AS source, i.created_at AS updated_at,
                i.file_url,
                CASE
                  WHEN ob.pushed_state THEN 'synced'
                  ELSE COALESCE(i.status, 'pending')
                END AS status,
-               ob.tally_voucher_guid
+               ob.tally_voucher_guid,
+               COALESCE(ob.pushed_state, FALSE) AS was_pushed
         FROM invoices i
         LEFT JOIN LATERAL (
             SELECT BOOL_OR(o.state = 'pushed') AS pushed_state,
@@ -1521,37 +1534,50 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
         r['bill_refs'] = []
         results.append(r)
 
-    # Sprint 33 — Dedupe: when the same voucher_number exists from both a
-    # Tally sync and an invoice/PDF upload, keep the Tally row (it's the
-    # authoritative posted record) and drop the invoice duplicate. We carry
-    # the invoice's file_url onto the Tally row so the source PDF stays linked.
-    by_number = {}
+    # Sprint 33/34 — Dedupe ONLY a PDF/invoice row against its Tally twin.
+    # IMPORTANT: never collapse tally-vs-tally — Tally voucher numbers repeat
+    # across voucher types (Payment 1, Receipt 1, Sales 1, blanks…), so keying
+    # on number alone would wrongly hide hundreds of distinct vouchers.
+    # Rule: if an invoice-source row's voucher_number also exists as a
+    # tally-source row, drop the invoice row (keep Tally) and carry its file_url.
+    tally_by_num = {}
+    for r in results:
+        if r.get('source') == 'tally':
+            num = (r.get('voucher_number') or '').strip().lower()
+            if num:
+                tally_by_num.setdefault(num, r)
+
+    # Sprint 35 — Suppress the Tally sync-back COPY of a voucher that YantrAI
+    # itself pushed. When the user records a Payment/Receipt and confirms, we
+    # keep the single YantrAI `invoices` row (it shows instantly + flips
+    # Pending→Synced via the outbox status above). The agent then creates the
+    # voucher in Tally under Tally's OWN number, and a later sync ingests it as
+    # a separate tally_vouchers row. We hide that copy so only ONE row shows.
+    # Match key (numbers differ, so use): party + abs(amount) + voucher_type.
+    def _sig(r):
+        party = (r.get('party_name') or '').strip().lower()
+        try: amt = round(abs(float(r.get('amount') or 0)), 2)
+        except Exception: amt = 0
+        vt = (r.get('voucher_type') or '').strip().lower()
+        return (party, amt, vt)
+    pushed_sigs = set()
+    for r in results:
+        if r.get('source') != 'tally' and r.get('was_pushed'):
+            pushed_sigs.add(_sig(r))
+
     deduped = []
     for r in results:
-        num = (r.get('voucher_number') or '').strip()
-        if not num:
-            deduped.append(r)   # no number → can't dedupe, keep as-is
+        num = (r.get('voucher_number') or '').strip().lower()
+        if r.get('source') != 'tally' and num and num in tally_by_num:
+            # invoice row shares a number with a Tally twin → drop it, keep Tally
+            twin = tally_by_num[num]
+            if not twin.get('file_url') and r.get('file_url'):
+                twin['file_url'] = r.get('file_url')
             continue
-        key = num.lower()
-        if key not in by_number:
-            by_number[key] = r
-            deduped.append(r)
-        else:
-            existing = by_number[key]
-            # Prefer the tally-sourced row; merge file_url across
-            keep, drop = (existing, r) if existing.get('source') == 'tally' else (r, existing)
-            if r.get('source') == 'tally' and existing.get('source') != 'tally':
-                # Replace the previously-kept invoice row with the tally row
-                if not keep.get('file_url') and existing.get('file_url'):
-                    keep['file_url'] = existing.get('file_url')
-                idx = deduped.index(existing)
-                deduped[idx] = keep
-                by_number[key] = keep
-            else:
-                # existing is tally (or both same source) — keep existing,
-                # just inherit a file_url if the dropped row had one
-                if not keep.get('file_url') and drop.get('file_url'):
-                    keep['file_url'] = drop.get('file_url')
+        # Sprint 35 — drop the Tally sync-back copy of a YantrAI-pushed voucher
+        if r.get('source') == 'tally' and _sig(r) in pushed_sigs:
+            continue
+        deduped.append(r)
     results = deduped
 
     # Sort merged by date descending
@@ -1664,17 +1690,17 @@ def get_ledger_master_for_company(company_id=None, company_name=None):
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     if company_id:
         cursor.execute("""
-            SELECT name, parent_group, ledger_type, closing_balance, is_sensitive
+            SELECT name, display_name, parent_group, ledger_type, closing_balance, is_sensitive
             FROM tally_ledgers WHERE company_id = %s ORDER BY parent_group, name
         """, (company_id,))
     elif company_name:
         cursor.execute("""
-            SELECT name, parent_group, ledger_type, closing_balance, is_sensitive
+            SELECT name, display_name, parent_group, ledger_type, closing_balance, is_sensitive
             FROM tally_ledgers WHERE company_name = %s ORDER BY parent_group, name
         """, (company_name,))
     else:
         cursor.execute("""
-            SELECT name, parent_group, ledger_type, closing_balance, is_sensitive
+            SELECT name, display_name, parent_group, ledger_type, closing_balance, is_sensitive
             FROM tally_ledgers ORDER BY parent_group, name
         """)
     rows = cursor.fetchall()
@@ -2930,6 +2956,49 @@ def _detect_party_master_gaps(company_id, company_name, scan_run_id):
                     "rationale": "Address is blank — please fill.",
                     "scan_run_id": scan_run_id,
                 })
+
+            # Sprint 34 — 6) Party type B2B / B2C (informational, from GSTIN presence)
+            ptype = "B2B (registered)" if gstin else "B2C (unregistered / consumer)"
+            out.append({
+                "master_type": "party", "record_id": pid,
+                "company_id": company_id, "company_name": company_name,
+                "gap_type": "party_type", "field": "party_type",
+                "current_value": None, "suggested_value": ptype,
+                "confidence": 0.95 if gstin else 0.70, "source": "derived_from_gstin",
+                "rationale": ("Has GSTIN → treat as B2B for GST reporting."
+                              if gstin else "No GSTIN → likely B2C (end consumer)."),
+                "scan_run_id": scan_run_id,
+            })
+
+        # Sprint 34 — 7) Duplicate parties: same GSTIN OR near-identical name.
+        import re as _re
+        def _norm(s): return _re.sub(r'[^a-z0-9]', '', (s or '').lower())
+        by_gstin = {}; by_name = {}
+        for p in parties:
+            g = (p.get("gstin") or "").strip().upper()
+            n = _norm(p.get("name"))
+            if g: by_gstin.setdefault(g, []).append(p)
+            if n: by_name.setdefault(n, []).append(p)
+        flagged = set()
+        for group in list(by_gstin.values()) + list(by_name.values()):
+            if len(group) > 1:
+                keeper = group[0]
+                for dup in group[1:]:
+                    did = str(dup["id"])
+                    if did in flagged: continue
+                    flagged.add(did)
+                    out.append({
+                        "master_type": "party", "record_id": did,
+                        "company_id": company_id, "company_name": company_name,
+                        "gap_type": "duplicate_party", "field": "name",
+                        "current_value": dup.get("name"),
+                        "suggested_value": f"Possible duplicate of '{keeper.get('name')}'",
+                        "confidence": 0.85, "source": "computed",
+                        "rationale": ("Same GSTIN as another party." if (dup.get("gstin") or "").strip().upper()==(keeper.get("gstin") or "").strip().upper() and dup.get("gstin")
+                                      else f"Name nearly identical to '{keeper.get('name')}'."),
+                        "payload": {"keeper_id": str(keeper["id"]), "keeper_name": keeper.get("name")},
+                        "scan_run_id": scan_run_id,
+                    })
         return out
     finally:
         cur.close(); conn.close()
@@ -3042,9 +3111,124 @@ def _detect_item_master_gaps(company_id, company_name, scan_run_id):
                         "rationale": f"Opening value {ov:.2f} ÷ opening qty {oq:.2f} = {val:.2f}.",
                         "scan_run_id": scan_run_id,
                     })
+
+            # Sprint 34 — 5) Clean / normalized item name (Title Case, trim noise)
+            raw_name = it.get("name") or ""
+            cleaned = _re_clean_item_name(raw_name)
+            if cleaned and cleaned != raw_name:
+                out.append({
+                    "master_type": "item", "record_id": iid,
+                    "company_id": company_id, "company_name": company_name,
+                    "gap_type": "clean_name", "field": "name",
+                    "current_value": raw_name, "suggested_value": cleaned,
+                    "confidence": 0.70, "source": "name_normalize",
+                    "rationale": "Suggested a cleaner, properly-cased item name.",
+                    "scan_run_id": scan_run_id,
+                })
+
+        # Sprint 34 — 6) Standard rate + source supplier mined from invoice line items
+        try:
+            cur.execute("""
+                SELECT i.line_items, i.party_name, i.billing_party_name
+                FROM invoices i
+                WHERE i.company_name = %s AND i.line_items IS NOT NULL
+            """, (company_name,))
+            inv_rows = cur.fetchall()
+        except Exception:
+            inv_rows = []
+        # Build description → {rates:[], sources:set()}
+        learned = {}
+        for ir in inv_rows:
+            li = ir.get("line_items")
+            if isinstance(li, str):
+                try: li = json.loads(li)
+                except: li = []
+            if not isinstance(li, list): continue
+            src = ir.get("billing_party_name") or ir.get("party_name")
+            for ln in li:
+                if not isinstance(ln, dict): continue
+                desc = (ln.get("description") or ln.get("item") or "").strip().lower()
+                if not desc: continue
+                rate = ln.get("rate") or ln.get("price")
+                entry = learned.setdefault(desc, {"rates": [], "sources": set()})
+                try:
+                    if rate is not None: entry["rates"].append(float(rate))
+                except: pass
+                if src: entry["sources"].add(src)
+        for it in items:
+            iid = str(it["id"]); nm = (it.get("name") or "").strip().lower()
+            if nm in learned:
+                e = learned[nm]
+                if (it.get("standard_rate") in (None, 0)) and e["rates"]:
+                    avg = round(sum(e["rates"]) / len(e["rates"]), 2)
+                    out.append({
+                        "master_type": "item", "record_id": iid,
+                        "company_id": company_id, "company_name": company_name,
+                        "gap_type": "invoice_price", "field": "standard_rate",
+                        "current_value": None, "suggested_value": str(avg),
+                        "confidence": 0.80, "source": "invoice_history",
+                        "rationale": f"Avg rate across {len(e['rates'])} invoice line(s) = {avg:.2f}.",
+                        "scan_run_id": scan_run_id,
+                    })
+                if e["sources"]:
+                    out.append({
+                        "master_type": "item", "record_id": iid,
+                        "company_id": company_id, "company_name": company_name,
+                        "gap_type": "source_suppliers", "field": "source",
+                        "current_value": None,
+                        "suggested_value": ", ".join(sorted(e["sources"])[:5]),
+                        "confidence": 0.85, "source": "invoice_history",
+                        "rationale": "Suppliers seen on invoices for this item.",
+                        "scan_run_id": scan_run_id,
+                    })
+
+        # Sprint 34 — 7) Duplicate items (near-identical normalized names)
+        seen_norm = {}
+        for it in items:
+            n = _re_norm_name(it.get("name"))
+            if not n: continue
+            seen_norm.setdefault(n, []).append(it)
+        for grp in seen_norm.values():
+            if len(grp) > 1:
+                keeper = grp[0]
+                for dup in grp[1:]:
+                    out.append({
+                        "master_type": "item", "record_id": str(dup["id"]),
+                        "company_id": company_id, "company_name": company_name,
+                        "gap_type": "duplicate_item", "field": "name",
+                        "current_value": dup.get("name"),
+                        "suggested_value": f"Possible duplicate of '{keeper.get('name')}'",
+                        "confidence": 0.80, "source": "computed",
+                        "rationale": f"Name nearly identical to '{keeper.get('name')}'.",
+                        "payload": {"keeper_id": str(keeper["id"])},
+                        "scan_run_id": scan_run_id,
+                    })
         return out
     finally:
         cur.close(); conn.close()
+
+
+def _re_norm_name(s):
+    import re as _re
+    return _re.sub(r'[^a-z0-9]', '', (s or '').lower())
+
+
+def _re_clean_item_name(s):
+    """Light normalization: collapse whitespace, Title Case, fix common abbrevs."""
+    import re as _re
+    if not s: return s
+    t = _re.sub(r'\s+', ' ', s.strip())
+    # Don't touch names that already look clean (have mixed case + spaces)
+    if t == s and any(c.isupper() for c in s) and any(c.islower() for c in s):
+        return s
+    # Title-case word by word, preserve all-caps tokens <= 3 chars (HSN-ish/units)
+    words = []
+    for w in t.split(' '):
+        if len(w) <= 3 and w.isupper():
+            words.append(w)
+        else:
+            words.append(w[:1].upper() + w[1:].lower())
+    return ' '.join(words)
 
 
 def run_master_ai_scan(company_id, company_name, master_types=None):
@@ -3081,8 +3265,11 @@ def list_master_ai_suggestions(company_name, master_type=None, gap_type=None,
     """Return suggestions joined with the parent master row for display."""
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        where = ["s.company_name = %s", "s.status = %s"]
-        params = [company_name, status]
+        where = ["s.company_name = %s"]
+        params = [company_name]
+        # Sprint 34 — '', None, or 'all' means no status filter (show everything)
+        if status and status.lower() != "all":
+            where.append("s.status = %s"); params.append(status)
         if master_type:
             where.append("s.master_type = %s"); params.append(master_type)
         if gap_type:
@@ -3122,8 +3309,8 @@ def master_ai_suggestion_counts(company_name):
 
 
 # Field whitelist per master_type for safe UPDATEs on accept
-_PARTY_UPDATE_FIELDS = {'gstin','pan','place_of_supply','gst_registration_type','address'}
-_ITEM_UPDATE_FIELDS  = {'hsn_code','gst_rate','unit','standard_rate','parent_group'}
+_PARTY_UPDATE_FIELDS = {'gstin','pan','place_of_supply','gst_registration_type','address','display_name'}
+_ITEM_UPDATE_FIELDS  = {'hsn_code','gst_rate','unit','standard_rate','parent_group','display_name'}
 
 def accept_master_ai_suggestion(suggestion_id):
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -3133,6 +3320,8 @@ def accept_master_ai_suggestion(suggestion_id):
         if not s: return {"ok": False, "message": "Suggestion not found."}
         if s["status"] != "pending": return {"ok": False, "message": f"Already {s['status']}."}
         mt = s["master_type"]; field = s["field"]; sug = s["suggested_value"]
+        if s.get("gap_type") == "clean_name" and field == "name":
+            field = "display_name"
         if mt == "party":
             if field not in _PARTY_UPDATE_FIELDS:
                 return {"ok": False, "message": f"Field {field} not writable for party master."}
@@ -4760,6 +4949,121 @@ def save_tally_vouchers(company_name, vouchers):
         cursor.close()
         conn.close()
     return {"upserted": upserted, "skipped": skipped}
+
+
+def get_tally_voucher(voucher_id):
+    """Fetch a single tally_vouchers row by id, with JSON fields parsed."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT id, company_name, company_id, date, voucher_number, voucher_type,
+                   ledger_name AS party_name, amount, narration,
+                   ledger_entries::text AS ledger_entries, reference_no, instrument_number,
+                   place_of_supply, party_gstin, currency,
+                   taxable_value, cgst_amount, sgst_amount, igst_amount,
+                   tally_master_id, COALESCE(needs_resync, FALSE) AS needs_resync,
+                   last_edited_at, last_edited_by
+            FROM tally_vouchers WHERE id = %s
+        """, (voucher_id,))
+        r = cur.fetchone()
+        if not r:
+            return None
+        try:
+            r["ledger_entries"] = json.loads(r["ledger_entries"]) if r["ledger_entries"] else []
+        except Exception:
+            r["ledger_entries"] = []
+        if r.get("date"):
+            r["date"] = str(r["date"])
+        return r
+    finally:
+        cur.close(); conn.close()
+
+
+# Fields a user may edit on a posted voucher via the edit modal.
+_VOUCHER_EDIT_FIELDS = {
+    "voucher_number": "voucher_number", "voucher_type": "voucher_type",
+    "party_name": "ledger_name", "narration": "narration",
+    "reference_no": "reference_no", "instrument_number": "instrument_number",
+    "place_of_supply": "place_of_supply", "party_gstin": "party_gstin",
+    "currency": "currency",
+    "taxable_value": "taxable_value", "cgst_amount": "cgst_amount",
+    "sgst_amount": "sgst_amount", "igst_amount": "igst_amount",
+}
+
+
+def update_tally_voucher(voucher_id, fields, edited_by=None):
+    """Apply a local edit to a posted voucher. Updates editable columns and/or
+    ledger_entries, recomputes amount from the legs, and flags needs_resync so
+    the user can re-push to Tally. Does NOT touch Tally itself.
+    Returns the updated row, or {"error": ...}."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT id, tally_master_id FROM tally_vouchers WHERE id = %s", (voucher_id,))
+        existing = cur.fetchone()
+        if not existing:
+            return {"error": "Voucher not found."}
+
+        sets, params = [], []
+
+        # Scalar fields
+        for in_key, col in _VOUCHER_EDIT_FIELDS.items():
+            if in_key in fields:
+                val = fields[in_key]
+                if in_key in ("taxable_value", "cgst_amount", "sgst_amount", "igst_amount"):
+                    try: val = float(val or 0)
+                    except Exception: val = 0.0
+                sets.append(f"{col} = %s"); params.append(val)
+
+        # Date (accept ISO or YYYYMMDD)
+        if "date" in fields and fields["date"]:
+            d = str(fields["date"])
+            if len(d) == 8 and d.isdigit():
+                d = f"{d[:4]}-{d[4:6]}-{d[6:]}"
+            sets.append("date = %s"); params.append(d[:10])
+
+        # Ledger entries — validate Dr == Cr, recompute amount
+        if "ledger_entries" in fields and isinstance(fields["ledger_entries"], list):
+            entries = []
+            dr_total = cr_total = 0.0
+            for e in fields["ledger_entries"]:
+                nm = (e.get("ledger_name") or e.get("ledger") or "").strip()
+                if not nm:
+                    continue
+                amt = float(e.get("amount") or 0)
+                is_debit = bool(e.get("is_debit")) if "is_debit" in e else (amt >= 0)
+                entries.append({"ledger_name": nm, "amount": amt, "is_debit": is_debit})
+                if amt >= 0: dr_total += amt
+                else: cr_total += -amt
+            if entries and abs(dr_total - cr_total) > 0.01:
+                return {"error": f"Dr ({dr_total:.2f}) ≠ Cr ({cr_total:.2f}). Entry not balanced."}
+            sets.append("ledger_entries = %s"); params.append(json.dumps(entries))
+            sets.append("amount = %s"); params.append(round(max(dr_total, cr_total), 2))
+
+        if not sets:
+            return {"error": "No editable fields supplied."}
+
+        sets.append("needs_resync = TRUE")
+        sets.append("last_edited_at = CURRENT_TIMESTAMP")
+        sets.append("last_edited_by = %s"); params.append(edited_by)
+        sets.append("updated_at = CURRENT_TIMESTAMP")
+
+        params.append(voucher_id)
+        cur.execute(f"UPDATE tally_vouchers SET {', '.join(sets)} WHERE id = %s", params)
+        conn.commit()
+        return {"ok": True}
+    finally:
+        cur.close(); conn.close()
+
+
+def mark_voucher_resynced(voucher_id):
+    """Clear the needs_resync flag once a resync push has been enqueued."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("UPDATE tally_vouchers SET needs_resync = FALSE, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                    (voucher_id,))
+        conn.commit()
+    finally:
+        cur.close(); conn.close()
 
 
 def save_tally_ledgers(company_name, ledgers):
