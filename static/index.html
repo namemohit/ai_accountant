@@ -52,25 +52,24 @@
                         const isSuperAdmin = (user.role === 'super_admin');
                         
                         const badgeName = document.getElementById('active-user-name');
-                        const selectCompany = document.getElementById('active-company-select');
                         if(badgeName) badgeName.innerText = user.username || user.name || 'User';
-                        if(selectCompany) {
-                            selectCompany.innerHTML = '';
-                            const companiesList = user.companies || [user.company_name || 'Acme Corp'];
+                        // Populate BOTH the desktop sidebar selector and the mobile drawer one.
+                        const companiesList = user.companies || [user.company_name || 'Acme Corp'];
+                        const activeCo = user.company_name || 'Acme Corp';
+                        ['active-company-select', 'active-company-select-mobile'].forEach(id => {
+                            const sel = document.getElementById(id);
+                            if (!sel) return;
+                            sel.innerHTML = '';
                             companiesList.forEach(c => {
                                 const opt = document.createElement('option');
-                                opt.value = c;
-                                opt.innerText = c;
-                                if (c === (user.company_name || 'Acme Corp')) {
-                                    opt.selected = true;
-                                }
-                                selectCompany.appendChild(opt);
+                                opt.value = c; opt.innerText = c;
+                                if (c === activeCo) opt.selected = true;
+                                sel.appendChild(opt);
                             });
                             const addOpt = document.createElement('option');
-                            addOpt.value = "__ADD_NEW__";
-                            addOpt.innerText = "+ Add New Company";
-                            selectCompany.appendChild(addOpt);
-                        }
+                            addOpt.value = "__ADD_NEW__"; addOpt.innerText = "+ Add New Company";
+                            sel.appendChild(addOpt);
+                        });
 
                         const navWhatsapp = document.getElementById('nav-whatsapp');
                         const drawerWhatsapp = document.getElementById('drawer-whatsapp');
@@ -1789,6 +1788,12 @@
         <div class="mobile-drawer-header">
             <div class="mobile-drawer-logo">YantrAI Accounting</div>
             <button class="mobile-drawer-close" onclick="closeMobileMenu()"><i class="fas fa-times"></i></button>
+        </div>
+        <!-- Mobile company picker (the desktop one lives in the hidden sidebar) -->
+        <div style="padding: 4px 16px 12px; border-bottom: 1px solid var(--border); margin-bottom: 8px;">
+            <label style="display:block; font-size:0.68rem; text-transform:uppercase; letter-spacing:0.06em; color:#8a8178; margin-bottom:5px;">Active company</label>
+            <select id="active-company-select-mobile" onchange="switchCompany(this.value)"
+                    style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer;"></select>
         </div>
         <nav class="mobile-drawer-nav">
             <div class="mobile-drawer-item active" onclick="mobileNav('chat')"><span>💬</span> Chat</div>
