@@ -4,9 +4,24 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Login | YantrAI Accounting</title>
+    <!-- PWA: make the app installable from the login screen too (entry point when logged out) -->
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#da7756">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="YantrAI">
+    <link rel="apple-touch-icon" href="https://img.icons8.com/color/192/000000/accounting.png">
     <link rel="stylesheet" href="/static/style.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script>
+        // Register the service worker so the PWA install criteria are met on /login
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', function () {
+                navigator.serviceWorker.register('/sw.js').catch(function (e) { console.log('SW register failed', e); });
+            });
+        }
+    </script>
 </head>
 <style>
         html, body { height: 100%; }
