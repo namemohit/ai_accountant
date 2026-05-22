@@ -298,23 +298,20 @@ def seed():
     print(f"  ✅ {len(tasks)} sample tasks seeded")
 
     # ────────────────────────────────────────────────
-    # 9. AUTO-ADD "Sample Co" to ALL existing users
+    # 9. (DISABLED) Mass-add "Sample Co" to ALL users
     # ────────────────────────────────────────────────
-    cursor.execute("SELECT username, companies FROM accounting_users")
-    users = cursor.fetchall()
+    # PRE-SPRINT-7 BEHAVIOR (REMOVED):
+    # We used to iterate every accounting_users row and insert "Sample Co" into
+    # their companies array. This made Sample Co a SHARED NAMESPACE — any user
+    # would see every other user's seeded vouchers / chats / bank rows. That's
+    # a multi-tenant leak.
+    #
+    # NOW: each user gets their OWN per-user demo via /api/login, named
+    # "Sample Co — <username>". This seed script seeds the shared "Sample Co"
+    # company data itself (kept for super_admin / platform demos) but does NOT
+    # attach it to user accounts.
+    print(f"  ⏭️  Skipped mass-attach (per-user demo handled by /api/login now)")
     updated_count = 0
-    for username, companies in users:
-        company_list = companies if companies else []
-        if isinstance(company_list, str):
-            company_list = json.loads(company_list)
-        if COMPANY not in company_list:
-            company_list.insert(0, COMPANY)  # Add as FIRST company
-            cursor.execute("""
-            UPDATE accounting_users SET companies = %s WHERE username = %s
-            """, (json.dumps(company_list), username))
-            updated_count += 1
-
-    print(f"  ✅ Added '{COMPANY}' to {updated_count} existing users")
 
     # ────────────────────────────────────────────────
     conn.commit()

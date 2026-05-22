@@ -1,0 +1,32 @@
+# Sprint 33 — keep secrets, uploads, and large binaries out of the Cloud Run image
+.git/
+.gitignore
+__pycache__/
+*.pyc
+*.log
+.env
+.claude/
+
+# Local credential temp files (NEVER deploy)
+C:*auth*.json
+*auth.json
+*auth_*.json
+
+# User-uploaded files (regenerated at runtime; not part of the app)
+static/uploads/
+
+# Archived agent binaries + PyInstaller build artifacts (17MB+ each)
+agent_dump/
+tally_agent/build/
+tally_agent/dist/
+build/
+dist/
+*.exe
+
+# One-shot backfill / debug scripts (not needed in prod image)
+backfill_*.py
+debug_*.py
+run_agent_once.py
+check_outbox.py
+migrate_users_v2.py
+run_embeddings.py

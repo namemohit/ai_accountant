@@ -22,6 +22,299 @@ def get_reconciliation_embedding(text):
         print(f"Error generating reconciler embedding: {e}")
         return None
 
+def _classify_ledger_role(parent_group, name):
+    """Lightweight heuristic: bucket each ledger into one of:
+    bank, cash, expense, revenue, asset, liability, party_creditor, party_debtor, tax, other
+    Used to constrain Gemini's pick.
+    """
+    pg = (parent_group or "").lower()
+    n = (name or "").lower()
+    if any(k in pg for k in ["bank account"]):
+        return "bank"
+    if "cash" in pg or n == "cash":
+        return "cash"
+    if any(k in pg for k in ["sundry creditor", "creditor"]):
+        return "party_creditor"
+    if any(k in pg for k in ["sundry debtor", "debtor"]):
+        return "party_debtor"
+    if any(k in pg for k in ["sales", "direct income", "indirect income", "income"]):
+        return "revenue"
+    if any(k in pg for k in ["purchase", "direct expense", "indirect expense", "expense"]):
+        return "expense"
+    if any(k in pg for k in ["duties & taxes", "duties and taxes", "gst", "tds", "tax"]):
+        return "tax"
+    if any(k in pg for k in ["current asset", "fixed asset", "investments", "loans & advances", "loans and advances"]):
+        return "asset"
+    if any(k in pg for k in ["current liabilit", "loan", "secured", "unsecured", "capital"]):
+        return "liability"
+    return "other"
+
+
+def _pick_default_bank(bank_ledgers, cash_ledgers, file_hint=""):
+    """Pick the most relevant bank ledger based on the bank statement's file/source hint.
+    e.g., 'JMK_ICICI_Apr-26.xlsx' → match a ledger containing 'ICICI'.
+    """
+    hint = (file_hint or "").lower()
+    if hint and bank_ledgers:
+        # token-overlap scoring
+        hint_tokens = set(t for t in hint.replace('_', ' ').replace('-', ' ').replace('.', ' ').split() if len(t) > 2)
+        best = None
+        best_score = 0
+        for lg in bank_ledgers:
+            lg_tokens = set(t for t in lg.lower().replace('-', ' ').split() if len(t) > 2)
+            score = len(hint_tokens & lg_tokens)
+            if score > best_score:
+                best_score = score
+                best = lg
+        if best: return best
+    return bank_ledgers[0] if bank_ledgers else (cash_ledgers[0] if cash_ledgers else "Bank Account")
+
+
+def ai_reconcile_statement(transactions, company_name, company_id=None, progress_cb=None, file_hint=""):
+    """Sprint 2 — AI-driven bank reconciliation using vector embeddings + Gemini.
+
+    For each bank txn, finds:
+      - suggested_party  (from tally_master_party embeddings + ledger master)
+      - suggested_expense_head  (revenue if amount > 0, expense if < 0)
+      - suggested_bank_ledger  (matched against tally_master_ledger 'bank' or 'cash' roles)
+      - voucher_type  (Receipt if credit, Payment if debit)
+      - confidence  (0..1, from vector distance + Gemini)
+      - rationale  (short text)
+    """
+    import db as _db
+    tally_vouchers = _db.get_unreconciled_tally_vouchers(company_name)
+
+    # Get all ledgers for this company → use to constrain Gemini's choices
+    ledgers = _db.get_ledger_master_for_company(company_id=company_id, company_name=company_name)
+
+    # Pre-classify by role
+    bank_ledgers = []
+    cash_ledgers = []
+    expense_ledgers = []
+    revenue_ledgers = []
+    party_ledgers = []
+    tax_ledgers = []
+    for L in ledgers:
+        role = _classify_ledger_role(L.get("parent_group"), L.get("name"))
+        if role == "bank":
+            bank_ledgers.append(L["name"])
+        elif role == "cash":
+            cash_ledgers.append(L["name"])
+        elif role == "expense":
+            expense_ledgers.append(L["name"])
+        elif role == "revenue":
+            revenue_ledgers.append(L["name"])
+        elif role in ("party_creditor", "party_debtor"):
+            party_ledgers.append(L["name"])
+        elif role == "tax":
+            tax_ledgers.append(L["name"])
+
+    default_bank = _pick_default_bank(bank_ledgers, cash_ledgers, file_hint=file_hint)
+    print(f"[AI RECON] Default bank ledger picked: '{default_bank}'  (file_hint='{file_hint}', bank_ledgers={bank_ledgers[:5]})", flush=True)
+
+    results = []
+    total = len(transactions)
+    print(f"[AI RECON] Starting reconciliation of {total} transactions for {company_name}", flush=True)
+    if progress_cb: progress_cb({"phase": "starting", "total": total, "done": 0})
+
+    # Phase 1 + 2: deterministic + vector retrieval (fast — no Gemini)
+    needs_ai = []  # transactions that need Gemini reasoning
+
+    for i, tx in enumerate(transactions):
+        tx_date = None
+        if tx.get("date"):
+            try: tx_date = datetime.strptime(tx["date"], "%Y-%m-%d").date()
+            except Exception:
+                try: tx_date = datetime.strptime(tx["date"], "%d/%m/%Y").date()
+                except Exception: pass
+
+        tx_amount = float(tx.get("amount", 0) or 0)
+        tx_desc = (tx.get("description") or "").strip()
+        tx_ref = (tx.get("reference") or "").strip()
+        is_credit = tx_amount > 0
+        voucher_type = "Receipt" if is_credit else "Payment"
+
+        # Phase 1: deterministic
+        best_match = None
+        for v in tally_vouchers:
+            if v.get("reconciled"): continue
+            v_amt = float(v.get("amount") or 0)
+            if abs(v_amt - abs(tx_amount)) > 0.01: continue
+            v_date = v.get("date")
+            if isinstance(v_date, str):
+                try: v_date = datetime.strptime(v_date, "%Y-%m-%d").date()
+                except Exception: v_date = None
+            date_diff = abs((tx_date - v_date).days) if tx_date and v_date else 999
+            if date_diff > 7:
+                continue
+            v_inst = (v.get("instrument_number") or "").strip().lower()
+            ref_hit = bool(tx_ref) and bool(v_inst) and (tx_ref.lower() in v_inst or v_inst in tx_ref.lower())
+            v_ledger_lower = (v.get("ledger_name") or "").strip().lower()
+            # Token-based ledger match — require at least one non-trivial token (>3 chars) to overlap
+            tokens_desc = set(w for w in tx_desc.lower().replace('/', ' ').replace('.', ' ').split() if len(w) > 3)
+            tokens_ledger = set(w for w in v_ledger_lower.replace('/', ' ').replace('.', ' ').split() if len(w) > 3)
+            ledger_hit = bool(tokens_desc & tokens_ledger)
+            # Require BOTH amount-exact AND (ref overlap OR token overlap). Drop the
+            # "amount + ±3 days" lone fallback — it caused false positives in the
+            # ICICI test where every line matched the wrong voucher.
+            if ref_hit or ledger_hit:
+                best_match = v
+                break
+
+        if best_match:
+            tally_vouchers.remove(best_match)
+            results.append({
+                "bank_transaction": tx, "status": "auto_matched",
+                "suggested_party": best_match.get("ledger_name"),
+                "suggested_expense_head": None, "suggested_bank_ledger": default_bank,
+                "voucher_type": voucher_type, "confidence": 1.0,
+                "tally_voucher_id": best_match.get("id"),
+                "voucher_number": best_match.get("voucher_number"),
+                "rationale": f"Matched voucher {best_match.get('voucher_number')}",
+                "candidate_parties": [], "candidate_heads": [],
+                "candidate_bank_ledgers": bank_ledgers + cash_ledgers,
+                "candidate_revenue": revenue_ledgers, "candidate_expense": expense_ledgers,
+                "all_party_ledgers": party_ledgers,
+            })
+            if progress_cb: progress_cb({"phase": "phase1", "done": i+1, "total": total})
+            continue
+
+        # Phase 2: vector retrieval
+        query_text = f"Bank transaction: {tx_desc}. Reference: {tx_ref}. Amount: {tx_amount}."
+        emb = get_reconciliation_embedding(query_text)
+
+        candidate_parties = []
+        candidate_heads = []
+        candidate_narrations = []
+        if emb:
+            party_hits = _db.semantic_search_tally(emb, company_name, ['tally_master_party'], limit=5)
+            for h in party_hits:
+                d = h["data"] or {}
+                candidate_parties.append({"name": d.get("party") or d.get("name"), "distance": h["distance"]})
+            ledger_hits = _db.semantic_search_tally(emb, company_name, ['tally_master_ledger'], limit=12)
+            for h in ledger_hits:
+                d = h["data"] or {}
+                role = _classify_ledger_role(d.get("parent_group"), d.get("name"))
+                wanted = "revenue" if is_credit else "expense"
+                if role == wanted:
+                    candidate_heads.append({"name": d.get("name"), "distance": h["distance"]})
+            narr_hits = _db.semantic_search_tally(emb, company_name, ['tally_master_narration'], limit=3)
+            for h in narr_hits:
+                d = h["data"] or {}
+                candidate_narrations.append({"narration": d.get("narration"), "party": d.get("party")})
+
+        # Default suggestions from vector retrieval
+        suggested_party = candidate_parties[0]["name"] if candidate_parties else (tx.get("party_name") or "")
+        suggested_head = candidate_heads[0]["name"] if candidate_heads else ("Sales Account" if is_credit else "Suspense A/c")
+        vector_conf = max(0.0, 1.0 - (candidate_heads[0]["distance"] if candidate_heads else 1.0))
+
+        item = {
+            "bank_transaction": tx, "status": "unmatched",
+            "suggested_party": suggested_party, "suggested_expense_head": suggested_head,
+            "suggested_bank_ledger": default_bank, "voucher_type": voucher_type,
+            "confidence": round(vector_conf, 3),
+            "tally_voucher_id": None, "voucher_number": None,
+            "rationale": "Vector retrieval (pending AI review)",
+            "candidate_parties": [p["name"] for p in candidate_parties[:5]],
+            "candidate_heads": [h["name"] for h in candidate_heads[:8]],
+            "candidate_narrations": candidate_narrations,
+            "candidate_bank_ledgers": bank_ledgers + cash_ledgers,
+            "candidate_revenue": revenue_ledgers, "candidate_expense": expense_ledgers,
+            "all_party_ledgers": party_ledgers,
+            "_is_credit": is_credit,
+        }
+
+        # Skip Gemini if vector match is very strong (saves time + cost)
+        if vector_conf >= 0.7 and candidate_parties:
+            item["status"] = "auto_filled"
+            item["rationale"] = f"High-confidence vector match ({round(vector_conf*100)}%)"
+        else:
+            needs_ai.append((len(results), item))  # store position + item
+
+        results.append(item)
+        if progress_cb: progress_cb({"phase": "phase2", "done": i+1, "total": total})
+
+    print(f"[AI RECON] Phase 1+2 done. {len([r for r in results if r['status']=='auto_matched'])} matched, {len([r for r in results if r['status']=='auto_filled'])} high-confidence, {len(needs_ai)} need Gemini", flush=True)
+
+    # Phase 3: ONE batched Gemini call for everything that needs AI reasoning
+    if needs_ai:
+        if progress_cb: progress_cb({"phase": "gemini_start", "needs_ai": len(needs_ai), "total": total})
+        # Chunk into groups of 25 to keep prompt size manageable
+        CHUNK = 25
+        for chunk_start in range(0, len(needs_ai), CHUNK):
+            chunk = needs_ai[chunk_start:chunk_start + CHUNK]
+            print(f"[AI RECON] Gemini batch {chunk_start//CHUNK + 1}: {len(chunk)} lines", flush=True)
+
+            lines_block = []
+            for idx, (_, item) in enumerate(chunk):
+                tx = item["bank_transaction"]
+                lines_block.append({
+                    "line_idx": idx,
+                    "date": tx.get("date"),
+                    "description": tx.get("description", "")[:200],
+                    "reference": tx.get("reference", "")[:60],
+                    "amount": float(tx.get("amount") or 0),
+                    "type": "CREDIT" if item["_is_credit"] else "DEBIT",
+                    "candidate_parties": item["candidate_parties"][:5],
+                    "candidate_heads": item["candidate_heads"][:8],
+                })
+
+            prompt = f"""You are reconciling bank statement lines for {company_name}. For EACH line, pick the BEST party + ledger head ONLY from its candidate lists OR the fallback lists below. Do NOT invent new names.
+
+ALL PARTY LEDGERS (fallback): {json.dumps(party_ledgers[:80], ensure_ascii=False)}
+ALL REVENUE HEADS (fallback for credits): {json.dumps(revenue_ledgers[:50], ensure_ascii=False)}
+ALL EXPENSE HEADS (fallback for debits): {json.dumps(expense_ledgers[:50], ensure_ascii=False)}
+
+LINES TO RECONCILE:
+{json.dumps(lines_block, ensure_ascii=False, indent=1)}
+
+Return ONLY a JSON array, one object per line in the same order, each with:
+  "line_idx": <number, matches the input>
+  "party": <party ledger name or "">
+  "head": <expense/revenue head name>
+  "confidence": <0..1>
+  "rationale": <one short sentence>
+
+Return the array only, no markdown fences, no commentary.
+"""
+            try:
+                model = genai.GenerativeModel('gemini-flash-latest')
+                response = model.generate_content(prompt)
+                text = response.text or ""
+                import re as _re
+                # Find first [...] JSON array
+                m = _re.search(r'\[.*\]', text, _re.DOTALL)
+                if m:
+                    ai_array = json.loads(m.group())
+                    for entry in ai_array:
+                        li = entry.get("line_idx")
+                        if li is None or li >= len(chunk): continue
+                        results_pos, item = chunk[li]
+                        if entry.get("party"): item["suggested_party"] = entry["party"]
+                        if entry.get("head"): item["suggested_expense_head"] = entry["head"]
+                        if entry.get("confidence") is not None:
+                            item["confidence"] = round(float(entry["confidence"]), 3)
+                        if entry.get("rationale"): item["rationale"] = entry["rationale"]
+                        if item["confidence"] >= 0.6:
+                            item["status"] = "auto_filled"
+                        results[results_pos] = item
+                print(f"[AI RECON] Gemini batch {chunk_start//CHUNK + 1} processed {len(ai_array) if m else 0} suggestions", flush=True)
+            except Exception as e:
+                print(f"[AI RECON] Gemini batch error: {e}", flush=True)
+
+            if progress_cb: progress_cb({"phase": "gemini_progress",
+                                         "done": min(chunk_start + CHUNK, len(needs_ai)),
+                                         "needs_ai": len(needs_ai), "total": total})
+
+    # Clean up internal field before returning
+    for r in results:
+        r.pop("_is_credit", None)
+
+    print(f"[AI RECON] Complete. Returning {len(results)} reconciled rows.", flush=True)
+    if progress_cb: progress_cb({"phase": "done", "total": total})
+    return results
+
+
 def reconcile_statement(transactions, company_name):
     """
     reconcile_statement takes a list of bank transactions:

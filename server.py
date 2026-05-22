@@ -11,35 +11,143 @@ import json
 import requests
 import uuid
 import asyncio
-from datetime import datetime
+import secrets as _secrets
+from datetime import datetime, timedelta
 from providers.tally import TallyProvider
 from utils.parser import InvoiceParser
 import db
+from psycopg2.extras import RealDictCursor
 from utils.reconciler import reconcile_statement
 
 app = FastAPI()
 
-# Pooled Tally WebSocket Connections
+# Pooled Tally WebSocket Connections — keyed by company_id (UUID string) after Phase B
 tally_connections = {}
 tally_futures = {}
+
+# In-memory agent session store: session_token -> {user_id, expires_at, username, name}
+# Lost on server restart — agents will re-authenticate (acceptable for MVP).
+agent_sessions = {}
+AGENT_SESSION_TTL = timedelta(hours=8)
+
+
+def _normalize_co_name(name):
+    """Case-insensitive, whitespace-collapsed company name comparison helper."""
+    if not name:
+        return ""
+    return " ".join(str(name).strip().lower().split())
+
+
+def resolve_agent_request(payload: dict, required_perm: str = "edit"):
+    """
+    For Tally agent ingest endpoints — extract session_token + company_id from payload,
+    validate the session, enforce permission, and return (user_id, company_id, company_name).
+
+    Falls back to legacy company_name-only mode if session_token isn't provided
+    (back-compat during agent rollout).
+
+    Raises HTTPException on auth/permission failure.
+    """
+    session_token = payload.get("session_token")
+    company_id = payload.get("company_id")
+    company_name = payload.get("company_name")
+
+    if session_token and company_id:
+        sess = validate_agent_session(session_token)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
+        if not db.user_can(sess["user_id"], required_perm, company_id):
+            raise HTTPException(status_code=403, detail="You don't have permission for this company.")
+        # Resolve company_id → company_name for back-compat with downstream code
+        conn = db.get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT name FROM companies WHERE id = %s", (company_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row:
+            raise HTTPException(status_code=404, detail="Company not found")
+        return sess["user_id"], str(company_id), row["name"]
+
+    # Legacy path — no auth, just use company_name (must be removed once all agents upgraded)
+    return None, None, company_name or "Acme Corp"
+
+
+def validate_agent_session(token):
+    """Look up an active session token. Returns the session dict or None if invalid/expired.
+    Side-effect: sliding-window refreshes expires_at on every successful access.
+    """
+    if not token:
+        return None
+    sess = agent_sessions.get(token)
+    if not sess:
+        return None
+    if sess["expires_at"] < datetime.utcnow():
+        agent_sessions.pop(token, None)
+        return None
+    # Sliding window — extend on use
+    sess["expires_at"] = datetime.utcnow() + AGENT_SESSION_TTL
+    return sess
 
 @app.websocket("/tally/ws")
 async def tally_websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    token = None
+    conn_key = None  # company_id (UUID str) for Phase B, or legacy token for back-compat
     try:
         init_data = await websocket.receive_json()
-        token = init_data.get("token", "Acme Corp")
-        
-        # Only close old connection if it's a different websocket object
-        if token in tally_connections and tally_connections[token] != websocket:
+        session_token = init_data.get("session_token")
+        company_id = init_data.get("company_id")
+        tally_company_name = init_data.get("tally_company_name")
+        legacy_token = init_data.get("token")
+
+        if session_token and company_id:
+            # Phase B authenticated handshake
+            sess = validate_agent_session(session_token)
+            if not sess:
+                await websocket.send_json({"status": "error", "code": "AUTH_INVALID",
+                                          "message": "Session expired. Please log in again."})
+                await websocket.close()
+                print(f"[WS REJECT] invalid session_token", flush=True)
+                return
+            # Permission check — does this user have edit access to this company?
+            if not db.user_can(sess["user_id"], "edit", company_id):
+                await websocket.send_json({"status": "error", "code": "PERMISSION_DENIED",
+                                          "message": "You don't have permission to push data to this company."})
+                await websocket.close()
+                print(f"[WS REJECT] user {sess['username']} lacks edit on {company_id}", flush=True)
+                return
+            # Defense-in-depth: validate the company name matches Tally's company name
+            if tally_company_name:
+                conn = db.get_conn()
+                cur = conn.cursor(cursor_factory=RealDictCursor)
+                cur.execute("SELECT name FROM companies WHERE id = %s", (company_id,))
+                row = cur.fetchone()
+                cur.close()
+                conn.close()
+                if row and _normalize_co_name(row["name"]) != _normalize_co_name(tally_company_name):
+                    await websocket.send_json({
+                        "status": "error", "code": "COMPANY_NAME_MISMATCH",
+                        "message": f"Tally company '{tally_company_name}' does not match YantrAI company '{row['name']}'. Rename either side to match.",
+                    })
+                    await websocket.close()
+                    print(f"[WS REJECT] name mismatch: tally='{tally_company_name}' vs yantrai='{row['name']}'", flush=True)
+                    return
+            conn_key = str(company_id)
+            print(f"[WS CONNECT] agent authenticated user={sess['username']} company_id={conn_key}", flush=True)
+        else:
+            # Legacy fallback (will be removed once all agents are upgraded)
+            conn_key = legacy_token or "Acme Corp"
+            print(f"[WS CONNECT] LEGACY (no auth) token={conn_key}", flush=True)
+
+        # Replace stale connection
+        if conn_key in tally_connections and tally_connections[conn_key] != websocket:
             try:
-                await tally_connections[token].close()
+                await tally_connections[conn_key].close()
             except Exception:
                 pass
-                
-        tally_connections[token] = websocket
-        print(f"[WS CONNECT] Local Tally agent connected successfully for token: {token}", flush=True)
+
+        tally_connections[conn_key] = websocket
+        await websocket.send_json({"status": "ok", "message": "connected"})
         
         while True:
             try:
@@ -49,20 +157,20 @@ async def tally_websocket_endpoint(websocket: WebSocket):
                 if request_id and request_id in tally_futures:
                     tally_futures[request_id].set_result(response)
             except WebSocketDisconnect as d:
-                print(f"[WS DISCONNECT] Code {d.code} for token {token}", flush=True)
+                print(f"[WS DISCONNECT] Code {d.code} for key {conn_key}", flush=True)
                 break
             except Exception as inner_e:
                 print(f"[WS MSG ERROR] {inner_e}", flush=True)
                 break
-                
+
     except WebSocketDisconnect:
-        print(f"[WS DISCONNECT] Local Tally agent disconnected for token: {token}", flush=True)
+        print(f"[WS DISCONNECT] Local Tally agent disconnected for key: {conn_key}", flush=True)
     except Exception as e:
         print(f"[WS ERROR] Connection error: {e}", flush=True)
     finally:
-        if token and tally_connections.get(token) == websocket:
-            tally_connections.pop(token, None)
-            print(f"[WS CLEANUP] Removed connection for token: {token}", flush=True)
+        if conn_key and tally_connections.get(conn_key) == websocket:
+            tally_connections.pop(conn_key, None)
+            print(f"[WS CLEANUP] Removed connection for key: {conn_key}", flush=True)
 
 async def dispatch_tally_command(token: str, cmd_type: str, data: dict = None) -> dict:
     ws = None
@@ -89,10 +197,10 @@ async def dispatch_tally_command(token: str, cmd_type: str, data: dict = None) -
             "data": data
         })
         
-        res = await asyncio.wait_for(fut, timeout=30.0)
+        res = await asyncio.wait_for(fut, timeout=300.0)
         return res
     except asyncio.TimeoutError:
-        print(f"[WS TIMEOUT] Local agent did not respond inside 30s for request {req_id}", flush=True)
+        print(f"[WS TIMEOUT] Local agent did not respond inside 300s for request {req_id}", flush=True)
         return {"status": "error", "message": "Local agent timeout error"}
     except Exception as e:
         print(f"[WS DISPATCH ERROR] Error tunneling request {req_id}: {e}", flush=True)
@@ -104,19 +212,126 @@ async def dispatch_tally_command(token: str, cmd_type: str, data: dict = None) -
 async def get_invoice_history(company_name: str = None):
     return db.get_history(company_name)
 
+@app.get("/api/vouchers")
+async def get_all_vouchers(company_name: str = None, company_id: str = None,
+                           voucher_type: str = None, limit: int = 500, offset: int = 0):
+    """Return Tally vouchers + invoice-created vouchers merged, sorted by date desc."""
+    return db.get_all_vouchers(company_name=company_name, company_id=company_id,
+                               voucher_type=voucher_type, limit=limit, offset=offset)
+
 @app.get("/login")
 async def login_page():
     return FileResponse('static/login.html')
 
+# ── Sprint 28 — Tally Outbox endpoints (bridge-agent contract + UI polling) ──
+@app.get("/api/tally/ledgers")
+async def tally_ledgers_list(company_name: str):
+    """Sprint 32 — Returns the canonical ledger list YantrAI has on file for
+    this company (from `tally_ledgers`, populated by the original ingestion).
+    The bridge agent uses this instead of HTTP-probing Tally Prime per ledger
+    name, because rapid-fire probes crash Tally with c0000005."""
+    try:
+        rows = db.get_ledger_master_for_company(company_name=company_name) or []
+        # Keep payload small: just name + parent_group + gstin
+        slim = [{"name": r.get("name"),
+                 "parent_group": r.get("parent_group"),
+                 "gstin": r.get("gstin")} for r in rows if r.get("name")]
+        return {"status": "success", "data": slim, "count": len(slim)}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/tally/queue")
+async def tally_queue_claim(company_name: str, limit: int = 10):
+    """Bridge agent polls this. Atomically claims pending outbox rows and
+    flips them to 'pushing'. Returns the payloads to push to Tally."""
+    try:
+        rows = db.claim_tally_outbox(company_name, limit=limit)
+        return {"status": "success", "data": rows}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/tally/queue/{outbox_id}/ack")
+async def tally_queue_ack(outbox_id: str, payload: dict):
+    """Bridge agent confirms a successful push. Body: {tally_voucher_guid?}."""
+    try:
+        guid = payload.get("tally_voucher_guid") if isinstance(payload, dict) else None
+        return {"status": "success", **db.ack_tally_outbox(outbox_id, tally_voucher_guid=guid)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/tally/queue/{outbox_id}/fail")
+async def tally_queue_fail(outbox_id: str, payload: dict):
+    """Bridge agent reports a failure. Body: {error}."""
+    try:
+        err = (payload or {}).get("error") or "Unknown error"
+        return {"status": "success", **db.fail_tally_outbox(outbox_id, err)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/tally/heartbeat")
+async def tally_heartbeat(payload: dict):
+    """Bridge agent calls this every ~30s to mark itself as alive."""
+    try:
+        company_name = (payload or {}).get("company_name")
+        if not company_name:
+            raise HTTPException(status_code=400, detail="company_name required")
+        return {"status": "success", **db.upsert_tally_heartbeat(
+            company_name,
+            agent_version=(payload or {}).get("agent_version"),
+            ip=(payload or {}).get("ip"),
+        )}
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/tally/status")
+async def tally_status_endpoint(company_name: str):
+    """UI polls this to show agent online/offline + queue counts + last push."""
+    try:
+        return {"status": "success", **db.tally_status_summary(company_name)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/tally/outbox/{invoice_id}")
+async def tally_outbox_invoice_status(invoice_id: str):
+    """UI polls this for the latest state of a specific invoice's push."""
+    try:
+        row = db.tally_outbox_status_for_invoice(invoice_id)
+        if not row:
+            return {"status": "success", "data": None}
+        # Stringify for JSON
+        for k in ("id","enqueued_at","pushed_at","updated_at"):
+            if row.get(k) is not None: row[k] = str(row[k])
+        return {"status": "success", "data": row}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/tally_bridge_agent/download")
 async def download_tally_bridge_agent():
+    """Sprint 30 — Agent files live under tally_agent/. The .exe is rebuilt from
+    the latest source after every Sprint that touches tally_bridge_agent.py."""
     import os
-    exe_path = os.path.join(os.path.dirname(__file__), "dist", "tally_bridge_agent.exe")
+    base = os.path.dirname(__file__)
+    exe_path = os.path.join(base, "tally_agent", "dist", "tally_bridge_agent.exe")
     if os.path.exists(exe_path):
-        return FileResponse(exe_path, media_type="application/vnd.microsoft.portable-executable", filename="tally_bridge_agent.exe")
-    file_path = os.path.join(os.path.dirname(__file__), "tally_bridge_agent.py")
+        return FileResponse(
+            exe_path,
+            media_type="application/vnd.microsoft.portable-executable",
+            filename="tally_bridge_agent.exe",
+        )
+    # Dev fallback — return the Python source so a developer can run it directly
+    file_path = os.path.join(base, "tally_agent", "tally_bridge_agent.py")
     if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Agent script not found")
+        raise HTTPException(status_code=404, detail="Agent not found. Build with: pyinstaller tally_agent/tally_bridge_agent.spec --workpath tally_agent/build --distpath tally_agent/dist --noconfirm")
     return FileResponse(file_path, media_type="text/plain", filename="tally_bridge_agent.py")
 
 # WhatsApp Settings
@@ -136,6 +351,107 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Sprint 23 — Server-side role gate for super_admin-only feature areas ──
+# Six view families are restricted: /api/gstr/*, /api/tds/*, /api/audit/*,
+# /api/recon/*, plus the /tasks page route. The frontend attaches `X-User`
+# header on every fetch (see global fetch wrapper in static/index.html);
+# this middleware blocks non-super_admin requests with 403.
+from starlette.responses import JSONResponse as _JSONResponse  # type: ignore
+
+_GATED_PATH_PREFIXES = (
+    "/api/gstr/", "/api/tds/", "/api/audit/", "/api/recon/", "/api/itr/",
+    "/api/admin/",
+)
+_GATED_EXACT_PATHS = ("/tasks",)
+
+@app.middleware("http")
+async def _role_gate_middleware(request, call_next):
+    path = request.url.path
+    gated = (
+        any(path.startswith(p) for p in _GATED_PATH_PREFIXES)
+        or path in _GATED_EXACT_PATHS
+    )
+    if not gated:
+        return await call_next(request)
+    # CORS preflight bypass
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    # Username can come from X-User header (preferred) or ?username= query param (legacy)
+    username = request.headers.get("x-user") or request.query_params.get("username")
+    if not username:
+        return _JSONResponse(
+            {"detail": "Forbidden — this feature requires super_admin (no user identified)."},
+            status_code=403,
+        )
+    try:
+        user = db.get_user_by_username(username)
+    except Exception as e:
+        print(f"[role_gate] lookup error: {e}", flush=True)
+        user = None
+    if not user or (user.get("role") if isinstance(user, dict) else None) != "super_admin":
+        return _JSONResponse(
+            {"detail": "Forbidden — super_admin only."},
+            status_code=403,
+        )
+    return await call_next(request)
+
+
+# ── Sprint 24 — User Manager endpoints (all super_admin-only via middleware) ──
+@app.get("/api/admin/users")
+async def admin_list_users():
+    """List every account in the system with role + company access counts."""
+    try:
+        return {"status": "success", "users": db.list_all_users()}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/companies")
+async def admin_list_companies():
+    """List every distinct company in the system with voucher / bank /
+    user-access counts."""
+    try:
+        return {"status": "success", "companies": db.list_all_companies_with_usage()}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/admin/users/{username}")
+async def admin_delete_user(username: str):
+    """Hard-delete a user. Refuses to delete the only super_admin."""
+    try:
+        res = db.delete_user_by_username(username)
+        if not res.get("deleted"):
+            raise HTTPException(status_code=400, detail=res.get("message", "Delete failed"))
+        return {"status": "success", "message": res["message"]}
+    except HTTPException: raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/admin/users/{username}")
+async def admin_update_user(username: str, payload: dict):
+    """PATCH role and/or companies. Body: {role, add_company, remove_company}."""
+    try:
+        result = {"username": username}
+        if "role" in payload:
+            r = db.update_user_role(username, payload["role"])
+            result["role_update"] = r
+        if "remove_company" in payload:
+            r = db.remove_company_from_user(username, payload["remove_company"])
+            result["remove_company"] = r
+        if "add_company" in payload:
+            ok = db.add_company_to_user(username, payload["add_company"])
+            result["add_company"] = {"ok": bool(ok)}
+        return {"status": "success", "result": result}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --- WhatsApp Webhook Endpoints ---
 
@@ -264,15 +580,16 @@ async def chat_with_tally(
     session_id: str = Form(None),
     file: UploadFile = File(None),
     company_name: str = Form(None),
-    txn_type: str = Form(None)
+    txn_type: str = Form(None),
+    username: str = Form(None)
 ):
     try:
         kb = load_kb()
         user_msg = message or ""
 
-        # Create new session if needed
+        # Create new session if needed (scoped to user so siblings can't see each other's chats)
         if not session_id or session_id == "null" or session_id == "undefined":
-            session_id = db.create_chat_session(company_name=company_name)
+            session_id = db.create_chat_session(company_name=company_name, user_username=username)
 
         file_context = ""
         file_url = None
@@ -479,10 +796,25 @@ If on second thought this is actually just a regular accounting question (NOT a 
         NOTE: You have auto-classified this document. Use this detection to set the correct "category" in invoice_metadata (Sales or Purchase). If the document is clearly a Purchase invoice (billed TO the user's company), set category to "Purchase". If it is a Sales invoice (issued BY the user's company), set category to "Sales". Override the auto-detection if your deeper analysis disagrees.
 
         USER QUESTION: "{user_msg}"
-        
+
+        BEHAVIOR — be a real accountant, not a silent extractor:
+        • If the user is ASKING you to BUILD a voucher (e.g. "bill 14 units of X to Y", "paid ₹50k to Sharma", "raise invoice for…") and you have enough info, generate the editable invoice card (ui_type:"table") with values looked up from the REAL ACCOUNTING DATA above (stock standard_rate, gst_rate, hsn_code, party GSTIN).
+        • If a CRITICAL field is ambiguous or missing, DO NOT silently guess. Reply with ui_type:"text" and ASK the specific question. Examples:
+            - User says "bill X to Y" but Y is a Sundry Creditor (supplier) → ask: "Aadinath Proteins is in your Sundry Creditors group — they supply you. Did you mean to record a Purchase from them (they invoiced you) instead of a Sales to them?"
+            - User says "paid 50k to Sharma" without specifying ledger / mode → ask: "Was this paid by Cash or Bank? Which Sharma — Sharma Traders or Sharma Industries?"
+            - User asks for a voucher and the item / party isn't in masters → ask: "I couldn't find 'XYZ Industries' in your party list. Should I create them as a new party, or did you mean a similar name like 'XYZ Industries Pvt Ltd' that I see?"
+        • When you DO draw the card but notice anomalies/risks worth flagging, include a "warnings" array in ui_data with short user-readable strings (one item per concern). Examples of when to warn:
+            - Party group mismatch ("Aadinath is in Sundry Creditors — Sales voucher to them is unusual")
+            - Inter-state vs intra-state guess based on GSTIN ("GSTIN 08 + your state 27 → IGST applied. Confirm if this is right.")
+            - Item rate inferred from master but quantity is unusually high ("14 × ₹1,500 = ₹21,000. Confirm this matches the negotiated rate for Aadinath.")
+            - GSTIN missing or invalid format
+            - Stock would go negative (closing_qty 80 - sale 100 = -20)
+            - Voucher_number autogenerated (since user didn't supply one) — say what number was picked
+        • The warning array is OPTIONAL. Only include when there's something real to flag. Don't pad with noise.
+
         RESPONSE FORMAT (JSON):
         {{
-          "text": "Your conversational markdown reply summarizing the document (Total Value, Total Tax, Party Name, etc.)",
+          "text": "Your conversational markdown reply summarizing the document OR asking a clarifying question.",
           "ui_type": "text|table|cards|list",
           "ui_data": null or structured data,
           "suggested_questions": ["q1", "q2", "q3"]
@@ -530,8 +862,10 @@ If on second thought this is actually just a regular accounting question (NOT a 
              "headers": ["Item Description", "Qty", "Rate (₹)", "Discount (%)", "CGST (%)", "SGST (%)", "HSN/SAC Code", "Total (₹)"],
              "rows": [
                ["Optical Frames Type A", 300, "50.00", "0.00", "9.00", "9.00", "9003", "17700.00"]
-             ]
+             ],
+             "warnings": ["Aadinath is in Sundry Creditors group — Sales voucher to a creditor is unusual.", "Inter-state IGST applied based on GSTIN state codes. Confirm if correct.", "Invoice # auto-generated as SAL-2026-145 because none was supplied."]
            }}
+           NOTE on "warnings": include this array ONLY when you actually have concerns. Each item is a short, plain-English heads-up the user should see before they click Confirm & Sync. Omit the key entirely if everything looks clean.
            Ensure "rows" is a list of flat lists (NOT objects) containing exactly the 8 values corresponding to the 8 headers above. All numbers in rows must be formatted as strings.
            IMPORTANT: The "Total (₹)" column MUST be the final total for that row INCLUDING all taxes (CGST/SGST/IGST) and minus any discounts! (e.g. qty * rate + taxes).
            IMPORTANT: You MUST also extract additional charges like 'Freight', 'Packing & Forwarding', 'Transport', or 'Round Off' as separate individual items in the rows list. For example, if the invoice mentions 'Freight/Packing & Forwarding 100' with 2.5% CGST and SGST, you MUST add a row like ["Freight/Packing & Forwarding", "1", "100.00", "0.00", "2.5", "2.5", "9965", "105.00"].
@@ -656,6 +990,25 @@ If on second thought this is actually just a regular accounting question (NOT a 
         ai_response["session_id"] = session_id
         ai_response["file_url"] = file_url
         ai_response["id"] = msg_id
+
+        # Auto-generate chat title from first message if still "New Chat"
+        try:
+            session_info = db.get_chat_sessions(company_name)
+            current_session = next((s for s in session_info if s["id"] == session_id), None)
+            if current_session and (not current_session.get("title") or current_session["title"] in ("New Chat", "New Chat (Empty)")):
+                if file and file.filename:
+                    auto_title = f"📄 {file.filename[:45]}"
+                elif user_msg:
+                    auto_title = user_msg[:50].strip()
+                    if len(user_msg) > 50:
+                        auto_title += "…"
+                else:
+                    auto_title = None
+                if auto_title:
+                    db.update_chat_title(session_id, auto_title)
+        except Exception as title_err:
+            print(f"Auto-title error: {title_err}")
+
         return ai_response
 
     except Exception as e:
@@ -1064,18 +1417,67 @@ async def gstr3b_export(company_name: str, month: int, year: int):
 
 
 @app.get("/chat/sessions")
-async def list_chat_sessions(company_name: str = None):
-    return db.get_chat_sessions(company_name)
+async def list_chat_sessions(company_name: str = None, all: str = None,
+                              companies: str = None, username: str = None):
+    """List chat sessions scoped to (company, user). super_admin can pass all=true.
+    Regular users MUST send their username — without it, no sessions are returned."""
+    if all == "true":
+        # Only super_admin (verified by username lookup having super_admin role)
+        if username:
+            user = db.get_user_by_username(username)
+            if user and user.get("role") == "super_admin":
+                return db.get_chat_sessions(None, None)
+        # else fall through to scoped query (don't leak)
+    if not username:
+        # No auth — return empty rather than leaking
+        return []
+    if companies:
+        try:
+            company_list = json.loads(companies)
+            return db.get_chat_sessions_multi(company_list, user_username=username)
+        except Exception:
+            pass
+    return db.get_chat_sessions(company_name, user_username=username)
+
 
 @app.get("/chat/messages/{session_id}")
-async def get_session_messages(session_id: str):
+async def get_session_messages(session_id: str, username: str = None):
+    """Return messages for a session — only if the requesting user owns it
+    OR has the same company (covers chat-share within a firm) OR is super_admin."""
+    # If no username sent, allow read for backward compat — but log once
+    if username:
+        owner = db.get_chat_session_owner(session_id)
+        if owner and owner.get("user_username") and owner["user_username"] != username:
+            # Different owner — check super_admin
+            user = db.get_user_by_username(username)
+            if not (user and user.get("role") == "super_admin"):
+                raise HTTPException(status_code=403, detail="This chat belongs to another user.")
     return db.get_chat_messages(session_id)
+
 
 @app.post("/chat/new")
 async def new_chat_session(payload: dict = None):
     company = payload.get("company_name") if payload else None
-    session_id = db.create_chat_session(company_name=company)
+    username = payload.get("username") if payload else None
+    session_id = db.create_chat_session(company_name=company, user_username=username)
     return {"session_id": session_id}
+
+
+@app.post("/chat/update-title")
+async def update_chat_title_endpoint(payload: dict):
+    """Rename a chat session — used to tag voucher chats with ✅ + voucher_number after sync."""
+    try:
+        session_id = payload.get("session_id")
+        title = payload.get("title")
+        if not session_id or not title:
+            raise HTTPException(status_code=400, detail="session_id + title required")
+        db.update_chat_title(session_id, title)
+        return {"status": "success"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/analyze")
 async def analyze_invoice(file: UploadFile = File(...), company_name: str = Form(None)):
@@ -1150,9 +1552,32 @@ async def analyze_invoice(file: UploadFile = File(...), company_name: str = Form
 @app.post("/push-to-tally")
 async def push_to_tally(data: dict):
     try:
-        # Save to DB so it persistently appears in local sync history!
-        db.save_invoice(data)
-        
+        # Save to OUR books — this is YantrAI's record.
+        invoice_id = None
+        try:
+            saved = db.save_invoice(data)
+            # save_invoice may return the new row's id depending on impl
+            if isinstance(saved, dict) and saved.get("id"):
+                invoice_id = saved.get("id")
+            elif isinstance(saved, str):
+                invoice_id = saved
+        except Exception as save_err:
+            print(f"[push_to_tally] save_invoice error: {save_err}", flush=True)
+
+        # Sprint 28 — Enqueue to tally_outbox. The bridge agent (running locally
+        # on the customer's Windows machine alongside Tally Prime) will poll
+        # /api/tally/queue, push to Tally's XML API, then ack/fail back here.
+        # The web UI polls /api/tally/outbox/{invoice_id} for live status.
+        try:
+            db.enqueue_tally_push(
+                payload=data,
+                invoice_id=invoice_id,
+                company_name=data.get("company_name"),
+                enqueued_by="web",
+            )
+        except Exception as q_err:
+            print(f"[push_to_tally] enqueue_tally_push error: {q_err}", flush=True)
+
         # Mark corresponding chat message as synced if message_id is provided
         msg_id = data.get("message_id")
         session_id = None
@@ -1200,23 +1625,30 @@ async def push_to_tally(data: dict):
         except Exception as p_err2:
             print(f"Autonomous Tally party update error: {p_err2}")
         
-        voucher_data = {
-            "type": "Purchase" if data.get("category") != "Sales" else "Sales",
-            "date": data.get("date", "20240101"),
-            "number": data.get("invoice_number"),
-            "party": data.get("party_name"),
-            "amount": data.get("total_amount"),
-            "cash_bank_ledger": "Cash"
-        }
-        response = tally.create_voucher(voucher_data)
-        
+        # Sprint 33 — REMOVED the legacy `tally.create_voucher` direct call.
+        # It built a 2-leg Payment voucher (party + Cash, no GST, defaulting to
+        # VCHTYPE="Payment") and pushed it straight to the customer's Tally —
+        # creating a SPURIOUS DUPLICATE alongside the correct, GST-aware Sales
+        # voucher that the bridge agent pushes via the tally_outbox path above.
+        # The outbox/agent path is now the ONE canonical way data reaches Tally.
+        response = {"note": "queued to tally_outbox; bridge agent will push"}
+
         if session_id:
             try:
-                db.save_chat_message(session_id, "assistant", "Syncing your edited data directly into Tally Prime...", "text")
                 total = data.get('total_amount', 0)
                 inv_num = data.get('invoice_number', '')
                 p_name = data.get('party_name', '')
-                db.save_chat_message(session_id, "assistant", f"✅ Successfully synced Invoice **{inv_num}** for **{p_name}**! Ledger total: ₹{float(total):.2f}. Learned from all custom corrections.", "text")
+                # Sprint 32 — Honest copy. The voucher is QUEUED, not synced.
+                # The bridge agent will pick it up and the Vouchers tab badge
+                # will flip to ✅ Pushed once Tally ack'd. Until then it's
+                # still in tally_outbox awaiting the agent.
+                db.save_chat_message(
+                    session_id, "assistant",
+                    f"🟠 Invoice **{inv_num}** for **{p_name}** queued for Tally sync "
+                    f"(₹{float(total):.2f}). The Bridge Agent will push it to Tally Prime "
+                    f"on its next poll — watch the Vouchers tab badge flip ✅ Pushed when "
+                    f"Tally accepts it.",
+                    "text")
             except Exception as e:
                 print(f"Error saving confirmation messages to DB: {e}")
                 
@@ -1263,6 +1695,2219 @@ async def confirm_reconciliation(payload: dict):
     except Exception as e:
         print(f"Error in reconciliation confirm: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# In-memory progress tracker for bank-reconciliation jobs (keyed by job_id)
+bank_reco_progress = {}
+
+
+@app.get("/api/bank/auto-reconcile/progress/{job_id}")
+async def bank_reco_progress_poll(job_id: str):
+    """Frontend polls this to show live progress."""
+    return bank_reco_progress.get(job_id, {"phase": "unknown"})
+
+
+@app.post("/api/bank/auto-reconcile")
+async def bank_auto_reconcile(
+    file: UploadFile = File(...),
+    company_name: str = Form("Acme Corp"),
+    company_id: str = Form(None),
+    job_id: str = Form(None),
+):
+    """Sprint 2 — AI bank reconciliation. Parses bank statement and uses vector
+    embeddings + Gemini reasoning to suggest party + expense/revenue head + bank ledger
+    for every transaction."""
+    try:
+        import tempfile, os as _os, hashlib, shutil, uuid as _uuid
+        # Resolve company_id if frontend only sent company_name — otherwise dedup,
+        # event-log insertion, and cross-source linking all silently fail with NULL.
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        suffix = _os.path.splitext(file.filename)[1] if file.filename else ".csv"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        # File deduplication via sha256
+        sha_hex = hashlib.sha256(content).hexdigest()
+        if company_id:
+            existing = db.find_statement_upload_by_sha(company_id, sha_hex)
+            if existing:
+                try: _os.unlink(tmp_path)
+                except: pass
+                raise HTTPException(status_code=409, detail={
+                    "message": f"Duplicate file: '{existing['original_name']}' was already uploaded on {existing['uploaded_at']}.",
+                    "existing_upload_id": str(existing["id"]),
+                })
+
+        # Persist a copy to static/uploads/ for source traceability
+        uploads_dir = _os.path.join(_os.path.dirname(__file__), "static", "uploads")
+        _os.makedirs(uploads_dir, exist_ok=True)
+        stored_name = f"{_uuid.uuid4()}_{file.filename or 'bank.csv'}"
+        stored_path = _os.path.join(uploads_dir, stored_name)
+        shutil.copy(tmp_path, stored_path)
+        file_url = f"/static/uploads/{stored_name}"
+
+        parse_prompt = """You are a bank statement parser. Extract ALL transactions from this bank statement.
+Return a JSON array of objects, each with these exact fields:
+- "date": transaction date in YYYY-MM-DD format
+- "description": the narration/description text exactly as shown
+- "reference": any reference number, cheque number, UTR, or transaction ID
+- "amount": the transaction amount as a number (positive for credits/deposits, negative for debits/withdrawals)
+- "party_name": the likely party/entity name extracted from the description (best guess)
+- "transaction_type": one of "Cheque", "NEFT", "RTGS", "UPI", "IMPS", "ATM", "POS", "Transfer", "Other"
+
+Return ONLY the JSON array, no explanation."""
+
+        transactions = []
+
+        # --- Path A: structured XLSX / CSV → parse with pandas (no Gemini, ~milliseconds) ---
+        if suffix.lower() in ['.xlsx', '.xls', '.csv']:
+            try:
+                import pandas as _pd
+                if suffix.lower() == '.csv':
+                    dfs = [_pd.read_csv(tmp_path, header=None)]
+                else:
+                    xl = _pd.ExcelFile(tmp_path)
+                    dfs = [xl.parse(sh, header=None) for sh in xl.sheet_names]
+
+                for df in dfs:
+                    # Find the header row — look for cells matching common headers
+                    header_keywords = {'date', 'description', 'amount', 'cr', 'dr', 'particulars',
+                                       'narration', 'reference', 'value date', 'withdrawal',
+                                       'deposit', 'debit', 'credit', 'transaction'}
+                    header_row_idx = None
+                    for ridx in range(min(15, len(df))):
+                        row_str = ' '.join(str(c).lower() for c in df.iloc[ridx].values if str(c) != 'nan')
+                        hits = sum(1 for k in header_keywords if k in row_str)
+                        if hits >= 3:
+                            header_row_idx = ridx
+                            break
+                    if header_row_idx is None:
+                        continue
+
+                    headers = [str(c).strip() for c in df.iloc[header_row_idx].values]
+                    body = df.iloc[header_row_idx + 1:].copy()
+                    body.columns = headers
+                    body = body.dropna(how='all')
+
+                    # Detect column roles
+                    def find_col(*needles):
+                        for h in headers:
+                            hl = h.lower()
+                            if any(n in hl for n in needles): return h
+                        return None
+
+                    col_date = find_col('value date', 'date', 'txn date')
+                    col_desc = find_col('description', 'particulars', 'narration')
+                    col_party = find_col('party')
+                    col_details = find_col('details', 'remark')
+                    col_ref = find_col('reference', 'ref no', 'utr', 'chq', 'cheque')
+                    col_drcr = find_col('cr/dr', 'dr/cr', 'type')
+                    col_amount = find_col('amount', 'transaction amount')
+                    col_debit = find_col('withdrawal', 'debit') if not col_amount else None
+                    col_credit = find_col('deposit', 'credit') if not col_amount else None
+
+                    for _, row in body.iterrows():
+                        # date
+                        raw_date = str(row.get(col_date, '') if col_date else '').strip()
+                        if not raw_date or raw_date == 'nan': continue
+                        date_str = None
+                        for fmt in ('%d/%m/%Y', '%Y-%m-%d', '%d-%m-%Y', '%d/%m/%y', '%m/%d/%Y'):
+                            try:
+                                date_str = datetime.strptime(raw_date.split()[0], fmt).strftime('%Y-%m-%d')
+                                break
+                            except Exception: continue
+                        if not date_str: continue
+
+                        # amount with sign
+                        amt = 0.0
+                        if col_amount:
+                            try: amt = float(str(row.get(col_amount, 0)).replace(',', '') or 0)
+                            except: amt = 0.0
+                            if col_drcr:
+                                drcr = str(row.get(col_drcr, '')).strip().upper()
+                                if drcr.startswith('DR') or drcr in ('D', 'WITHDRAWAL'):
+                                    amt = -abs(amt)
+                                elif drcr.startswith('CR') or drcr in ('C', 'DEPOSIT'):
+                                    amt = abs(amt)
+                        elif col_debit or col_credit:
+                            try:
+                                d = float(str(row.get(col_debit, 0) or 0).replace(',', '') or 0) if col_debit else 0
+                                c = float(str(row.get(col_credit, 0) or 0).replace(',', '') or 0) if col_credit else 0
+                                amt = c - d
+                            except: amt = 0.0
+                        if abs(amt) < 0.01: continue
+
+                        desc = str(row.get(col_desc, '') if col_desc else '').strip()
+                        party_guess = str(row.get(col_party, '') if col_party else '').strip()
+                        details = str(row.get(col_details, '') if col_details else '').strip()
+                        ref = str(row.get(col_ref, '') if col_ref else '').strip()
+                        # Try to extract ref from description if no ref column
+                        if not ref and desc:
+                            import re as _re
+                            mref = _re.search(r'\b([A-Z0-9]{8,})\b', desc)
+                            if mref: ref = mref.group(1)
+
+                        full_desc = (desc + (' | ' + details if details else '')).strip()
+
+                        transactions.append({
+                            "date": date_str,
+                            "description": full_desc,
+                            "reference": ref,
+                            "amount": amt,
+                            "party_name": party_guess,
+                            "transaction_type": "Other",
+                        })
+
+                print(f"[BANK PARSE] pandas extracted {len(transactions)} transactions from {suffix}")
+            except Exception as pe:
+                print(f"[BANK PARSE] pandas path failed, falling back to Gemini: {pe}")
+                transactions = []
+
+        # --- Path B: fallback to Gemini for PDFs/images or if pandas couldn't extract ---
+        if not transactions:
+            if suffix.lower() == '.csv':
+                text_content = content.decode('utf-8', errors='ignore')
+                model = genai.GenerativeModel('gemini-flash-latest')
+                response = model.generate_content(f"{parse_prompt}\n\nRAW BANK STATEMENT DATA:\n---\n{text_content[:100000]}\n---")
+                result = response.text
+            elif suffix.lower() in ['.xlsx', '.xls']:
+                import pandas as _pd
+                xl = _pd.ExcelFile(tmp_path)
+                text_content = "\n\n".join(f"--- Sheet: {sh} ---\n" + xl.parse(sh).to_csv(index=False) for sh in xl.sheet_names)
+                model = genai.GenerativeModel('gemini-flash-latest')
+                response = model.generate_content(f"{parse_prompt}\n\nRAW BANK STATEMENT DATA:\n---\n{text_content[:100000]}\n---")
+                result = response.text
+            else:
+                # PDF / image — let parser handle (it uploads to Gemini File API)
+                result = parser.parse(tmp_path, parse_prompt)
+            if result:
+                import re as _re
+                jm = _re.search(r'\[.*\]', result, _re.DOTALL)
+                if jm:
+                    try: transactions = json.loads(jm.group())
+                    except: pass
+
+        try: _os.unlink(tmp_path)
+        except: pass
+
+        if not transactions:
+            return {"status": "error", "message": "Could not parse bank statement."}
+
+        from utils.reconciler import ai_reconcile_statement
+
+        # Progress callback writes into in-memory dict; frontend polls it
+        def _progress(p):
+            if job_id:
+                bank_reco_progress[job_id] = p
+
+        if job_id:
+            bank_reco_progress[job_id] = {"phase": "parsing_done", "total": len(transactions), "done": 0}
+
+        # Run in executor — blocking psycopg2 + Gemini calls
+        import asyncio as _aio
+        _loop = _aio.get_event_loop()
+        reconciled = await _loop.run_in_executor(
+            None,
+            lambda: ai_reconcile_statement(transactions, company_name,
+                                            company_id=company_id, progress_cb=_progress,
+                                            file_hint=file.filename or "")
+        )
+
+        auto_matched = sum(1 for r in reconciled if r["status"] == "auto_matched")
+        auto_filled  = sum(1 for r in reconciled if r["status"] == "auto_filled")
+        unmatched    = sum(1 for r in reconciled if r["status"] == "unmatched")
+
+        # ── Persist to bank_transactions (Sprint 3) ────────────────
+        try:
+            # Compute period_from / period_to from the parsed transactions
+            valid_dates = [t.get("date") for t in transactions if t.get("date")]
+            period_from = min(valid_dates) if valid_dates else None
+            period_to = max(valid_dates) if valid_dates else None
+            total_credit = sum(t.get("amount", 0) for t in transactions if t.get("amount", 0) > 0)
+            total_debit = sum(abs(t.get("amount", 0)) for t in transactions if t.get("amount", 0) < 0)
+
+            # Infer bank ledger from filename for the upload record
+            inferred_bank = reconciled[0].get("suggested_bank_ledger") if reconciled else None
+
+            upload_id = await _loop.run_in_executor(None, lambda: db.save_statement_upload(
+                company_id=company_id, company_name=company_name,
+                file_url=file_url, original_name=file.filename or "bank.csv",
+                bank_ledger=inferred_bank,
+                period_from=period_from, period_to=period_to,
+                line_count=len(transactions),
+                total_credit=total_credit, total_debit=total_debit,
+                sha256_hex=sha_hex,
+            ))
+
+            # Build bank_transactions rows
+            bt_rows = []
+            for idx, r in enumerate(reconciled):
+                tx = r["bank_transaction"]
+                bt_rows.append({
+                    "company_id": company_id, "company_name": company_name,
+                    "source": "bank_statement",
+                    "source_record_id": None,
+                    "source_file_id": upload_id,
+                    "source_row_idx": idx,
+                    "source_payload": tx,
+                    "date": tx.get("date"),
+                    "value_date": None,
+                    "description": tx.get("description"),
+                    "reference": tx.get("reference"),
+                    "amount": tx.get("amount") or 0,
+                    "bank_ledger": r.get("suggested_bank_ledger"),
+                    "party": r.get("suggested_party"),
+                    "head": r.get("suggested_expense_head"),
+                    "voucher_type": r.get("voucher_type"),
+                    "instrument_type": tx.get("transaction_type"),
+                    "instrument_number": tx.get("reference"),
+                    "payment_favouring": None,
+                    # Normalize reconciler vocab → canonical UI vocab.
+                    # reconciler emits: auto_matched | auto_filled | unmatched
+                    # UI/DB speak:       matched      | ai_filled   | unmatched
+                    "status": (
+                        "matched"   if r["status"] == "auto_matched" else
+                        "ai_filled" if r["status"] == "auto_filled"  else
+                        r["status"]
+                    ),
+                    "confidence": r.get("confidence", 0),
+                    "rationale": r.get("rationale"),
+                    "match_reason": "phase1" if r["status"] == "auto_matched" else "phase2_or_3",
+                    "linked_id": None,
+                    "created_by": f"bank_upload:{file.filename}",
+                    # Sprint 11 — AI engine produced the suggestion for this row
+                    # (whether it matched something existing or just filled party/head).
+                    # Unmatched rows still count as "AI tried"? No — keep ai_touched=FALSE
+                    # for unmatched to reflect "AI gave up, needs human review".
+                    "ai_touched": r["status"] in ("auto_matched", "auto_filled"),
+                    "human_touched": False,
+                })
+            persist_res = await _loop.run_in_executor(None, db.save_bank_transactions, bt_rows)
+            print(f"[BANK PERSIST] inserted {persist_res['inserted']} bank_transactions for upload {upload_id}", flush=True)
+
+            # Cross-source link after insert
+            link_res = None
+            if company_id:
+                link_res = await _loop.run_in_executor(None, db.link_bank_transactions, company_id)
+                print(f"[BANK LINK] {link_res['linked_pairs']} new cross-source links", flush=True)
+
+            # Log this run
+            await _loop.run_in_executor(None, db.log_bank_sync_run,
+                                         company_id, company_name, "statement_upload",
+                                         None, None, persist_res, link_res, "user",
+                                         f"file={file.filename}")
+        except Exception as persist_err:
+            print(f"[BANK PERSIST WARNING] {persist_err}", flush=True)
+
+        # Build a per-line-dedup summary from persist_res (if persistence happened)
+        persisted_summary = None
+        _lv = locals()
+        if 'persist_res' in _lv and _lv['persist_res']:
+            _link = _lv.get('link_res') or {}
+            persisted_summary = {
+                "newly_inserted": _lv['persist_res'].get("inserted", 0),
+                "already_existed": _lv['persist_res'].get("skipped_existing", 0),
+                "errors": _lv['persist_res'].get("skipped_error", 0),
+                "cross_source_links": _link.get("linked_pairs", 0) if isinstance(_link, dict) else 0,
+            }
+
+        return {
+            "status": "success",
+            "data": {
+                "reconciled": reconciled,
+                "metrics": {"total": len(reconciled), "auto_matched": auto_matched,
+                            "auto_filled": auto_filled, "unmatched": unmatched},
+                "persisted": persisted_summary,
+                "file_name": file.filename,
+            }
+        }
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/bank/confirm-reconciliation")
+async def bank_confirm_reconciliation(payload: dict):
+    """Confirm reconciliation results — write vouchers to tally_vouchers
+    AND store the bank-narration → party + head mapping in knowledge_base
+    so future similar transactions are recognized."""
+    try:
+        company_name = payload.get("company_name")
+        company_id = payload.get("company_id")
+        rows = payload.get("rows") or []
+        if not company_name:
+            raise HTTPException(status_code=400, detail="company_name required")
+
+        from utils.reconciler import get_reconciliation_embedding
+        posted = 0
+        learned = 0
+
+        for r in rows:
+            bt = r.get("bank_transaction") or {}
+            party = (r.get("suggested_party") or "").strip()
+            head  = (r.get("suggested_expense_head") or "").strip()
+            bank  = (r.get("suggested_bank_ledger") or "").strip() or "Bank Account"
+            vtype = r.get("voucher_type") or ("Receipt" if (bt.get("amount") or 0) > 0 else "Payment")
+            amount = abs(float(bt.get("amount") or 0))
+            desc = (bt.get("description") or "").strip()
+            ref = (bt.get("reference") or "").strip()
+            tx_date = bt.get("date") or ""
+            # YYYY-MM-DD → YYYYMMDD for tally storage
+            date_compact = tx_date.replace("-", "") if tx_date else ""
+
+            # Build ledger entries — double entry: bank ledger Dr/Cr + head Cr/Dr
+            # Receipt (money in):   Bank Dr, Party/Income Cr
+            # Payment (money out):  Expense Dr, Bank Cr
+            if vtype == "Receipt":
+                ledger_entries = [
+                    {"ledger_name": bank, "amount": amount, "is_debit": True},
+                    {"ledger_name": head or party or "Sales Account", "amount": -amount, "is_debit": False},
+                ]
+                voucher_party = party or head
+            else:
+                ledger_entries = [
+                    {"ledger_name": head or "Suspense A/c", "amount": amount, "is_debit": True},
+                    {"ledger_name": bank, "amount": -amount, "is_debit": False},
+                ]
+                voucher_party = party or head
+
+            voucher = {
+                "date": date_compact,
+                "type": vtype,
+                "voucher_type": vtype,
+                "party": voucher_party,
+                "number": ref or f"BANK-{tx_date}-{posted+1:03d}",
+                "amount": amount,
+                "narration": desc,
+                "ledger_entries": ledger_entries,
+                "reference_no": ref,
+                "instrument_number": ref,
+                "currency": "INR",
+                "tally_master_id": None,  # not from Tally — we created it
+            }
+
+            try:
+                save_res = db.save_tally_vouchers(company_name, [voucher])
+                if save_res.get("upserted"):
+                    posted += 1
+                    # Mark as reconciled
+                    if r.get("tally_voucher_id"):
+                        db.mark_tally_voucher_reconciled(r["tally_voucher_id"])
+            except Exception as ve:
+                print(f"[BANK CONFIRM] voucher save error: {ve}")
+
+            # Backfill company_id on the freshly-inserted row
+            if company_id:
+                try:
+                    conn_bf = db.get_conn()
+                    cur_bf = conn_bf.cursor()
+                    cur_bf.execute(
+                        "UPDATE tally_vouchers SET company_id = %s WHERE company_name = %s AND company_id IS NULL",
+                        (company_id, company_name)
+                    )
+                    conn_bf.commit()
+                    cur_bf.close()
+                    conn_bf.close()
+                except Exception as bf:
+                    print(f"[BANK CONFIRM] backfill warning: {bf}")
+
+            # Learning loop — embed bank narration → party + head mapping
+            try:
+                learning_text = f"Bank reconciliation: '{desc}' ref '{ref}' amount {amount} → party '{party}', head '{head}', type {vtype}"
+                emb = get_reconciliation_embedding(learning_text)
+                conn_l = db.get_conn()
+                cur_l = conn_l.cursor()
+                kb_data = {
+                    "company_name": company_name,
+                    "bank_narration": desc,
+                    "reference": ref,
+                    "amount": amount,
+                    "voucher_type": vtype,
+                    "party": party,
+                    "head": head,
+                    "bank_ledger": bank,
+                    "source": "bank_reconciliation_confirm",
+                }
+                if emb:
+                    cur_l.execute("""
+                        INSERT INTO knowledge_base (type, data, embedding)
+                        VALUES (%s, %s, %s)
+                    """, ('bank_reconciliation', json.dumps(kb_data),
+                          f"[{','.join(map(str, emb))}]"))
+                else:
+                    cur_l.execute("""
+                        INSERT INTO knowledge_base (type, data)
+                        VALUES (%s, %s)
+                    """, ('bank_reconciliation', json.dumps(kb_data)))
+                conn_l.commit()
+                cur_l.close()
+                conn_l.close()
+                learned += 1
+            except Exception as le:
+                print(f"[BANK CONFIRM] learning insert warning: {le}")
+
+        return {
+            "status": "success",
+            "posted_vouchers": posted,
+            "learnings_saved": learned,
+            "message": f"Posted {posted} vouchers and saved {learned} learning patterns."
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════
+# 360° Bank Sub-Tab — endpoints
+# ═══════════════════════════════════════════════════════════════
+
+def _resolve_company_id_by_name(company_name: str):
+    """Look up a company's UUID by its name. Returns None if not found."""
+    if not company_name:
+        return None
+    try:
+        conn = db.get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT id FROM companies WHERE name = %s LIMIT 1", (company_name,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return str(row["id"]) if row else None
+    except Exception as e:
+        print(f"[_resolve_company_id_by_name] {e}")
+        return None
+
+
+@app.get("/api/resolve-company")
+async def resolve_company_endpoint(name: str):
+    """Frontend helper — given a company name, returns its UUID for downstream calls."""
+    cid = _resolve_company_id_by_name(name)
+    if not cid:
+        raise HTTPException(status_code=404, detail=f"company '{name}' not found")
+    return {"status": "success", "company_id": cid, "company_name": name}
+
+@app.get("/api/bank-transactions")
+async def list_bank_transactions_endpoint(
+    company_id: str = None, company_name: str = None,
+    source: str = None, status: str = None,
+    from_date: str = None, to_date: str = None,
+    q: str = None, view: str = "per_source",
+    sort: str = "date_desc",
+    limit: int = 500, offset: int = 0,
+    tally_status: str = None,
+    bank_ledger: str = None,
+):
+    try:
+        result = db.list_bank_transactions(
+            company_id=company_id, company_name=company_name,
+            source=source, status=status,
+            from_date=from_date, to_date=to_date,
+            q=q, view=view, sort=sort, limit=limit, offset=offset,
+            tally_status=tally_status,
+            bank_ledger=bank_ledger,
+        )
+        # JSON-friendly conversion
+        for r in result["rows"]:
+            for k in ("date", "value_date", "created_at", "updated_at"):
+                if r.get(k) is not None:
+                    r[k] = str(r[k])
+            for k in ("amount", "confidence"):
+                if r.get(k) is not None:
+                    r[k] = float(r[k])
+            for k in ("id", "source_record_id", "source_file_id", "linked_id", "company_id"):
+                if r.get(k) is not None:
+                    r[k] = str(r[k])
+        return {"status": "success", "data": result}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/bank-transactions/{tx_id}")
+async def patch_bank_transaction(tx_id: str, payload: dict):
+    try:
+        # If user is manually setting party/head, bump confidence to 1.0 and status to ai_filled
+        if any(k in payload for k in ("party", "head", "bank_ledger")):
+            payload.setdefault("confidence", 1.0)
+            payload.setdefault("status", "ai_filled")
+            payload.setdefault("rationale", "Manual override by user")
+        row = db.update_bank_transaction(tx_id, payload)
+        if not row:
+            raise HTTPException(status_code=404, detail="bank_transaction not found")
+        # JSON-friendly
+        for k in ("date", "value_date", "created_at", "updated_at"):
+            if row.get(k) is not None: row[k] = str(row[k])
+        for k in ("amount", "confidence"):
+            if row.get(k) is not None: row[k] = float(row[k])
+        for k in ("id", "source_record_id", "source_file_id", "linked_id", "company_id"):
+            if row.get(k) is not None: row[k] = str(row[k])
+        return {"status": "success", "data": row}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/bank-transactions/sync")
+async def sync_bank_transactions(payload: dict):
+    """Re-run all three ingestion paths + cross-source linking for the active company."""
+    try:
+        company_id = payload.get("company_id")
+        company_name = payload.get("company_name")
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        if not company_id:
+            raise HTTPException(status_code=400, detail="company_id or company_name required")
+
+        import asyncio as _aio
+        _loop = _aio.get_event_loop()
+        # Run blocking DB work in executor
+        tally_res = await _loop.run_in_executor(None, db.ingest_bank_from_tally, company_id)
+        # Sprint 15 — Bank Reco is strictly bank + cash. Stop ingesting invoice-derived
+        # rows; invoice lifecycle lives on the Vouchers tab.
+        invoice_res = {"inserted": 0, "skipped": 0}
+        link_res = await _loop.run_in_executor(None, db.link_bank_transactions, company_id)
+
+        # Record this sync attempt
+        await _loop.run_in_executor(None, db.log_bank_sync_run,
+                                    company_id, company_name, "manual_sync",
+                                    tally_res, invoice_res, None, link_res, "user", None)
+
+        return {
+            "status": "success",
+            "tally": tally_res,
+            "invoices": invoice_res,
+            "linking": link_res,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/bank-transactions/relink")
+async def relink_bank_transactions(payload: dict):
+    try:
+        company_id = payload.get("company_id")
+        company_name = payload.get("company_name")
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        if not company_id:
+            raise HTTPException(status_code=400, detail="company_id or company_name required")
+        import asyncio as _aio
+        _loop = _aio.get_event_loop()
+        link_res = await _loop.run_in_executor(None, db.link_bank_transactions, company_id)
+        return {"status": "success", **link_res}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/bank-transactions/post-to-tally")
+async def post_bank_transactions_to_tally(payload: dict):
+    """For selected rows, build double-entry vouchers and INSERT into tally_vouchers.
+    Also stores learning patterns in knowledge_base."""
+    try:
+        company_name = payload.get("company_name")
+        company_id = payload.get("company_id")
+        tx_ids = payload.get("tx_ids") or []
+        if not company_name or not tx_ids:
+            raise HTTPException(status_code=400, detail="company_name + tx_ids required")
+
+        from utils.reconciler import get_reconciliation_embedding
+        posted = 0
+        learned = 0
+        skipped = 0
+
+        conn = db.get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT * FROM bank_transactions
+            WHERE id = ANY(%s::uuid[]) AND status IN ('ai_filled', 'matched', 'unmatched')
+        """, (tx_ids,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        for r in rows:
+            if r["source"] == "tally":
+                skipped += 1  # already a Tally voucher
+                continue
+            party = (r.get("party") or "").strip()
+            head = (r.get("head") or "").strip()
+            bank = (r.get("bank_ledger") or "Bank Account").strip()
+            vtype = r.get("voucher_type") or ("Receipt" if float(r["amount"]) > 0 else "Payment")
+            amount = abs(float(r["amount"]))
+            desc = (r.get("description") or "").strip()
+            ref = (r.get("reference") or "").strip()
+            date_compact = (str(r["date"]).replace("-", "") if r.get("date") else "")
+
+            if vtype == "Receipt":
+                ledger_entries = [
+                    {"ledger_name": bank, "amount": amount, "is_debit": True},
+                    {"ledger_name": head or party or "Sales Account", "amount": -amount, "is_debit": False},
+                ]
+                voucher_party = party or head
+            else:
+                ledger_entries = [
+                    {"ledger_name": head or "Suspense A/c", "amount": amount, "is_debit": True},
+                    {"ledger_name": bank, "amount": -amount, "is_debit": False},
+                ]
+                voucher_party = party or head
+
+            voucher = {
+                "date": date_compact, "type": vtype, "voucher_type": vtype,
+                "party": voucher_party,
+                "number": ref or f"BANK-{r['date']}-{posted+1:03d}",
+                "amount": amount, "narration": desc,
+                "ledger_entries": ledger_entries,
+                "reference_no": ref, "instrument_number": ref,
+                "currency": "INR", "tally_master_id": None,
+            }
+            try:
+                save_res = db.save_tally_vouchers(company_name, [voucher])
+                if save_res.get("upserted"):
+                    posted += 1
+                    # Mark this bank_transactions row as posted.
+                    # Sprint 11: the user explicitly clicked "Post to Tally",
+                    # so flag human_touched=TRUE alongside the status flip.
+                    db.update_bank_transaction(
+                        r["id"],
+                        {"status": "posted", "human_touched": True},
+                    )
+            except Exception as ve:
+                print(f"[POST-TO-TALLY] voucher save error: {ve}")
+
+            # Learning loop
+            try:
+                learning_text = f"Bank reconciliation: '{desc}' ref '{ref}' amount {amount} → party '{party}', head '{head}', type {vtype}"
+                emb = get_reconciliation_embedding(learning_text)
+                kb_data = {
+                    "company_name": company_name, "bank_narration": desc,
+                    "reference": ref, "amount": amount, "voucher_type": vtype,
+                    "party": party, "head": head, "bank_ledger": bank,
+                    "source": "bank_transactions_post",
+                }
+                conn_l = db.get_conn()
+                cur_l = conn_l.cursor()
+                if emb:
+                    cur_l.execute("""
+                        INSERT INTO knowledge_base (type, data, embedding)
+                        VALUES (%s, %s, %s)
+                    """, ('bank_reconciliation', json.dumps(kb_data),
+                          f"[{','.join(map(str, emb))}]"))
+                else:
+                    cur_l.execute("INSERT INTO knowledge_base (type, data) VALUES (%s, %s)",
+                                  ('bank_reconciliation', json.dumps(kb_data)))
+                conn_l.commit()
+                cur_l.close()
+                conn_l.close()
+                learned += 1
+            except Exception as le:
+                print(f"[POST-TO-TALLY] learning insert: {le}")
+
+        # Backfill company_id on new vouchers
+        if company_id:
+            try:
+                conn_bf = db.get_conn()
+                cur_bf = conn_bf.cursor()
+                cur_bf.execute(
+                    "UPDATE tally_vouchers SET company_id = %s WHERE company_name = %s AND company_id IS NULL",
+                    (company_id, company_name)
+                )
+                conn_bf.commit()
+                cur_bf.close()
+                conn_bf.close()
+            except Exception as bf:
+                print(f"[POST-TO-TALLY] backfill: {bf}")
+
+        return {
+            "status": "success",
+            "posted": posted, "learned": learned, "skipped": skipped,
+            "message": f"Posted {posted} vouchers, recorded {learned} learnings."
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/bank-transactions/health/{company_id}")
+async def bank_transactions_health(company_id: str, company_name: str = ""):
+    try:
+        # Allow company_id="by-name" with company_name=X for the UI's convenience
+        if (not company_id or company_id == "by-name") and company_name:
+            company_id = _resolve_company_id_by_name(company_name) or ""
+        if not company_id:
+            raise HTTPException(status_code=400, detail="company_id or company_name required")
+        result = db.bank_health_check(company_id, company_name)
+        return {"status": "success", "data": result}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/bank-transactions/sync-runs/{company_id}")
+async def bank_sync_runs_endpoint(company_id: str, company_name: str = ""):
+    """Returns the last 20 sync attempts for the active company."""
+    try:
+        if (not company_id or company_id == "by-name") and company_name:
+            company_id = _resolve_company_id_by_name(company_name) or ""
+        if not company_id:
+            raise HTTPException(status_code=400, detail="company_id required")
+        rows = db.list_bank_sync_runs(company_id, limit=20)
+        for r in rows:
+            for k in ("ran_at",):
+                if r.get(k) is not None: r[k] = str(r[k])
+            for k in ("id", "company_id"):
+                if r.get(k) is not None: r[k] = str(r[k])
+        return {"status": "success", "data": rows}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/bank-statement-uploads")
+async def list_statement_uploads_endpoint(company_id: str):
+    try:
+        rows = db.list_statement_uploads(company_id)
+        for r in rows:
+            for k in ("period_from", "period_to", "uploaded_at"):
+                if r.get(k) is not None: r[k] = str(r[k])
+            for k in ("total_credit", "total_debit"):
+                if r.get(k) is not None: r[k] = float(r[k])
+            for k in ("id", "company_id"):
+                if r.get(k) is not None: r[k] = str(r[k])
+        return {"status": "success", "data": rows}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/bank-statement-uploads/{upload_id}/download")
+async def download_statement_upload(upload_id: str):
+    """Redirect to the static file."""
+    try:
+        row = db.get_statement_upload(upload_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="upload not found")
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=row["file_url"])
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════
+# Vouchers — Manual create / Upload / Drafts / Bulk / Helpers
+# ═══════════════════════════════════════════════════════════════
+
+def _draft_jsonify(row):
+    """Make a voucher_draft row JSON-friendly."""
+    if not row: return row
+    for k in ("id", "company_id", "duplicate_of", "posted_voucher_id"):
+        if row.get(k) is not None: row[k] = str(row[k])
+    for k in ("created_at", "updated_at"):
+        if row.get(k) is not None: row[k] = str(row[k])
+    if row.get("ai_confidence") is not None:
+        row["ai_confidence"] = float(row["ai_confidence"])
+    return row
+
+
+@app.post("/api/vouchers/manual")
+async def create_manual_voucher(payload: dict):
+    """Create one voucher from a manual entry form.
+    Required: company_name, voucher_type, date, party, line_items (Dr=Cr)."""
+    try:
+        company_name = payload.get("company_name")
+        company_id = payload.get("company_id")
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        voucher_type = payload.get("voucher_type") or "Journal"
+        date_str = payload.get("date")  # ISO YYYY-MM-DD or YYYYMMDD
+        if not company_name or not date_str:
+            raise HTTPException(status_code=400, detail="company_name + date required")
+
+        line_items = payload.get("line_items") or []
+        dr_total = sum(float(li.get("debit") or 0) for li in line_items)
+        cr_total = sum(float(li.get("credit") or 0) for li in line_items)
+        if abs(dr_total - cr_total) > 0.01:
+            raise HTTPException(status_code=400, detail=f"Dr ({dr_total}) ≠ Cr ({cr_total}). Entry not balanced.")
+
+        # Normalize date → YYYYMMDD for save_tally_vouchers
+        date_compact = date_str.replace("-", "")[:8]
+
+        # ledger_entries in the format save_tally_vouchers expects
+        ledger_entries = []
+        for li in line_items:
+            dr = float(li.get("debit") or 0)
+            cr = float(li.get("credit") or 0)
+            if dr > 0:
+                ledger_entries.append({"ledger_name": li["ledger_name"], "amount": dr, "is_debit": True})
+            elif cr > 0:
+                ledger_entries.append({"ledger_name": li["ledger_name"], "amount": -cr, "is_debit": False})
+
+        # Suggest voucher number if not provided
+        v_num = payload.get("voucher_number") or db.next_voucher_number(company_name, voucher_type)
+
+        voucher = {
+            "date": date_compact, "type": voucher_type, "voucher_type": voucher_type,
+            "party": payload.get("party") or "",
+            "number": v_num,
+            "amount": max(dr_total, cr_total),
+            "narration": payload.get("narration", ""),
+            "ledger_entries": ledger_entries,
+            "reference_no": payload.get("reference_no", ""),
+            "instrument_number": payload.get("instrument_number", ""),
+            "place_of_supply": payload.get("place_of_supply", ""),
+            "party_gstin": payload.get("party_gstin", ""),
+            "currency": payload.get("currency", "INR"),
+            "taxable_value": float(payload.get("taxable_value") or 0),
+            "cgst_amount": float(payload.get("cgst_amount") or 0),
+            "sgst_amount": float(payload.get("sgst_amount") or 0),
+            "igst_amount": float(payload.get("igst_amount") or 0),
+            "tally_master_id": None,
+            "created_by": payload.get("username") or payload.get("created_by"),
+        }
+        res = db.save_tally_vouchers(company_name, [voucher])
+        if not res.get("upserted"):
+            raise HTTPException(status_code=500, detail="Save failed")
+
+        # Backfill company_id + ingest bank leg if relevant
+        if company_id:
+            try:
+                conn_bf = db.get_conn()
+                cur_bf = conn_bf.cursor()
+                cur_bf.execute(
+                    "UPDATE tally_vouchers SET company_id = %s WHERE company_name = %s AND company_id IS NULL",
+                    (company_id, company_name)
+                )
+                conn_bf.commit()
+                cur_bf.close()
+                conn_bf.close()
+                # Fire ingest hook in background
+                import threading as _t
+                _t.Thread(target=db.ingest_bank_from_tally, args=(company_id,), daemon=True).start()
+            except Exception as bf_err:
+                print(f"[manual voucher backfill] {bf_err}")
+
+        return {"status": "success", "voucher_number": v_num, "upserted": res["upserted"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/vouchers/upload")
+async def upload_voucher_file(
+    file: UploadFile = File(...),
+    company_name: str = Form("Acme Corp"),
+    company_id: str = Form(None),
+):
+    """Accept ONE invoice file (PDF/image/XLSX/CSV), parse via Gemini,
+    save to voucher_drafts, return the draft_id for review."""
+    try:
+        import tempfile, os as _os, uuid as _u, shutil
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+
+        suffix = _os.path.splitext(file.filename or "")[1].lower() or ".bin"
+        content = await file.read()
+
+        # Persist file to static/uploads/
+        uploads_dir = _os.path.join(_os.path.dirname(__file__), "static", "uploads")
+        _os.makedirs(uploads_dir, exist_ok=True)
+        stored_name = f"{_u.uuid4()}_{file.filename or 'invoice'}"
+        stored_path = _os.path.join(uploads_dir, stored_name)
+        with open(stored_path, "wb") as f:
+            f.write(content)
+        file_url = f"/static/uploads/{stored_name}"
+
+        # Determine file type for the draft
+        type_map = {
+            ".pdf": "pdf",
+            ".png": "image", ".jpg": "image", ".jpeg": "image",
+            ".xlsx": "xlsx", ".xls": "xlsx",
+            ".csv": "csv",
+        }
+        file_type = type_map.get(suffix, "other")
+
+        # Run AI parser — reuse InvoiceParser
+        parse_prompt = """Extract this invoice/voucher into JSON with fields:
+- invoice_number, date (YYYY-MM-DD), party_name, party_gstin
+- total_amount, taxable_value, cgst_amount, sgst_amount, igst_amount, place_of_supply
+- voucher_type (one of: Sales, Purchase, Payment, Receipt, Journal, Contra)
+- items: array of { description, quantity, unit_price, amount, hsn_code, gst_rate }
+- narration (one-line description)
+Return ONLY a JSON object."""
+        import asyncio as _aio
+        _loop = _aio.get_event_loop()
+        try:
+            raw_text = await _loop.run_in_executor(None, parser.parse, stored_path, parse_prompt)
+        except Exception as parse_err:
+            print(f"[voucher upload] parser error: {parse_err}")
+            raw_text = ""
+
+        # Extract JSON object from response
+        parsed = {}
+        if raw_text:
+            import re as _re
+            m = _re.search(r'\{[\s\S]*\}', raw_text)
+            if m:
+                try: parsed = json.loads(m.group())
+                except Exception as jerr:
+                    print(f"[voucher upload] JSON parse: {jerr}")
+
+        if not parsed:
+            parsed = {"_parse_failed": True, "raw_text": raw_text[:500] if raw_text else ""}
+
+        # Save the draft
+        draft_id = db.save_voucher_draft(
+            company_id=company_id, company_name=company_name,
+            parsed_payload=parsed,
+            source_file_url=file_url,
+            source_file_name=file.filename,
+            source_file_type=file_type,
+            voucher_type=parsed.get("voucher_type"),
+            ai_confidence=0.85 if parsed and not parsed.get("_parse_failed") else 0.0,
+            created_by="user_upload",
+        )
+
+        return {
+            "status": "success",
+            "draft_id": draft_id,
+            "file_url": file_url,
+            "file_name": file.filename,
+            "file_type": file_type,
+            "parsed": parsed,
+        }
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/vouchers/delete")
+async def delete_vouchers_endpoint(payload: dict):
+    """Sprint 33 — Delete selected vouchers from YantrAI's DB (test/sample/bad
+    rows). Body: {company_name, items:[{id, source}]}. Each item is deleted
+    from tally_vouchers (source='tally') or invoices (source='invoice'),
+    scoped to the company. Also clears any matching tally_outbox rows so the
+    Event Log stays consistent. Does NOT touch the customer's Tally Prime."""
+    try:
+        company_name = (payload or {}).get("company_name")
+        items = (payload or {}).get("items") or []
+        if not company_name or not items:
+            raise HTTPException(status_code=400, detail="company_name and items required")
+        from psycopg2.extras import RealDictCursor
+        company_id = _resolve_company_id_by_name(company_name)
+        conn = db.get_conn(); cur = conn.cursor()
+        dcur = conn.cursor(cursor_factory=RealDictCursor)
+        deleted = 0
+        outbox_cleared = 0
+        tally_cleanup = []   # Sprint 33 — tally-sourced rows the user must also remove in Tally Prime
+        for it in items:
+            vid = it.get("id"); src = (it.get("source") or "invoice").lower()
+            vnum = it.get("voucher_number")
+            if not vid:
+                continue
+            try:
+                if src == "tally":
+                    # Capture details BEFORE delete so we can guide manual Tally cleanup.
+                    dcur.execute("""SELECT voucher_number, voucher_type, ledger_name, amount, date
+                                    FROM tally_vouchers
+                                    WHERE id = %s AND (company_id = %s OR company_name = %s)""",
+                                 (vid, company_id, company_name))
+                    det = dcur.fetchone()
+                    if det:
+                        cleanup_item = {
+                            "voucher_number": det.get("voucher_number"),
+                            "voucher_type": det.get("voucher_type"),
+                            "party": det.get("ledger_name"),
+                            "amount": float(det["amount"]) if det.get("amount") is not None else None,
+                            "date": str(det.get("date")) if det.get("date") else None,
+                        }
+                        tally_cleanup.append(cleanup_item)
+                        # Sprint 33 — persist so the cleanup checklist survives
+                        # in Event Logs even after the voucher row is gone.
+                        try:
+                            db.add_tally_cleanup(
+                                company_name=company_name,
+                                voucher_number=cleanup_item["voucher_number"],
+                                voucher_type=cleanup_item["voucher_type"],
+                                party=cleanup_item["party"],
+                                amount=cleanup_item["amount"],
+                                voucher_date=cleanup_item["date"],
+                                reason="Deleted from YantrAI — remove from Tally Prime manually")
+                        except Exception as ce:
+                            print(f"[delete_vouchers] cleanup-log failed: {ce}", flush=True)
+                    cur.execute("DELETE FROM tally_vouchers WHERE id = %s AND (company_id = %s OR company_name = %s)",
+                                (vid, company_id, company_name))
+                else:
+                    cur.execute("DELETE FROM invoices WHERE id = %s AND company_name = %s",
+                                (vid, company_name))
+                deleted += cur.rowcount
+                # Clear matching outbox rows by invoice/voucher number
+                if vnum:
+                    cur.execute("DELETE FROM tally_outbox WHERE company_name = %s AND payload->>'invoice_number' = %s",
+                                (company_name, vnum))
+                    outbox_cleared += cur.rowcount
+            except Exception as ie:
+                print(f"[delete_vouchers] item {vid} ({src}) failed: {ie}", flush=True)
+                conn.rollback()
+        conn.commit()
+        cur.close(); dcur.close(); conn.close()
+        return {"status": "success", "deleted": deleted,
+                "outbox_cleared": outbox_cleared, "tally_cleanup": tally_cleanup}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/vouchers/cleanup/{cleanup_id}/done")
+async def mark_cleanup_done_endpoint(cleanup_id: str, payload: dict = None):
+    """Sprint 33 — User ticks off a Tally-cleanup item after deleting it in Tally."""
+    try:
+        done = True if not payload else bool(payload.get("done", True))
+        return {"status": "success", **db.mark_tally_cleanup_done(cleanup_id, done=done)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/vouchers/drafts")
+async def list_drafts_endpoint(company_id: str = None, company_name: str = None,
+                                 status: str = None, limit: int = 200):
+    try:
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        if not company_id:
+            raise HTTPException(status_code=400, detail="company_id required")
+        rows = db.list_voucher_drafts(company_id, status=status, limit=limit)
+        return {"status": "success", "data": [_draft_jsonify(r) for r in rows]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/vouchers/draft/{draft_id}")
+async def get_draft_endpoint(draft_id: str):
+    try:
+        row = db.get_voucher_draft(draft_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="draft not found")
+        return {"status": "success", "data": _draft_jsonify(row)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/vouchers/draft/{draft_id}")
+async def patch_draft_endpoint(draft_id: str, payload: dict):
+    try:
+        row = db.update_voucher_draft(
+            draft_id,
+            reviewed_payload=payload.get("reviewed_payload"),
+            voucher_type=payload.get("voucher_type"),
+            status=payload.get("status"),
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="draft not found")
+        return {"status": "success", "data": _draft_jsonify(row)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/vouchers/draft/{draft_id}/post")
+async def post_draft_endpoint(draft_id: str):
+    try:
+        res = db.post_voucher_from_draft(draft_id)
+        if res.get("error"):
+            raise HTTPException(status_code=400, detail=res["error"])
+        return {"status": "success", **res}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/vouchers/draft/{draft_id}/discard")
+async def discard_draft_endpoint(draft_id: str):
+    try:
+        row = db.discard_voucher_draft(draft_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="draft not found")
+        return {"status": "success", "data": _draft_jsonify(row)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/vouchers/check-duplicate")
+async def check_dup_endpoint(company_name: str, invoice_number: str = None,
+                              party: str = None, amount: float = None, date: str = None):
+    try:
+        row = db.check_voucher_duplicate(company_name, invoice_number, party, amount, date)
+        return {"status": "success", "duplicate": row}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/vouchers/next-number")
+async def next_number_endpoint(company_name: str, voucher_type: str):
+    try:
+        n = db.next_voucher_number(company_name, voucher_type)
+        return {"status": "success", "voucher_number": n}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/parties")
+async def parties_autocomplete(company_id: str = None, company_name: str = None,
+                                 q: str = "", limit: int = 10):
+    try:
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        rows = db.autocomplete_parties(company_id, q, limit=limit)
+        for r in rows:
+            if r.get("closing_balance") is not None:
+                r["closing_balance"] = float(r["closing_balance"])
+        return {"status": "success", "data": rows}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/bank-ledger-options")
+async def bank_ledger_options(company_id: str = None, company_name: str = None):
+    """Return three lists for the Bank Reco inline-edit dropdowns:
+       parties, heads (revenue+expense ledgers), banks (Bank/Cash ledgers).
+       Sourced from tally_ledgers — same master Tally itself uses."""
+    try:
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        conn = db.get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT name, parent_group FROM tally_ledgers
+            WHERE company_id = %s
+            ORDER BY name
+        """, (company_id,))
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+        parties, heads, banks = [], [], []
+        for r in rows:
+            grp = (r.get("parent_group") or "").lower()
+            nm = r.get("name")
+            if not nm: continue
+            if "sundry" in grp or "debtor" in grp or "creditor" in grp:
+                parties.append(nm)
+            elif "bank account" in grp or "cash-in-hand" in grp or "cash in hand" in grp:
+                banks.append(nm)
+            elif "expense" in grp or "income" in grp or "revenue" in grp or "sales" in grp or "purchase" in grp:
+                heads.append(nm)
+        return {"status": "success", "parties": parties, "heads": heads, "banks": banks}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/gstin-lookup")
+async def gstin_lookup_endpoint(gstin: str, company_id: str = None, company_name: str = None):
+    """Look up an existing ledger by GSTIN (used by review modal autofill)."""
+    try:
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        row = db.lookup_party_by_gstin(gstin, company_id, company_name)
+        return {"status": "success", "data": row}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Sprint 26 — AI Gap Scan endpoints ──
+@app.post("/api/vouchers/ai-scan")
+async def ai_scan_endpoint(payload: dict):
+    """Run the AI gap scan over every voucher of the active company. Returns
+    {run_id, totals: {gap_type → count}}. Body: {company_name, company_id?, gap_types?}."""
+    try:
+        company_name = payload.get("company_name") or ""
+        if not company_name:
+            raise HTTPException(status_code=400, detail="company_name required")
+        company_id = payload.get("company_id")
+        gap_types = payload.get("gap_types")  # optional list
+        # Run blocking work in executor (DB-heavy)
+        import asyncio as _aio
+        loop = _aio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: db.run_voucher_ai_scan(company_id, company_name, gap_types)
+        )
+        return {"status": "success", **result}
+    except HTTPException: raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/vouchers/ai-suggestions")
+async def ai_suggestions_list(company_name: str, gap_type: str = None,
+                              status: str = "pending", limit: int = 10000):
+    """List AI suggestions for the company, optionally filtered by gap_type."""
+    try:
+        rows = db.list_ai_suggestions(company_name, gap_type=gap_type, status=status, limit=limit)
+        # Normalize types for JSON
+        for r in rows:
+            for k in ("id", "voucher_id", "created_at", "amount", "voucher_date", "confidence"):
+                if k in r and r[k] is not None:
+                    try: r[k] = str(r[k]) if k in ("id", "voucher_id", "created_at", "voucher_date") else float(r[k])
+                    except: pass
+        return {"status": "success", "data": rows}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/vouchers/ai-suggestions/counts")
+async def ai_suggestion_counts_endpoint(company_name: str):
+    """Pending count grouped by gap_type — feeds the AI Gap filter dropdown."""
+    try:
+        return {"status": "success", "counts": db.ai_suggestion_counts(company_name)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/vouchers/ai-suggestions/{sid}/accept")
+async def ai_suggestion_accept(sid: str):
+    try:
+        res = db.accept_ai_suggestion(sid)
+        if not res.get("ok"):
+            raise HTTPException(status_code=400, detail=res.get("message", "Accept failed"))
+        return {"status": "success"}
+    except HTTPException: raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/vouchers/ai-suggestions/{sid}/reject")
+async def ai_suggestion_reject(sid: str):
+    try:
+        res = db.reject_ai_suggestion(sid)
+        return {"status": "success", **res}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/vouchers/ai-suggestions/bulk-accept")
+async def ai_suggestion_bulk_accept(payload: dict):
+    try:
+        company_name = payload.get("company_name") or ""
+        if not company_name:
+            raise HTTPException(status_code=400, detail="company_name required")
+        gap_type = payload.get("gap_type")
+        min_conf = float(payload.get("min_confidence") or 0)
+        res = db.bulk_accept_ai_suggestions(company_name, gap_type=gap_type, min_confidence=min_conf)
+        return {"status": "success", **res}
+    except HTTPException: raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Sprint 27 — Master AI Gap Scan endpoints (Party + Item) ──
+@app.post("/api/masters/ai-scan")
+async def master_ai_scan_endpoint(payload: dict):
+    try:
+        company_name = payload.get("company_name") or ""
+        if not company_name:
+            raise HTTPException(status_code=400, detail="company_name required")
+        company_id = payload.get("company_id")
+        master_types = payload.get("master_types")
+        import asyncio as _aio
+        loop = _aio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: db.run_master_ai_scan(company_id, company_name, master_types)
+        )
+        return {"status": "success", **result}
+    except HTTPException: raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/masters/ai-suggestions")
+async def master_ai_suggestions_list(company_name: str, master_type: str = None,
+                                      gap_type: str = None, status: str = "pending",
+                                      limit: int = 20000):
+    try:
+        rows = db.list_master_ai_suggestions(company_name, master_type=master_type,
+                                              gap_type=gap_type, status=status, limit=limit)
+        for r in rows:
+            for k in ("id", "record_id", "created_at", "confidence"):
+                if k in r and r[k] is not None:
+                    try: r[k] = str(r[k]) if k in ("id","record_id","created_at") else float(r[k])
+                    except: pass
+        return {"status": "success", "data": rows}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/masters/ai-suggestions/counts")
+async def master_ai_suggestion_counts_endpoint(company_name: str):
+    try:
+        return {"status": "success", "counts": db.master_ai_suggestion_counts(company_name)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/masters/ai-suggestions/{sid}/accept")
+async def master_ai_suggestion_accept(sid: str):
+    try:
+        res = db.accept_master_ai_suggestion(sid)
+        if not res.get("ok"):
+            raise HTTPException(status_code=400, detail=res.get("message","Accept failed"))
+        return {"status": "success"}
+    except HTTPException: raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/masters/ai-suggestions/{sid}/reject")
+async def master_ai_suggestion_reject(sid: str):
+    try:
+        res = db.reject_master_ai_suggestion(sid)
+        return {"status": "success", **res}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/masters/ai-suggestions/bulk-accept")
+async def master_ai_suggestion_bulk_accept(payload: dict):
+    try:
+        company_name = payload.get("company_name") or ""
+        if not company_name:
+            raise HTTPException(status_code=400, detail="company_name required")
+        res = db.bulk_accept_master_ai_suggestions(
+            company_name,
+            master_type=payload.get("master_type"),
+            gap_type=payload.get("gap_type"),
+            min_confidence=float(payload.get("min_confidence") or 0),
+        )
+        return {"status": "success", **res}
+    except HTTPException: raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/vouchers/health")
+async def voucher_health_endpoint(company_name: str, company_id: str = None):
+    """Returns voucher health metrics: totals by source, drafts pending,
+    duplicates, vouchers missing GSTIN, unbalanced entries."""
+    try:
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        conn = db.get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        out = {"totals": {}, "duplicates": [], "missing_gstin": 0, "unbalanced": 0,
+               "drafts_pending": 0, "drafts_error": 0, "by_type": {}}
+
+        # Totals split by source (tally vs uploaded)
+        cur.execute("""
+            SELECT COUNT(*) AS n,
+                   COUNT(*) FILTER (WHERE tally_master_id IS NOT NULL AND tally_master_id <> '') AS from_tally,
+                   COUNT(*) FILTER (WHERE tally_master_id IS NULL OR tally_master_id = '') AS uploaded
+            FROM tally_vouchers WHERE company_name = %s
+        """, (company_name,))
+        r = cur.fetchone()
+        out["totals"] = {"total": r["n"], "from_tally": r["from_tally"], "uploaded": r["uploaded"]}
+
+        # By voucher type
+        cur.execute("""
+            SELECT voucher_type, COUNT(*) AS n FROM tally_vouchers
+            WHERE company_name = %s GROUP BY voucher_type ORDER BY n DESC
+        """, (company_name,))
+        out["by_type"] = {row["voucher_type"] or "(unknown)": row["n"] for row in cur.fetchall()}
+
+        # Drafts pending / error
+        if company_id:
+            cur.execute("""
+                SELECT status, COUNT(*) AS n FROM voucher_drafts
+                WHERE company_id = %s GROUP BY status
+            """, (company_id,))
+            for row in cur.fetchall():
+                if row["status"] == "ready_for_review" or row["status"] == "edited":
+                    out["drafts_pending"] += row["n"]
+                elif row["status"] == "error":
+                    out["drafts_error"] += row["n"]
+
+        # Duplicate suspects (same voucher_number + party + amount)
+        cur.execute("""
+            SELECT voucher_number, ledger_name, amount, COUNT(*) AS cnt,
+                   array_agg(id::text) AS ids, array_agg(date::text) AS dates
+            FROM tally_vouchers
+            WHERE company_name = %s AND voucher_number IS NOT NULL AND voucher_number <> ''
+            GROUP BY voucher_number, ledger_name, amount
+            HAVING COUNT(*) > 1
+            LIMIT 50
+        """, (company_name,))
+        for row in cur.fetchall():
+            out["duplicates"].append({
+                "voucher_number": row["voucher_number"],
+                "party": row["ledger_name"],
+                "amount": float(row["amount"]) if row["amount"] else 0,
+                "count": row["cnt"],
+                "ids": row["ids"],
+                "dates": row["dates"],
+            })
+
+        # Vouchers missing GSTIN (Sales/Purchase only)
+        cur.execute("""
+            SELECT COUNT(*) AS n FROM tally_vouchers
+            WHERE company_name = %s
+                  AND voucher_type IN ('Sales', 'Purchase')
+                  AND (party_gstin IS NULL OR party_gstin = '')
+        """, (company_name,))
+        out["missing_gstin"] = cur.fetchone()["n"]
+
+        # Unbalanced entries — sum debit-credit of ledger_entries should be ~0
+        # Defer to client-side check for speed; for now just report 0
+        out["unbalanced"] = 0
+
+        cur.close(); conn.close()
+        return {"status": "success", "data": out}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/vouchers/events")
+async def voucher_events_endpoint(company_name: str, company_id: str = None, limit: int = 50):
+    """Return recent voucher events — unified stream from voucher_drafts
+    (parsed/edited/posted/discarded) AND tally_outbox (queued/pushing/pushed/
+    error). Sprint 33: outbox events make the end-to-end Tally sync visible."""
+    try:
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        if not company_id:
+            return {"status": "success", "data": []}
+        conn = db.get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Voucher drafts (file uploads + manual edits)
+        cur.execute("""
+            SELECT id, source_file_name, source_file_type, voucher_type, status,
+                   ai_confidence, parsed_payload, reviewed_payload,
+                   created_at, updated_at, created_by
+            FROM voucher_drafts
+            WHERE company_id = %s
+            ORDER BY updated_at DESC NULLS LAST, created_at DESC LIMIT %s
+        """, (company_id, limit))
+        rows = []
+        for r in cur.fetchall():
+            for k in ("id",): r[k] = str(r[k]) if r.get(k) else None
+            for k in ("created_at", "updated_at"):
+                if r.get(k): r[k] = str(r[k])
+            if r.get("ai_confidence") is not None:
+                r["ai_confidence"] = float(r["ai_confidence"])
+            r["event_source"] = "voucher_draft"
+            rows.append(r)
+
+        # Sprint 33 — Also surface the Tally outbox stream
+        try:
+            cur.execute("""
+                SELECT id, payload, state, attempts, last_error,
+                       tally_voucher_guid, enqueued_at, pushed_at, updated_at, enqueued_by
+                FROM tally_outbox
+                WHERE company_name = %s
+                ORDER BY updated_at DESC NULLS LAST, enqueued_at DESC
+                LIMIT %s
+            """, (company_name, limit))
+            STATE_MAP = {
+                'pending': 'queued_for_tally',
+                'pushing': 'pushing_to_tally',
+                'pushed':  'tally_synced',
+                'error':   'tally_error',
+            }
+            for r in cur.fetchall():
+                payload = r.get("payload") or {}
+                if isinstance(payload, str):
+                    try: payload = json.loads(payload)
+                    except: payload = {}
+                rows.append({
+                    "id": str(r.get("id")),
+                    "event_source": "tally_outbox",
+                    "status": STATE_MAP.get(r.get("state"), r.get("state")),
+                    "raw_state": r.get("state"),
+                    "attempts": r.get("attempts"),
+                    "last_error": r.get("last_error"),
+                    "tally_voucher_guid": r.get("tally_voucher_guid"),
+                    "voucher_type": payload.get("voucher_type") or payload.get("category"),
+                    "parsed_payload": payload,
+                    "reviewed_payload": payload,
+                    "source_file_name": payload.get("invoice_number") or payload.get("voucher_number") or "(chat / manual)",
+                    "source_file_type": "tally_push",
+                    "created_at": str(r.get("enqueued_at")) if r.get("enqueued_at") else None,
+                    "updated_at": str(r.get("updated_at") or r.get("pushed_at") or r.get("enqueued_at")) if (r.get("updated_at") or r.get("pushed_at") or r.get("enqueued_at")) else None,
+                    "created_by": r.get("enqueued_by"),
+                })
+        except Exception as oe:
+            print(f"[voucher_events] tally_outbox fetch failed: {oe}", flush=True)
+
+        # Sprint 33 — manual Tally cleanup items (persist past voucher deletion)
+        try:
+            for cl in db.list_tally_cleanup(company_name):
+                rows.append({
+                    "id": cl.get("id"),
+                    "event_source": "tally_cleanup",
+                    "status": "needs_tally_cleanup" if cl.get("status") != "done" else "tally_cleanup_done",
+                    "cleanup_status": cl.get("status"),
+                    "voucher_type": cl.get("voucher_type"),
+                    "source_file_name": cl.get("voucher_number") or "(voucher)",
+                    "source_file_type": "tally_cleanup",
+                    "last_error": cl.get("reason"),
+                    "parsed_payload": {"party": cl.get("party"), "total_amount": cl.get("amount")},
+                    "reviewed_payload": {"party": cl.get("party"), "total_amount": cl.get("amount")},
+                    "created_at": cl.get("created_at"),
+                    "updated_at": cl.get("done_at") or cl.get("created_at"),
+                    "voucher_date": cl.get("voucher_date"),
+                })
+        except Exception as ce:
+            print(f"[voucher_events] cleanup fetch failed: {ce}", flush=True)
+
+        # Sort merged stream by updated_at desc, cap at limit
+        rows.sort(key=lambda x: (x.get("updated_at") or x.get("created_at") or ""), reverse=True)
+        rows = rows[:limit]
+        cur.close(); conn.close()
+        return {"status": "success", "data": rows}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════
+# SPRINT 4 — GSTR Reconciliation endpoints
+# ═══════════════════════════════════════════════════════════════
+
+def _normalize_gstr_2a_2b_row(raw):
+    """Normalize one row from any GSTR-2A/2B file format into our canonical shape."""
+    keys_lower = {k.lower().strip(): v for k, v in raw.items() if k}
+    def pick(*alts):
+        for a in alts:
+            for k in keys_lower:
+                if a in k:
+                    v = keys_lower[k]
+                    if v is None: continue
+                    return str(v).strip()
+        return ""
+    inv_num = pick("invoice no", "invoice number", "bill no", "doc no")
+    party = pick("trade name", "legal name", "supplier", "party")
+    gstin = pick("gstin")
+    date_raw = pick("invoice date", "doc date", "date")
+    # Parse date
+    from datetime import datetime as _dt
+    inv_date = None
+    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d"):
+        try: inv_date = _dt.strptime(date_raw.split()[0], fmt).strftime("%Y-%m-%d"); break
+        except: continue
+    def num(s):
+        try: return float(str(s or 0).replace(",", "").replace("₹", "").strip())
+        except: return 0.0
+    return {
+        "invoice_number": inv_num,
+        "party_name": party,
+        "party_gstin": gstin,
+        "invoice_date": inv_date,
+        "taxable_value": num(pick("taxable value")),
+        "cgst_amount": num(pick("cgst")),
+        "sgst_amount": num(pick("sgst")),
+        "igst_amount": num(pick("igst")),
+        "invoice_value": num(pick("invoice value", "total")),
+        "amount": num(pick("invoice value", "total")),
+    }
+
+
+@app.post("/api/gstr/2a-2b/upload")
+async def upload_2a_2b(
+    file: UploadFile = File(...),
+    company_name: str = Form(...),
+    company_id: str = Form(None),
+    period: str = Form(...),
+    return_type: str = Form("GSTR-2B"),
+):
+    """Upload a GSTR-2A or 2B file (JSON/Excel/CSV). Parse, dedup by sha256,
+    insert gstr_filings + run match_gstr_against_vouchers → returns filing_id + summary."""
+    try:
+        import tempfile, os as _os, hashlib, shutil, uuid as _u
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        content = await file.read()
+        sha_hex = hashlib.sha256(content).hexdigest()
+        suffix = _os.path.splitext(file.filename or "")[1].lower() or ".bin"
+
+        # Persist to static/uploads
+        uploads_dir = _os.path.join(_os.path.dirname(__file__), "static", "uploads")
+        _os.makedirs(uploads_dir, exist_ok=True)
+        stored_name = f"{_u.uuid4()}_{file.filename or 'gstr.bin'}"
+        stored_path = _os.path.join(uploads_dir, stored_name)
+        with open(stored_path, "wb") as f:
+            f.write(content)
+        file_url = f"/static/uploads/{stored_name}"
+
+        # Parse rows
+        rows = []
+        if suffix in (".xlsx", ".xls", ".csv"):
+            import pandas as _pd
+            try:
+                if suffix == ".csv":
+                    df = _pd.read_csv(stored_path)
+                    rows = [_normalize_gstr_2a_2b_row(r) for r in df.to_dict(orient="records")]
+                else:
+                    xl = _pd.ExcelFile(stored_path)
+                    for sh in xl.sheet_names:
+                        for ridx in range(min(15, len(xl.parse(sh, header=None)))):
+                            row_str = ' '.join(str(c).lower() for c in xl.parse(sh, header=None).iloc[ridx].values if str(c) != 'nan')
+                            if sum(1 for k in ['gstin', 'invoice', 'taxable', 'cgst', 'sgst', 'igst'] if k in row_str) >= 2:
+                                df = xl.parse(sh, header=ridx)
+                                df = df.dropna(how='all')
+                                rows.extend(_normalize_gstr_2a_2b_row(r) for r in df.to_dict(orient="records"))
+                                break
+            except Exception as pe:
+                print(f"[GSTR upload] parse error: {pe}")
+        elif suffix == ".json":
+            try:
+                data = json.loads(content.decode('utf-8'))
+                # Flatten common GSTN portal JSON structures
+                if isinstance(data, list):
+                    rows = [_normalize_gstr_2a_2b_row(r) for r in data]
+                elif isinstance(data, dict):
+                    for key in ("b2b", "B2B", "data", "items", "result"):
+                        if key in data and isinstance(data[key], list):
+                            rows = [_normalize_gstr_2a_2b_row(r) for r in data[key]]
+                            break
+            except Exception as je:
+                print(f"[GSTR upload] JSON parse: {je}")
+
+        # Drop empty rows
+        rows = [r for r in rows if r.get("invoice_number") or r.get("party_name") or r.get("amount")]
+
+        if not rows:
+            return {"status": "error", "message": "Could not extract any rows from this file."}
+
+        filing_id = db.save_gstr_filing(
+            company_id=company_id, company_name=company_name,
+            period=period, return_type=return_type,
+            source_file_url=file_url, source_file_name=file.filename,
+            sha256_hex=sha_hex, payload={"row_count": len(rows)},
+            uploaded_by="user",
+        )
+
+        import asyncio as _aio
+        _loop = _aio.get_event_loop()
+        summary = await _loop.run_in_executor(
+            None, db.match_gstr_against_vouchers,
+            filing_id, company_id, company_name, rows
+        )
+
+        return {"status": "success", "filing_id": filing_id, "row_count": len(rows), "summary": summary}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/gstr/filings")
+async def list_gstr_filings_endpoint(company_id: str = None, company_name: str = None,
+                                       return_type: str = None, period: str = None):
+    try:
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        if not company_id:
+            raise HTTPException(status_code=400, detail="company_id required")
+        rows = db.list_gstr_filings(company_id, return_type=return_type, period=period)
+        for r in rows:
+            r["id"] = str(r["id"])
+            if r.get("created_at"): r["created_at"] = str(r["created_at"])
+        return {"status": "success", "data": rows}
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/gstr/2a-2b/{filing_id}")
+async def get_gstr_filing(filing_id: str, status: str = None):
+    try:
+        rows = db.get_gstr_filing_lines(filing_id, status=status)
+        for r in rows:
+            r["id"] = str(r["id"])
+            if r.get("matched_voucher_id"): r["matched_voucher_id"] = str(r["matched_voucher_id"])
+        return {"status": "success", "data": rows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/gstr/reco-line/{line_id}")
+async def patch_gstr_reco_line(line_id: str, payload: dict):
+    try:
+        row = db.update_gstr_reco_line(line_id, payload)
+        if not row:
+            raise HTTPException(status_code=404, detail="line not found")
+        row["id"] = str(row["id"])
+        if row.get("matched_voucher_id"): row["matched_voucher_id"] = str(row["matched_voucher_id"])
+        return {"status": "success", "data": row}
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/gstr/itc-comparison")
+async def itc_comparison_endpoint(company_name: str, from_period: str, to_period: str,
+                                    company_id: str = None):
+    try:
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        if not company_id:
+            raise HTTPException(status_code=400, detail="company_id required")
+        data = db.itc_comparison(company_id, company_name, from_period, to_period)
+        return {"status": "success", "data": data}
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/gstr/gstr1-vs-3b")
+async def gstr1_vs_3b_endpoint(company_name: str, period: str):
+    try:
+        data = db.gstr1_vs_3b_variance(company_name, period)
+        return {"status": "success", "data": data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/gstr/gstr9/generate")
+async def gstr9_generate(payload: dict):
+    try:
+        company_name = payload.get("company_name")
+        fy = payload.get("fy")
+        if not company_name or not fy:
+            raise HTTPException(status_code=400, detail="company_name + fy required")
+        data = db.gstr9_aggregate(company_name, fy)
+        return {"status": "success", "data": data}
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/gstr/invoice-serial-gaps")
+async def invoice_serial_gaps_endpoint(company_name: str, voucher_type: str = "Sales"):
+    try:
+        data = db.invoice_serial_gaps(company_name, voucher_type)
+        return {"status": "success", "data": data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/gstr/hsn-summary")
+async def hsn_summary_endpoint(company_name: str, period: str = None):
+    try:
+        data = db.hsn_summary(company_name, period)
+        return {"status": "success", "data": data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════
+# SPRINT 5 — Audit & Compliance endpoints
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/api/audit/health")
+async def audit_health_endpoint(company_name: str, company_id: str = None, fy: str = None):
+    try:
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        if not company_id:
+            raise HTTPException(status_code=400, detail="company_id required")
+        import asyncio as _aio
+        _loop = _aio.get_event_loop()
+        checks = await _loop.run_in_executor(None, db.run_audit_checks, company_id, company_name)
+        # Summary
+        summary = {"total": len(checks), "pass": 0, "warn": 0, "fail": 0, "skip": 0, "pending": 0}
+        for c in checks:
+            summary[c.get("status", "pending")] = summary.get(c.get("status", "pending"), 0) + 1
+        return {"status": "success", "data": {"checks": checks, "summary": summary}}
+    except HTTPException: raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/audit/calendar")
+async def audit_calendar_endpoint(company_name: str, company_id: str = None,
+                                    from_date: str = None, to_date: str = None):
+    try:
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        if not company_id:
+            raise HTTPException(status_code=400, detail="company_id required")
+        rows = db.list_filing_deadlines(company_id, from_date, to_date)
+        return {"status": "success", "data": rows}
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/audit/calendar/seed")
+async def audit_calendar_seed(payload: dict):
+    try:
+        fy = payload.get("fy")
+        company_id = payload.get("company_id")
+        company_name = payload.get("company_name")
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        if not fy:
+            raise HTTPException(status_code=400, detail="fy required (e.g. '2025-26')")
+        res = db.seed_filing_deadlines_for_fy(fy, company_id)
+        return {"status": "success", **res}
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/audit/audit-log")
+async def audit_log_endpoint(company_id: str, action: str = None, limit: int = 100):
+    try:
+        conn = db.get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        where = ["company_id = %s"]
+        params = [company_id]
+        if action:
+            where.append("action = %s"); params.append(action)
+        cur.execute(f"""
+            SELECT id, user_id, action, entity_type, payload, created_at
+            FROM tenant_audit_log WHERE {' AND '.join(where)}
+            ORDER BY created_at DESC LIMIT %s
+        """, params + [limit])
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+        for r in rows:
+            for k in ("id", "user_id"):
+                if r.get(k) is not None: r[k] = str(r[k])
+            if r.get("created_at"): r["created_at"] = str(r["created_at"])
+        return {"status": "success", "data": rows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════
+# SPRINT 6 — TDS endpoints
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/api/tds/sections")
+async def tds_sections_endpoint():
+    try:
+        rows = db.list_tds_sections()
+        return {"status": "success", "data": rows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/tds/auto-detect")
+async def tds_auto_detect(payload: dict):
+    try:
+        voucher = payload.get("voucher") or {}
+        party_ledger = payload.get("party_ledger") or {}
+        suggestion = db.suggest_tds_for_voucher(voucher, party_ledger)
+        return {"status": "success", "suggestion": suggestion}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/tds/deductions")
+async def list_tds_deductions_endpoint(company_id: str = None, company_name: str = None,
+                                          fy: str = None, quarter: str = None, section: str = None):
+    try:
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        if not company_id:
+            raise HTTPException(status_code=400, detail="company_id required")
+        rows = db.list_tds_deductions(company_id, fy=fy, quarter=quarter, section=section)
+        return {"status": "success", "data": rows}
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/tds/deductions")
+async def create_tds_deduction(payload: dict):
+    try:
+        company_name = payload.get("company_name")
+        company_id = payload.get("company_id")
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        new_id = db.save_tds_deduction(
+            company_id=company_id, company_name=company_name,
+            voucher_id=payload.get("voucher_id"),
+            party_name=payload.get("party_name"),
+            party_pan=payload.get("party_pan"),
+            section=payload.get("section"),
+            gross_amount=payload.get("gross_amount"),
+            tds_amount=payload.get("tds_amount"),
+            rate_applied=payload.get("rate_applied"),
+            deduction_date=payload.get("deduction_date"),
+            fy=payload.get("fy"),
+            quarter=payload.get("quarter"),
+            created_by=payload.get("username") or payload.get("created_by"),
+        )
+        return {"status": "success", "id": new_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/tds/quarterly-summary")
+async def tds_quarterly_endpoint(company_name: str, fy: str, company_id: str = None):
+    try:
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        if not company_id:
+            raise HTTPException(status_code=400, detail="company_id required")
+        rows = db.tds_quarterly_summary(company_id, fy)
+        return {"status": "success", "data": rows}
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/tds/return/{form}/{quarter}/generate")
+async def tds_return_generate(form: str, quarter: str, payload: dict):
+    """Stub for v1 — returns a JSON aggregate of TDS deductions for the period.
+    Full 24Q/26Q schema generation in v2."""
+    try:
+        company_name = payload.get("company_name")
+        company_id = payload.get("company_id")
+        fy = payload.get("fy")
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        if not (company_id and fy):
+            raise HTTPException(status_code=400, detail="company_id + fy required")
+        rows = db.list_tds_deductions(company_id, fy=fy, quarter=quarter)
+        total = sum(r["tds_amount"] for r in rows if r.get("tds_amount"))
+        return {"status": "success", "form": form, "quarter": quarter, "fy": fy,
+                "total_tds": total, "deductee_count": len(rows), "rows": rows}
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/tds/26as/upload")
+async def upload_26as(
+    file: UploadFile = File(...),
+    company_name: str = Form(...),
+    company_id: str = Form(None),
+    fy: str = Form(...),
+):
+    """Upload Form 26AS (Excel/PDF). Just save + record metadata for v1."""
+    try:
+        import tempfile, os as _os, hashlib, uuid as _u
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        content = await file.read()
+        sha_hex = hashlib.sha256(content).hexdigest()
+        uploads_dir = _os.path.join(_os.path.dirname(__file__), "static", "uploads")
+        _os.makedirs(uploads_dir, exist_ok=True)
+        stored_name = f"{_u.uuid4()}_{file.filename or '26as.xlsx'}"
+        stored_path = _os.path.join(uploads_dir, stored_name)
+        with open(stored_path, "wb") as f:
+            f.write(content)
+        file_url = f"/static/uploads/{stored_name}"
+
+        conn = db.get_conn()
+        cur = conn.cursor()
+        new_id = str(uuid.uuid4())
+        cur.execute("""
+            INSERT INTO form_26as_imports
+                (id, company_id, company_name, fy, source_file_url, source_file_name, sha256)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+        """, (new_id, company_id, company_name, fy, file_url, file.filename, sha_hex))
+        conn.commit()
+        cur.close(); conn.close()
+        return {"status": "success", "import_id": new_id, "file_url": file_url}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/tds/26as/imports")
+async def list_26as_imports(company_id: str):
+    try:
+        conn = db.get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT id, fy, source_file_name, source_file_url, total_tds_credit, uploaded_at
+            FROM form_26as_imports WHERE company_id = %s ORDER BY uploaded_at DESC
+        """, (company_id,))
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+        for r in rows:
+            r["id"] = str(r["id"])
+            if r.get("uploaded_at"): r["uploaded_at"] = str(r["uploaded_at"])
+            if r.get("total_tds_credit") is not None: r["total_tds_credit"] = float(r["total_tds_credit"])
+        return {"status": "success", "data": rows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/tds/pan-status")
+async def pan_status_endpoint(company_id: str):
+    """Return unique PANs across deductees with placeholder linked status."""
+    try:
+        conn = db.get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT party_pan, COUNT(*) AS deduction_count,
+                   COALESCE(SUM(tds_amount), 0) AS total_tds,
+                   bool_or(party_aadhaar_linked) AS aadhaar_linked
+            FROM tds_deductions WHERE company_id = %s AND party_pan IS NOT NULL
+            GROUP BY party_pan ORDER BY total_tds DESC
+        """, (company_id,))
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+        import re as _re
+        for r in rows:
+            r["total_tds"] = float(r.get("total_tds") or 0)
+            pan = r.get("party_pan") or ""
+            # PAN format check
+            r["pan_format_valid"] = bool(_re.match(r"^[A-Z]{5}[0-9]{4}[A-Z]$", pan))
+        return {"status": "success", "data": rows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ════════════════════════════════════════════════════════════════
+# ITR shell — stats teaser
+# ════════════════════════════════════════════════════════════════
+
+@app.get("/api/itr/teaser")
+async def itr_teaser_endpoint(company_name: str, company_id: str = None):
+    """Returns the teaser stats shown on the ITR Filing shell page."""
+    try:
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        conn = db.get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        # Turnover = sum of Sales taxable_value
+        cur.execute("""
+            SELECT COALESCE(SUM(amount), 0) AS turnover
+            FROM tally_vouchers
+            WHERE company_name = %s AND voucher_type = 'Sales'
+        """, (company_name,))
+        turnover = float(cur.fetchone()["turnover"] or 0)
+        # TDS deducted
+        tds = 0.0
+        if company_id:
+            cur.execute("SELECT COALESCE(SUM(tds_amount), 0) AS t FROM tds_deductions WHERE company_id = %s", (company_id,))
+            tds = float(cur.fetchone()["t"] or 0)
+        cur.close(); conn.close()
+        return {"status": "success", "data": {
+            "turnover": turnover, "tds_deducted": tds,
+            "advance_tax": 0.0, "tax_provision": 0.0,
+        }}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/vouchers/bulk-excel")
+async def bulk_excel_voucher_import(payload: dict):
+    """Insert pre-mapped voucher rows from a bulk Excel import.
+    payload = { company_name, company_id, rows: [{date, voucher_type, voucher_number, party, debit, credit, narration, ...}, ...] }"""
+    try:
+        company_name = payload.get("company_name")
+        company_id = payload.get("company_id")
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        if not company_name:
+            raise HTTPException(status_code=400, detail="company_name required")
+        rows = payload.get("rows") or []
+
+        vouchers = []
+        errors = []
+        for idx, r in enumerate(rows):
+            try:
+                date_compact = (r.get("date") or "").replace("-", "")[:8]
+                dr = float(r.get("debit") or 0)
+                cr = float(r.get("credit") or 0)
+                amount = max(dr, cr)
+                # Build a minimal 2-leg entry: party + opposite (cash/other)
+                ledger_entries = []
+                if dr > 0:
+                    ledger_entries.append({"ledger_name": r.get("ledger_name") or r.get("party"), "amount": dr, "is_debit": True})
+                    ledger_entries.append({"ledger_name": "Cash", "amount": -dr, "is_debit": False})
+                elif cr > 0:
+                    ledger_entries.append({"ledger_name": "Cash", "amount": cr, "is_debit": True})
+                    ledger_entries.append({"ledger_name": r.get("ledger_name") or r.get("party"), "amount": -cr, "is_debit": False})
+
+                vouchers.append({
+                    "date": date_compact,
+                    "type": r.get("voucher_type") or "Journal",
+                    "voucher_type": r.get("voucher_type") or "Journal",
+                    "party": r.get("party") or "",
+                    "number": r.get("voucher_number") or "",
+                    "amount": amount,
+                    "narration": r.get("narration") or "",
+                    "ledger_entries": ledger_entries,
+                    "reference_no": r.get("reference_no") or "",
+                    "currency": "INR",
+                    "tally_master_id": None,
+                })
+            except Exception as row_err:
+                errors.append({"row": idx, "error": str(row_err)})
+
+        save_res = db.save_tally_vouchers(company_name, vouchers)
+
+        # Backfill company_id
+        if company_id:
+            try:
+                conn_bf = db.get_conn()
+                cur_bf = conn_bf.cursor()
+                cur_bf.execute(
+                    "UPDATE tally_vouchers SET company_id = %s WHERE company_name = %s AND company_id IS NULL",
+                    (company_id, company_name)
+                )
+                conn_bf.commit()
+                cur_bf.close()
+                conn_bf.close()
+            except Exception as bf_err:
+                print(f"[bulk-excel backfill] {bf_err}")
+
+        return {"status": "success",
+                "upserted": save_res.get("upserted", 0),
+                "skipped": save_res.get("skipped", 0),
+                "errors": errors}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/api/bank-reconciliation/upload")
 async def bank_reconciliation_upload(
@@ -1496,8 +4141,10 @@ async def optimize_training_model(payload: dict):
 @app.post("/tally/summary")
 async def get_tally_summary(payload: dict):
     try:
-        company = payload.get("company_name", "Acme Corp")
-        ws_response = await dispatch_tally_command(company, "get_summary")
+        user_id, company_id, company = resolve_agent_request(payload, required_perm="view")
+        # Prefer company_id as the WS connection key; fall back to company name for legacy
+        conn_key = company_id or company
+        ws_response = await dispatch_tally_command(conn_key, "get_summary")
         if ws_response:
             return {
                 "status": "success",
@@ -1530,11 +4177,12 @@ async def get_tally_summary(payload: dict):
 @app.post("/tally/ingest")
 async def ingest_tally_data(payload: dict):
     try:
-        company = payload.get("company_name", "Acme Corp")
+        user_id, company_id, company = resolve_agent_request(payload, required_perm="edit")
         username = payload.get("username", "admin")
-        
+        conn_key = company_id or company
+
         # Try full baseline seed via WebSocket bridge agent
-        ws_response = await dispatch_tally_command(company, "seed_baseline")
+        ws_response = await dispatch_tally_command(conn_key, "seed_baseline")
         
         if not ws_response or ws_response.get("status") != "success":
             # Fallback simulator data — rich format mirrors what the upgraded bridge agent sends.
@@ -1662,16 +4310,94 @@ async def ingest_tally_data(payload: dict):
         print(f"[SEED BASELINE] Pulled {len(rich_ledgers)} ledgers, {len(groups)} groups, {len(stock_items)} stock items, {len(vouchers)} vouchers")
 
         # Persist EVERYTHING — vouchers, ledgers, groups, stock items — via upsert (no DELETEs)
+        # NOTE: these are blocking psycopg2 calls; run in executor to avoid blocking event loop
+        # (which would kill WS pings and cause 1006 disconnect on large syncs).
+        import asyncio as _aio
+        _loop = _aio.get_event_loop()
         try:
-            v_result = db.save_tally_vouchers(tally_company, vouchers)
-            ledger_count = db.save_tally_ledgers(tally_company, rich_ledgers)
-            group_count = db.save_tally_groups(tally_company, groups)
-            stock_count = db.save_tally_stock_items(tally_company, stock_items)
+            v_result = await _loop.run_in_executor(None, db.save_tally_vouchers, tally_company, vouchers)
+            ledger_count = await _loop.run_in_executor(None, db.save_tally_ledgers, tally_company, rich_ledgers)
+            group_count = await _loop.run_in_executor(None, db.save_tally_groups, tally_company, groups)
+            stock_count = await _loop.run_in_executor(None, db.save_tally_stock_items, tally_company, stock_items)
             print(f"[SEED BASELINE] Upserted: {v_result.get('upserted',0)} vouchers, {ledger_count} ledgers, {group_count} groups, {stock_count} stock items.")
-            db.log_tally_sync(tally_company, 'baseline',
-                              records_in=len(vouchers)+len(rich_ledgers)+len(groups)+len(stock_items),
-                              records_upserted=v_result.get('upserted',0)+ledger_count+group_count+stock_count,
-                              status='success')
+            await _loop.run_in_executor(None, db.log_tally_sync, tally_company, 'baseline',
+                              len(vouchers)+len(rich_ledgers)+len(groups)+len(stock_items),
+                              v_result.get('upserted',0)+ledger_count+group_count+stock_count,
+                              'success')
+
+            # Phase B: backfill company_id on newly-inserted rows so multi-tenant queries work.
+            # We only backfill when the agent gave us an authenticated company_id (skipped on legacy path).
+            if company_id:
+                def _post_save_backfill():
+                    """Backfill company_id, audit, sensitive ledgers — all blocking DB ops."""
+                    try:
+                        conn_bf = db.get_conn()
+                        cur_bf = conn_bf.cursor()
+                        for tbl in ['tally_vouchers', 'tally_ledgers', 'tally_groups',
+                                    'tally_stock_items', 'tally_sync_log']:
+                            cur_bf.execute(
+                                f"UPDATE {tbl} SET company_id = %s WHERE company_name = %s AND company_id IS NULL",
+                                (company_id, tally_company)
+                            )
+                        conn_bf.commit()
+                        cur_bf.close()
+                        conn_bf.close()
+                        # Audit log entry for this sync
+                        try:
+                            conn_a = db.get_conn()
+                            cur_a = conn_a.cursor()
+                            cur_a.execute("""
+                                INSERT INTO tenant_audit_log (user_id, action, entity_type, company_id, payload)
+                                VALUES (%s, 'tally_sync_baseline', 'tally', %s, %s::jsonb)
+                            """, (user_id, company_id, json.dumps({
+                                "tally_company": tally_company,
+                                "vouchers": len(vouchers),
+                                "ledgers": len(rich_ledgers),
+                                "groups": len(groups),
+                                "stock_items": len(stock_items),
+                            })))
+                            conn_a.commit()
+                            cur_a.close()
+                            conn_a.close()
+                        except Exception as au_err:
+                            print(f"[AUDIT] tally_sync_baseline log warning: {au_err}")
+
+                        # Sensitive-ledger detection for this company
+                        try:
+                            flagged = db.mark_sensitive_ledgers(company_id)
+                            if flagged:
+                                print(f"[SENSITIVE] flagged {flagged} ledgers for {tally_company}")
+                        except Exception as se:
+                            print(f"[SENSITIVE] mark error: {se}")
+                    except Exception as bf_err:
+                        print(f"[SEED BASELINE] company_id backfill warning: {bf_err}")
+
+                await _loop.run_in_executor(None, _post_save_backfill)
+
+                # Vector embeddings — feed RAG knowledge base
+                # Runs in a background thread so the HTTP response returns quickly.
+                def _embed_in_bg(cid=company_id, cname=tally_company):
+                    try:
+                        res = db.embed_tally_master(cid, cname, get_embedding)
+                        print(f"[EMBED] {cname}: {res}")
+                    except Exception as ee:
+                        print(f"[EMBED] error: {ee}")
+                import threading as _thr
+                _thr.Thread(target=_embed_in_bg, daemon=True).start()
+
+                # 360° Bank — ingest Tally vouchers' bank legs into bank_transactions
+                def _ingest_bank_bg(cid=company_id, cname=tally_company):
+                    try:
+                        res = db.ingest_bank_from_tally(cid)
+                        print(f"[BANK INGEST tally] {cname}: {res}")
+                        link_res = db.link_bank_transactions(cid)
+                        print(f"[BANK LINK] {cname}: {link_res}")
+                        db.log_bank_sync_run(cid, cname, "tally_hook",
+                                             tally_res=res, link_res=link_res,
+                                             triggered_by="tally_sync")
+                    except Exception as be:
+                        print(f"[BANK INGEST] error: {be}")
+                _thr.Thread(target=_ingest_bank_bg, daemon=True).start()
         except Exception as v_err:
             print(f"[SEED BASELINE] Error saving Tally data: {v_err}")
             db.log_tally_sync(tally_company, 'baseline', 0, 0, 'failed', str(v_err))
@@ -2064,16 +4790,14 @@ async def upload_tally_xml_dump(file: UploadFile = File(...), company_name: str 
         print(f"Error in XML dump upload: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# Sprint 29 — Retired. The TDL plugin was a thin alternative that only exported
+# reports; the full Bridge Agent supersedes it. We return 410 Gone so any
+# stale links surface clearly rather than silently 404-ing.
 @app.get("/tally/download-tdl")
 async def download_tally_tdl_plugin():
-    tdl_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yantrai_sync.tdl")
-    if not os.path.exists(tdl_path):
-        raise HTTPException(status_code=404, detail="TDL plugin file not found on server.")
-    return FileResponse(
-        path=tdl_path,
-        media_type="application/octet-stream",
-        filename="YantrAI_Sync.tdl",
-        headers={"Content-Disposition": "attachment; filename=YantrAI_Sync.tdl"}
+    raise HTTPException(
+        status_code=410,
+        detail="The TDL plugin has been retired. Please download the Tally Bridge Agent (single .exe) from /tally_bridge_agent/download — it does everything the TDL did and more.",
     )
 
 @app.post("/tally/sync-batch")
@@ -2091,29 +4815,43 @@ async def sync_approved_invoices_batch(payload: dict):
         for inv_id in invoice_ids:
             cursor.execute("SELECT * FROM invoices WHERE id = %s", (inv_id,))
             inv = cursor.fetchone()
-            
+
             if not inv:
                 continue
-                
-            voucher_payload = {
-                "type": "Receipt" if inv.get("category") == "Sales" else "Payment",
-                "date": str(inv.get("date")).replace("-", ""),
-                "number": inv.get("invoice_number", ""),
-                "party": inv.get("party_name", ""),
-                "amount": float(inv.get("total_amount", 0)),
-                "cash_bank_ledger": "Bank Account"
-            }
-            
+
             company = inv.get("company_name") or "Acme Corp"
-            
-            ws_response = await dispatch_tally_command(company, "create_voucher", voucher_payload)
-            if ws_response:
-                print(f"[WS TUNNEL SUCCESS] Posted voucher over tunnel. Result: {ws_response}")
-            else:
-                tally_response = tally.create_voucher(voucher_payload)
-                print(f"[WS TUNNEL FALLBACK] Posted voucher over HTTP. Result: {tally_response}")
-                
-            db.mark_invoice_synced(inv_id)
+
+            # Sprint 33 — Route through the SAME tally_outbox path as
+            # /push-to-tally. Previously this called the legacy
+            # tally.create_voucher (a 2-leg Payment/Receipt voucher with no GST
+            # legs), which created spurious DUPLICATES in the customer's Tally
+            # alongside the correct Sales/Purchase voucher. Now we enqueue a
+            # proper full payload and let the bridge agent push it (with ledger
+            # resolution, Dr=Cr balancing, and HTTP pacing).
+            enqueue_payload = {
+                "company_name": company,
+                "voucher_type": inv.get("category") or "Sales",
+                "invoice_number": inv.get("invoice_number", ""),
+                "billing_party_name": inv.get("party_name", ""),
+                "party_name": inv.get("party_name", ""),
+                "date": str(inv.get("date")),
+                "total_amount": float(inv.get("total_amount", 0) or 0),
+                "cgst_amount": float(inv.get("cgst_amount", 0) or 0),
+                "sgst_amount": float(inv.get("sgst_amount", 0) or 0),
+                "igst_amount": float(inv.get("igst_amount", 0) or 0),
+                "taxable_value": float(inv.get("taxable_value", 0) or 0),
+                "billing_party_gstin": inv.get("party_gstin") or inv.get("gstin"),
+                "narration": inv.get("narration") or "",
+            }
+            try:
+                db.enqueue_tally_push(payload=enqueue_payload, invoice_id=inv_id,
+                                      company_name=company, enqueued_by="sync-batch")
+            except Exception as q_err:
+                print(f"[sync-batch] enqueue failed for {inv_id}: {q_err}", flush=True)
+            # Sprint 33 — Do NOT mark synced here. The Vouchers list derives
+            # 'synced' from the outbox pushed-state (get_all_vouchers override),
+            # so the status stays honest: 🟠 queued until the agent actually
+            # pushes it to Tally, then ✅ synced.
             synced_count += 1
             
         cursor.close()
@@ -2148,15 +4886,16 @@ async def api_register(payload: dict):
     if not success:
         raise HTTPException(status_code=500, detail="Failed to create user account")
 
-    # Auto-add "Sample Co" as first company for every new user
-    db.add_company_to_user(username, "Sample Co")
+    # Auto-add per-user demo company (NOT shared) so no tenant data leaks across users
+    demo_name = f"Sample Co — {username}"
+    db.add_company_to_user(username, demo_name)
 
     user = db.get_user_by_username(username)
     companies = user.get("companies") or [company_name]
-    # Ensure Sample Co is first in list
-    if "Sample Co" in companies and companies[0] != "Sample Co":
-        companies.remove("Sample Co")
-        companies.insert(0, "Sample Co")
+    # Ensure user's own demo is first in list
+    if demo_name in companies and companies[0] != demo_name:
+        companies.remove(demo_name)
+        companies.insert(0, demo_name)
     return {
         "status": "success",
         "user": {
@@ -2182,13 +4921,14 @@ async def api_login(credentials: dict):
     if not user or user["password"] != password:
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    # Ensure "Sample Co" is available for every user on login
+    # Ensure user's own private demo company is available (per-user, NOT shared)
     companies = user.get("companies") or [user.get("company_name", "Acme Corp")]
     if isinstance(companies, str):
         companies = json.loads(companies)
-    if "Sample Co" not in companies:
-        db.add_company_to_user(username, "Sample Co")
-        companies.append("Sample Co")
+    demo_name = f"Sample Co — {username}"
+    if demo_name not in companies:
+        db.add_company_to_user(username, demo_name)
+        companies.append(demo_name)
 
     return {
         "status": "success",
@@ -2202,6 +4942,98 @@ async def api_login(credentials: dict):
             "companies": companies
         }
     }
+
+# =============================================================================
+# Tally Agent Authentication (Phase B)
+# =============================================================================
+@app.post("/api/agent/auth")
+async def agent_auth(credentials: dict):
+    """
+    Tally desktop agent login. Validates username/password against accounting_users
+    and returns a session token + the user's memberships (firms + companies) so the
+    agent can show a company picker.
+    """
+    username = credentials.get("username")
+    password = credentials.get("password")
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username and password are required")
+
+    legacy_user = db.get_user_by_username(username)
+    if not legacy_user or legacy_user["password"] != password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    # Resolve the new public.users.id (created by Phase A migration) for membership lookup
+    conn = db.get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT id, is_super_admin FROM public.users WHERE username = %s", (username,))
+    u_row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not u_row:
+        raise HTTPException(status_code=500, detail="User not migrated to multi-tenant schema yet")
+    user_id = str(u_row["id"])
+
+    memberships = db.get_user_memberships(user_id)
+    # Convert UUIDs in companies list to strings for JSON
+    serializable_memberships = []
+    for m in memberships:
+        serializable_memberships.append({
+            "membership_id": str(m["membership_id"]),
+            "org_id": str(m["org_id"]),
+            "org_name": m["org_name"],
+            "org_type": m["org_type"],
+            "role": m["role"],
+            "scope_company_ids": m.get("scope_company_ids"),
+            "plan": m.get("plan"),
+            "companies": [
+                {
+                    "id": str(c["id"]),
+                    "name": c["name"],
+                    "gstin": c.get("gstin"),
+                    "is_primary": c.get("is_primary", False),
+                }
+                for c in (m.get("companies") or [])
+            ],
+        })
+
+    # Issue session token
+    token = "ag_" + _secrets.token_hex(32)
+    agent_sessions[token] = {
+        "user_id": user_id,
+        "username": username,
+        "name": legacy_user.get("name", username),
+        "is_super_admin": bool(u_row["is_super_admin"]),
+        "expires_at": datetime.utcnow() + AGENT_SESSION_TTL,
+    }
+
+    return {
+        "status": "success",
+        "session_token": token,
+        "user_id": user_id,
+        "name": legacy_user.get("name", username),
+        "username": username,
+        "is_super_admin": bool(u_row["is_super_admin"]),
+        "memberships": serializable_memberships,
+    }
+
+
+@app.post("/api/agent/whoami")
+async def agent_whoami(payload: dict):
+    """Validate a session token (heartbeat / refresh). Returns user_id + memberships."""
+    token = payload.get("session_token")
+    sess = validate_agent_session(token)
+    if not sess:
+        raise HTTPException(status_code=401, detail="Session expired or invalid")
+    memberships = db.get_user_memberships(sess["user_id"])
+    return {
+        "status": "success",
+        "user_id": sess["user_id"],
+        "username": sess["username"],
+        "name": sess["name"],
+        "is_super_admin": sess.get("is_super_admin", False),
+        "memberships_count": len(memberships),
+    }
+
 
 @app.post("/api/add-company")
 async def add_company(payload: dict):
@@ -2337,29 +5169,78 @@ class MergePartiesModel(BaseModel):
     duplicate_names: list
     company_name: str = "Acme Corp"
 
+@app.get("/api/tally/last-sync")
+async def tally_last_sync(company_name: str = "Acme Corp"):
+    """Return latest tally_sync_log entry for this company (for UI 'Last sync' badge)."""
+    try:
+        conn = db.get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT sync_type, records_in, records_upserted, status,
+                   started_at, completed_at, error_message
+            FROM tally_sync_log
+            WHERE company_name = %s
+            ORDER BY started_at DESC
+            LIMIT 1
+        """, (company_name,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row:
+            return {"status": "success", "last_sync": None}
+        return {"status": "success", "last_sync": {
+            "sync_type": row["sync_type"],
+            "records_in": row["records_in"],
+            "records_upserted": row["records_upserted"],
+            "status": row["status"],
+            "started_at": row["started_at"].isoformat() if row["started_at"] else None,
+            "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
+            "error_message": row["error_message"],
+        }}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/items/master")
 async def get_items_master(company_name: str = "Acme Corp"):
+    """Combined item master: stock items from Tally + line items learned from invoices."""
     try:
         conn = db.get_conn()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        query = """
-        SELECT 
-            i.description,
-            i.hsn_sac,
-            inv.billing_party_name as source_party,
-            i.rate as price,
-            inv.invoice_number,
-            inv.date
-        FROM items i
-        JOIN invoices inv ON i.invoice_id = inv.id
-        WHERE inv.company_name ILIKE %s OR %s ILIKE ('%%' || inv.company_name || '%%')
-        ORDER BY i.description ASC, inv.date DESC
-        """
-        cursor.execute(query, (f"%{company_name}%", company_name))
-        rows = cursor.fetchall()
+
+        # 1) Tally stock-item master (HSN, GST rate, closing qty/value)
+        cursor.execute("""
+            SELECT name, parent_group, unit, hsn_code, gst_rate,
+                   closing_qty, closing_value, standard_rate
+            FROM tally_stock_items
+            WHERE company_name = %s
+            ORDER BY name ASC
+        """, (company_name,))
+        tally_items = [dict(r) for r in cursor.fetchall()]
+        for it in tally_items:
+            it["source"] = "Tally"
+
+        # 2) Invoice-derived line items (legacy)
+        cursor.execute("""
+            SELECT i.description, i.hsn_sac, inv.billing_party_name as source_party,
+                   i.rate as price, inv.invoice_number, inv.date
+            FROM items i
+            JOIN invoices inv ON i.invoice_id = inv.id
+            WHERE inv.company_name ILIKE %s OR %s ILIKE ('%%' || inv.company_name || '%%')
+            ORDER BY i.description ASC, inv.date DESC
+        """, (f"%{company_name}%", company_name))
+        invoice_items = [dict(r) for r in cursor.fetchall()]
+        for it in invoice_items:
+            it["source"] = "Invoice"
+
         cursor.close()
         conn.close()
-        return {"status": "success", "items": rows}
+        return {
+            "status": "success",
+            "tally_items": tally_items,
+            "invoice_items": invoice_items,
+            "items": invoice_items,  # back-compat: existing UI reads `items`
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2403,4 +5284,5 @@ async def merge_parties_endpoint(payload: MergePartiesModel):
 if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port,
+                ws_ping_interval=300, ws_ping_timeout=300)

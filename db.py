@@ -173,6 +173,9 @@ def init_db():
         "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS tally_master_id TEXT",
         "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS raw_xml TEXT",
         "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        # Sprint 7 — audit trail (who created this voucher / TDS deduction)
+        "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS created_by TEXT",
+        "ALTER TABLE tds_deductions ADD COLUMN IF NOT EXISTS created_by TEXT",
         "CREATE INDEX IF NOT EXISTS idx_tally_voucher_date ON tally_vouchers(company_name, date)",
         "CREATE INDEX IF NOT EXISTS idx_tally_voucher_type ON tally_vouchers(company_name, voucher_type)",
         "CREATE INDEX IF NOT EXISTS idx_tally_voucher_master_id ON tally_vouchers(company_name, tally_master_id) WHERE tally_master_id IS NOT NULL",
@@ -185,6 +188,357 @@ def init_db():
         except Exception as e:
             cursor.execute("ROLLBACK TO SAVEPOINT sp")
             print(f"Migration warning ({stmt[:60]}…): {e}")
+
+    # ── 360° Bank — statement upload metadata ──────────────────────
+    bank_ddl = [
+        """CREATE TABLE IF NOT EXISTS bank_statement_uploads (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            company_id UUID,
+            company_name TEXT,
+            file_url TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            bank_ledger TEXT,
+            period_from DATE,
+            period_to DATE,
+            line_count INTEGER,
+            total_credit NUMERIC(15,2),
+            total_debit NUMERIC(15,2),
+            sha256 TEXT,
+            uploaded_by TEXT,
+            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_bsup_company ON bank_statement_uploads(company_id, uploaded_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_bsup_sha ON bank_statement_uploads(company_id, sha256)",
+
+        # ── 360° Bank — canonical bank transactions ────────────────
+        """CREATE TABLE IF NOT EXISTS bank_transactions (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            company_id UUID,
+            company_name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            source_record_id UUID,
+            source_file_id UUID REFERENCES bank_statement_uploads(id) ON DELETE SET NULL,
+            source_row_idx INTEGER,
+            source_payload JSONB,
+            date DATE NOT NULL,
+            value_date DATE,
+            description TEXT,
+            reference TEXT,
+            amount NUMERIC(15,2) NOT NULL,
+            currency TEXT DEFAULT 'INR',
+            bank_ledger TEXT,
+            party TEXT,
+            head TEXT,
+            voucher_type TEXT,
+            instrument_type TEXT,
+            instrument_number TEXT,
+            payment_favouring TEXT,
+            status TEXT DEFAULT 'unmatched',
+            confidence NUMERIC(4,3) DEFAULT 0,
+            rationale TEXT,
+            match_reason TEXT,
+            linked_id UUID,
+            created_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_bank_tx_company_date ON bank_transactions(company_id, date DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_bank_tx_source ON bank_transactions(company_id, source)",
+        "CREATE INDEX IF NOT EXISTS idx_bank_tx_status ON bank_transactions(company_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_bank_tx_amount ON bank_transactions(company_id, amount)",
+        "CREATE INDEX IF NOT EXISTS idx_bank_tx_linked ON bank_transactions(linked_id) WHERE linked_id IS NOT NULL",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_bank_tx_tally_source ON bank_transactions(company_id, source, source_record_id, bank_ledger) WHERE source='tally' AND source_record_id IS NOT NULL",
+        # Sprint 11 — actor flags for "Reconciled By" column
+        "ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS ai_touched    BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE bank_transactions ADD COLUMN IF NOT EXISTS human_touched BOOLEAN DEFAULT FALSE",
+
+        # ── Sync run log ───────────────────────────────────────────
+        """CREATE TABLE IF NOT EXISTS bank_sync_runs (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            company_id UUID,
+            company_name TEXT,
+            run_type TEXT,           -- 'manual_sync' | 'tally_hook' | 'statement_upload' | 'relink'
+            tally_inserted INTEGER DEFAULT 0,
+            tally_skipped INTEGER DEFAULT 0,
+            invoices_inserted INTEGER DEFAULT 0,
+            statement_inserted INTEGER DEFAULT 0,
+            statement_skipped INTEGER DEFAULT 0,
+            linked_pairs INTEGER DEFAULT 0,
+            triggered_by TEXT,       -- user_id or 'system'
+            notes TEXT,
+            ran_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        # ALTER for already-deployed tables that lack statement_skipped
+        "ALTER TABLE bank_sync_runs ADD COLUMN IF NOT EXISTS statement_skipped INTEGER DEFAULT 0",
+        "CREATE INDEX IF NOT EXISTS idx_bank_sync_runs_company ON bank_sync_runs(company_id, ran_at DESC)",
+
+        # ── Voucher drafts (multi-file upload + review pipeline) ──
+        """CREATE TABLE IF NOT EXISTS voucher_drafts (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            company_id UUID,
+            company_name TEXT NOT NULL,
+            source_file_url TEXT,
+            source_file_name TEXT,
+            source_file_type TEXT,
+            parsed_payload JSONB NOT NULL,
+            reviewed_payload JSONB,
+            voucher_type TEXT,
+            status TEXT DEFAULT 'ready_for_review',
+            ai_confidence NUMERIC(4,3),
+            duplicate_of UUID,
+            posted_voucher_id UUID,
+            created_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_voucher_drafts_company_status ON voucher_drafts(company_id, status, created_at DESC)",
+
+        # ── SPRINT 26 — AI Gap Scan: suggestions table + tombstone column ──
+        """CREATE TABLE IF NOT EXISTS voucher_ai_suggestions (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            voucher_id      UUID NOT NULL REFERENCES tally_vouchers(id) ON DELETE CASCADE,
+            company_id      UUID,
+            company_name    TEXT,
+            gap_type        TEXT NOT NULL,
+            field           TEXT,
+            current_value   TEXT,
+            suggested_value TEXT,
+            confidence      NUMERIC(4,3) DEFAULT 0,
+            source          TEXT,
+            rationale       TEXT,
+            payload         JSONB,
+            status          TEXT DEFAULT 'pending',
+            scan_run_id     UUID,
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_vais_voucher ON voucher_ai_suggestions(voucher_id, gap_type)",
+        "CREATE INDEX IF NOT EXISTS idx_vais_company_status ON voucher_ai_suggestions(company_id, status, gap_type)",
+        # Tombstone column for soft-discard of duplicate vouchers (no hard DELETE).
+        "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS discarded_at TIMESTAMP",
+
+        # ── SPRINT 27 — Master AI Gap Scan: same propose-only pattern for Party + Item ──
+        """CREATE TABLE IF NOT EXISTS master_ai_suggestions (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            master_type     TEXT NOT NULL,           -- 'party' | 'item'
+            record_id       UUID NOT NULL,           -- tally_ledgers.id OR tally_stock_items.id
+            company_id      UUID,
+            company_name    TEXT,
+            gap_type        TEXT NOT NULL,
+            field           TEXT,
+            current_value   TEXT,
+            suggested_value TEXT,
+            confidence      NUMERIC(4,3) DEFAULT 0,
+            source          TEXT,
+            rationale       TEXT,
+            payload         JSONB,
+            status          TEXT DEFAULT 'pending',
+            scan_run_id     UUID,
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_mais_company_status ON master_ai_suggestions(company_name, master_type, status, gap_type)",
+        "CREATE INDEX IF NOT EXISTS idx_mais_record       ON master_ai_suggestions(record_id, gap_type)",
+
+        # ── SPRINT 28 — Tally outbox + bridge-agent heartbeat ──
+        """CREATE TABLE IF NOT EXISTS tally_outbox (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            invoice_id      UUID,
+            voucher_id      UUID,
+            company_id      UUID,
+            company_name    TEXT,
+            payload         JSONB NOT NULL,
+            state           TEXT DEFAULT 'pending',          -- pending | pushing | pushed | error | cancelled
+            attempts        INTEGER DEFAULT 0,
+            last_error      TEXT,
+            tally_voucher_guid TEXT,
+            enqueued_by     TEXT,
+            enqueued_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            pushed_at       TIMESTAMP,
+            updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_tally_outbox_pending ON tally_outbox(company_name, state, enqueued_at)",
+        "CREATE INDEX IF NOT EXISTS idx_tally_outbox_invoice ON tally_outbox(invoice_id)",
+        """CREATE TABLE IF NOT EXISTS tally_bridge_heartbeat (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            company_name    TEXT NOT NULL UNIQUE,
+            agent_version   TEXT,
+            ip              TEXT,
+            last_seen       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        # Sprint 33 — Persistent log of vouchers the user must manually delete
+        # inside Tally Prime (e.g. wrongly-synced rows removed from YantrAI).
+        # Survives voucher deletion so the audit trail + cleanup checklist stays.
+        """CREATE TABLE IF NOT EXISTS tally_cleanup_log (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            company_name    TEXT NOT NULL,
+            voucher_number  TEXT,
+            voucher_type    TEXT,
+            party           TEXT,
+            amount          NUMERIC,
+            voucher_date    DATE,
+            reason          TEXT,
+            status          TEXT DEFAULT 'pending',   -- pending | done
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            done_at         TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_tally_cleanup_company ON tally_cleanup_log(company_name, status, created_at)",
+
+        # ── SPRINT 4 — GSTR Reconciliation ──────────────────────────
+        """CREATE TABLE IF NOT EXISTS gstr_filings (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            company_id UUID,
+            company_name TEXT,
+            period TEXT,
+            return_type TEXT,
+            source_file_url TEXT,
+            source_file_name TEXT,
+            sha256 TEXT,
+            payload JSONB,
+            match_summary JSONB,
+            filed_at TIMESTAMP,
+            status TEXT DEFAULT 'draft',
+            uploaded_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_gstr_filings_company_period ON gstr_filings(company_id, period, return_type)",
+
+        """CREATE TABLE IF NOT EXISTS gstr_reco_lines (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            filing_id UUID REFERENCES gstr_filings(id) ON DELETE CASCADE,
+            company_id UUID,
+            portal_row JSONB,
+            matched_voucher_id UUID,
+            match_status TEXT,
+            match_diff JSONB,
+            itc_eligible BOOLEAN,
+            rationale TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_gstr_reco_lines_filing ON gstr_reco_lines(filing_id, match_status)",
+
+        # ── SPRINT 5 — Filing deadlines + audit wizard notes ────────
+        """CREATE TABLE IF NOT EXISTS filing_deadlines (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            company_id UUID,
+            filing_type TEXT NOT NULL,
+            period TEXT,
+            due_date DATE NOT NULL,
+            description TEXT,
+            fy TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_filing_deadlines_company_due ON filing_deadlines(company_id, due_date)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_filing_deadlines ON filing_deadlines(COALESCE(company_id::text, ''), filing_type, COALESCE(period, ''))",
+
+        """CREATE TABLE IF NOT EXISTS audit_wizard_notes (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            company_id UUID,
+            fy TEXT,
+            check_id TEXT NOT NULL,
+            user_status TEXT,
+            note TEXT,
+            updated_by TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_wizard ON audit_wizard_notes(COALESCE(company_id::text,''), fy, check_id)",
+
+        # ── SPRINT 6 — TDS Filing + 26AS ────────────────────────────
+        """CREATE TABLE IF NOT EXISTS tds_sections (
+            code TEXT PRIMARY KEY,
+            description TEXT,
+            rate_individual NUMERIC(5,2),
+            rate_company NUMERIC(5,2),
+            threshold NUMERIC(12,2),
+            annual_threshold NUMERIC(12,2),
+            is_active BOOLEAN DEFAULT TRUE
+        )""",
+
+        """CREATE TABLE IF NOT EXISTS tds_deductions (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            company_id UUID,
+            company_name TEXT,
+            voucher_id UUID,
+            party_name TEXT,
+            party_pan TEXT,
+            party_aadhaar_linked BOOLEAN,
+            section TEXT,
+            gross_amount NUMERIC(12,2),
+            tds_amount NUMERIC(12,2),
+            rate_applied NUMERIC(5,2),
+            deduction_date DATE,
+            challan_number TEXT,
+            challan_date DATE,
+            bsr_code TEXT,
+            deposited BOOLEAN DEFAULT FALSE,
+            quarter TEXT,
+            fy TEXT,
+            return_filed BOOLEAN DEFAULT FALSE,
+            return_filing_id UUID,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_tds_deductions_company_q ON tds_deductions(company_id, fy, quarter)",
+
+        """CREATE TABLE IF NOT EXISTS tds_returns (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            company_id UUID,
+            company_name TEXT,
+            return_form TEXT,
+            quarter TEXT,
+            fy TEXT,
+            total_tds NUMERIC(12,2),
+            total_deductees INTEGER,
+            filed_at TIMESTAMP,
+            status TEXT DEFAULT 'draft',
+            acknowledgement_no TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+
+        """CREATE TABLE IF NOT EXISTS form_26as_imports (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            company_id UUID,
+            company_name TEXT,
+            fy TEXT,
+            source_file_url TEXT,
+            source_file_name TEXT,
+            sha256 TEXT,
+            total_tds_credit NUMERIC(12,2),
+            parsed_payload JSONB,
+            match_summary JSONB,
+            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+    ]
+    for stmt in bank_ddl:
+        try:
+            cursor.execute("SAVEPOINT bsp")
+            cursor.execute(stmt)
+            cursor.execute("RELEASE SAVEPOINT bsp")
+        except Exception as e:
+            cursor.execute("ROLLBACK TO SAVEPOINT bsp")
+            print(f"Bank DDL warning ({stmt[:60]}…): {e}")
+
+    # Seed TDS sections (idempotent — INSERT … ON CONFLICT DO NOTHING)
+    tds_seed = [
+        ('192',  'Salary', 0.0, 0.0, 0, 0),
+        ('194A', 'Interest other than securities', 10.0, 10.0, 5000, 50000),
+        ('194C', 'Payment to contractors', 1.0, 2.0, 30000, 100000),
+        ('194H', 'Commission or brokerage', 5.0, 5.0, 15000, 0),
+        ('194I', 'Rent (land/building)', 10.0, 10.0, 240000, 0),
+        ('194J', 'Professional / technical services', 10.0, 10.0, 30000, 0),
+        ('194Q', 'Purchase of goods', 0.1, 0.1, 5000000, 0),
+        ('195',  'Payments to non-residents', 0.0, 0.0, 0, 0),
+    ]
+    for code, desc, ri, rc, thr, athr in tds_seed:
+        try:
+            cursor.execute("SAVEPOINT tdss")
+            cursor.execute("""INSERT INTO tds_sections (code, description, rate_individual, rate_company, threshold, annual_threshold)
+                              VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (code) DO NOTHING""",
+                           (code, desc, ri, rc, thr, athr))
+            cursor.execute("RELEASE SAVEPOINT tdss")
+        except Exception as e:
+            cursor.execute("ROLLBACK TO SAVEPOINT tdss")
+            print(f"TDS seed warning ({code}): {e}")
 
     # ── Full Tally master tables ──────────────────────────────────
     cursor.execute("""
@@ -426,7 +780,137 @@ def init_db():
         """)
     except Exception as e:
         print(f"Migration warning: {e}")
-    
+
+    # ========================================================================
+    # MULTI-TENANT SCHEMA (Phase A) — added 2026-05
+    # New tables: users, organizations, companies, memberships, tenant_audit_log
+    # Old tables get a company_id UUID column (kept alongside company_name).
+    # Each CREATE wrapped in its own savepoint so one failure doesn't poison the batch.
+    # ========================================================================
+    mt_ddls = [
+        ("users", """
+        CREATE TABLE IF NOT EXISTS users (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            name TEXT,
+            email TEXT,
+            phone TEXT,
+            pan TEXT,
+            is_super_admin BOOLEAN DEFAULT FALSE,
+            default_membership_id UUID,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );"""),
+        # If 'users' already existed with old schema, add missing columns
+        ("users_add_name",  "ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT;"),
+        ("users_add_email", "ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;"),
+        ("users_add_phone", "ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;"),
+        ("users_add_pan",   "ALTER TABLE users ADD COLUMN IF NOT EXISTS pan TEXT;"),
+        ("users_add_is_super", "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_super_admin BOOLEAN DEFAULT FALSE;"),
+        ("users_add_default_mem", "ALTER TABLE users ADD COLUMN IF NOT EXISTS default_membership_id UUID;"),
+        ("organizations", """
+        CREATE TABLE IF NOT EXISTS organizations (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name TEXT NOT NULL,
+            type TEXT NOT NULL CHECK (type IN ('firm', 'company')),
+            gstin TEXT,
+            address TEXT,
+            state_code TEXT,
+            plan TEXT DEFAULT 'free',
+            created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            archived_at TIMESTAMP
+        );"""),
+        ("companies", """
+        CREATE TABLE IF NOT EXISTS companies (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            gstin TEXT,
+            state_code TEXT,
+            fiscal_year_start DATE DEFAULT '2026-04-01',
+            currency TEXT DEFAULT 'INR',
+            is_primary BOOLEAN DEFAULT FALSE,
+            client_owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            archived_at TIMESTAMP,
+            UNIQUE(org_id, name)
+        );"""),
+        ("memberships", """
+        CREATE TABLE IF NOT EXISTS memberships (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+            role TEXT NOT NULL CHECK (role IN ('owner', 'manager', 'accountant', 'junior', 'viewer')),
+            scope_company_ids JSONB,
+            invited_by UUID REFERENCES users(id) ON DELETE SET NULL,
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, org_id)
+        );"""),
+        ("tenant_audit_log", """
+        CREATE TABLE IF NOT EXISTS tenant_audit_log (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+            action TEXT NOT NULL,
+            entity_type TEXT,
+            entity_id TEXT,
+            company_id UUID,
+            org_id UUID,
+            payload JSONB,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );"""),
+    ]
+    for tname, ddl in mt_ddls:
+        try:
+            cursor.execute(f"SAVEPOINT sp_mt_{tname};")
+            cursor.execute(ddl)
+            cursor.execute(f"RELEASE SAVEPOINT sp_mt_{tname};")
+        except Exception as e:
+            print(f"Multi-tenant DDL warning ({tname}): {e}")
+            try: cursor.execute(f"ROLLBACK TO SAVEPOINT sp_mt_{tname};")
+            except: pass
+
+    # Indexes
+    mt_indexes = [
+        ("idx_memberships_user", "memberships(user_id)"),
+        ("idx_memberships_org", "memberships(org_id)"),
+        ("idx_companies_org", "companies(org_id)"),
+        ("idx_tenant_audit_user", "tenant_audit_log(user_id)"),
+        ("idx_tenant_audit_company", "tenant_audit_log(company_id)"),
+    ]
+    for idx_name, target in mt_indexes:
+        try:
+            cursor.execute(f"SAVEPOINT sp_idx_{idx_name};")
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {target};")
+            cursor.execute(f"RELEASE SAVEPOINT sp_idx_{idx_name};")
+        except Exception as e:
+            print(f"Index warning ({idx_name}): {e}")
+            try: cursor.execute(f"ROLLBACK TO SAVEPOINT sp_idx_{idx_name};")
+            except: pass
+
+    # Add company_id UUID column to every tenant-scoped table (idempotent, per-table savepoint)
+    tenant_tables = [
+        'invoices', 'parties', 'tally_vouchers', 'tally_ledgers',
+        'tally_stock_items', 'tally_groups', 'tally_cost_centres',
+        'tally_voucher_types', 'tally_sync_log', 'tasks',
+        'recon_templates', 'recon_sessions', 'chat_sessions'
+    ]
+    for tbl in tenant_tables:
+        try:
+            cursor.execute("SAVEPOINT sp_add_cid;")
+            cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS company_id UUID;")
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{tbl}_company_id ON {tbl}(company_id);")
+            cursor.execute("RELEASE SAVEPOINT sp_add_cid;")
+        except Exception as e:
+            print(f"company_id add warning ({tbl}): {e}")
+            cursor.execute("ROLLBACK TO SAVEPOINT sp_add_cid;")
+
+    # Mark sensitive ledgers (auto-flag by name pattern)
+    try:
+        cursor.execute("ALTER TABLE tally_ledgers ADD COLUMN IF NOT EXISTS is_sensitive BOOLEAN DEFAULT FALSE;")
+    except Exception as e:
+        print(f"is_sensitive add warning: {e}")
+
     # Seed default sadmin (Super Admin) if not exists
     cursor.execute("SELECT id FROM accounting_users WHERE username = 'sadmin'")
     if not cursor.fetchone():
@@ -539,6 +1023,144 @@ def update_user_active_company(username: str, new_company_name: str, pan: str = 
         cursor.close()
         conn.close()
 
+def list_all_users():
+    """Sprint 24 — super_admin view: list every accounting_users row with derived
+    company-access count + activity stats. Companies JSONB is parsed."""
+    conn = get_conn()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute("""
+            SELECT id, username, role, name, email, phone, company_name, companies, created_at
+            FROM accounting_users
+            ORDER BY role DESC, username
+        """)
+        rows = cursor.fetchall()
+        out = []
+        for r in rows:
+            companies = r.get("companies")
+            if isinstance(companies, str):
+                try: companies = json.loads(companies)
+                except: companies = []
+            companies = companies or []
+            out.append({
+                "id": r["id"], "username": r["username"], "role": r["role"],
+                "name": r.get("name"), "email": r.get("email"), "phone": r.get("phone"),
+                "company_name": r.get("company_name"),
+                "companies": companies,
+                "companies_count": len(companies),
+                "created_at": r.get("created_at").isoformat() if r.get("created_at") else None,
+            })
+        return out
+    finally:
+        cursor.close(); conn.close()
+
+
+def list_all_companies_with_usage():
+    """Sprint 24 — super_admin view: every distinct company name appearing in
+    accounting_users.companies JSONB, plus row counts in tally_vouchers and
+    bank_transactions so the admin can see how 'real' each company is."""
+    conn = get_conn()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute("""
+            SELECT DISTINCT TRIM(comp.value::text, '"') AS name
+            FROM accounting_users u,
+                 LATERAL jsonb_array_elements(COALESCE(u.companies::jsonb, '[]'::jsonb)) AS comp
+        """)
+        names = sorted({r["name"] for r in cursor.fetchall() if r["name"]})
+        # Per-company stats — single query
+        cursor.execute("""
+            SELECT company_name AS name,
+                   (SELECT COUNT(*) FROM tally_vouchers tv      WHERE tv.company_name = c.company_name) AS voucher_count,
+                   (SELECT COUNT(*) FROM bank_transactions bt   WHERE bt.company_name = c.company_name) AS bank_tx_count
+            FROM (SELECT DISTINCT company_name FROM tally_vouchers
+                  UNION SELECT DISTINCT company_name FROM bank_transactions) c
+        """)
+        stats = {r["name"]: r for r in cursor.fetchall() if r["name"]}
+        # Per-company user-access count
+        cursor.execute("""
+            SELECT TRIM(comp.value::text, '"') AS name, COUNT(*) AS access_count
+            FROM accounting_users u,
+                 LATERAL jsonb_array_elements(COALESCE(u.companies::jsonb, '[]'::jsonb)) AS comp
+            GROUP BY 1
+        """)
+        access = {r["name"]: r["access_count"] for r in cursor.fetchall() if r["name"]}
+        out = []
+        for n in names:
+            s = stats.get(n, {})
+            out.append({
+                "name": n,
+                "voucher_count": int(s.get("voucher_count") or 0),
+                "bank_tx_count": int(s.get("bank_tx_count") or 0),
+                "user_access_count": int(access.get(n, 0)),
+            })
+        # Sort: most-used first
+        out.sort(key=lambda c: (c["voucher_count"] + c["bank_tx_count"]), reverse=True)
+        return out
+    finally:
+        cursor.close(); conn.close()
+
+
+def delete_user_by_username(username: str):
+    """Sprint 24 — super_admin destructive op. Cascade: chat_sessions retain
+    user_username text (no FK), so a deletion leaves orphan history rows we
+    can scrub separately. Returns dict {deleted: bool, message: str}."""
+    if not username:
+        return {"deleted": False, "message": "Username required."}
+    if username == "sadmin":
+        return {"deleted": False, "message": "Refusing to delete sadmin (super_admin protection)."}
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM accounting_users WHERE username = %s", (username,))
+        n = cursor.rowcount
+        conn.commit()
+        return {"deleted": bool(n), "rows_affected": n,
+                "message": f"User '{username}' deleted." if n else f"No user '{username}' found."}
+    except Exception as e:
+        return {"deleted": False, "message": str(e)}
+    finally:
+        cursor.close(); conn.close()
+
+
+def update_user_role(username: str, new_role: str):
+    """Sprint 24 — super_admin. Only allows roles in {'admin','super_admin'}."""
+    if new_role not in ("admin", "super_admin"):
+        return {"ok": False, "message": f"Invalid role '{new_role}'."}
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("UPDATE accounting_users SET role = %s WHERE username = %s",
+                       (new_role, username))
+        conn.commit()
+        return {"ok": cursor.rowcount > 0, "rows_affected": cursor.rowcount}
+    finally:
+        cursor.close(); conn.close()
+
+
+def remove_company_from_user(username: str, company_name: str):
+    """Sprint 24 — super_admin. Pop a company from one user's JSONB list.
+    Does NOT delete the company's actual data (vouchers/bank); just revokes
+    that user's access."""
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT companies FROM accounting_users WHERE username = %s", (username,))
+        row = cursor.fetchone()
+        if not row: return {"ok": False, "message": "User not found."}
+        comps = row[0]
+        if isinstance(comps, str):
+            try: comps = json.loads(comps)
+            except: comps = []
+        comps = [c for c in (comps or []) if c != company_name]
+        cursor.execute("UPDATE accounting_users SET companies = %s WHERE username = %s",
+                       (json.dumps(comps), username))
+        conn.commit()
+        return {"ok": True, "remaining": comps}
+    finally:
+        cursor.close(); conn.close()
+
+
 def create_user(username: str, password: str, role: str = "admin", name: str = None, email: str = None, phone: str = None, company_name: str = "Acme Corp"):
     conn = get_conn()
     cursor = conn.cursor()
@@ -560,29 +1182,107 @@ def create_user(username: str, password: str, role: str = "admin", name: str = N
 
 # ---- Chat Functions ----
 
-def create_chat_session(title="New Chat", company_name=None):
+def _ensure_chat_user_column():
+    """Idempotent ALTER — add user_username column to chat_sessions if missing."""
+    try:
+        conn = get_conn()
+        cursor = conn.cursor()
+        cursor.execute("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS user_username TEXT")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_chat_sessions_user ON chat_sessions(user_username, company_name)")
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"[_ensure_chat_user_column] {e}")
+
+
+def create_chat_session(title="New Chat", company_name=None, user_username=None):
+    _ensure_chat_user_column()
     conn = get_conn()
     cursor = conn.cursor()
     session_id = str(uuid.uuid4())
     cursor.execute("""
-    INSERT INTO chat_sessions (id, title, company_name) VALUES (%s, %s, %s)
-    """, (session_id, title, company_name))
+    INSERT INTO chat_sessions (id, title, company_name, user_username) VALUES (%s, %s, %s, %s)
+    """, (session_id, title, company_name, user_username))
     conn.commit()
     cursor.close()
     conn.close()
     return session_id
 
-def get_chat_sessions(company_name=None):
+
+def get_chat_sessions(company_name=None, user_username=None):
+    """List chat sessions scoped to (company, user). Both filters apply when given.
+    If user_username is None → super_admin / all (use cautiously)."""
+    _ensure_chat_user_column()
     conn = get_conn()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
+    query = """
+        SELECT s.*, COALESCE(m.msg_count, 0) as message_count
+        FROM chat_sessions s
+        LEFT JOIN (SELECT session_id, COUNT(*) as msg_count FROM chat_messages GROUP BY session_id) m
+        ON s.id = m.session_id
+    """
+    where = []
+    params = []
     if company_name:
-        cursor.execute("SELECT * FROM chat_sessions WHERE company_name = %s ORDER BY updated_at DESC", (company_name,))
-    else:
-        cursor.execute("SELECT * FROM chat_sessions ORDER BY updated_at DESC")
+        where.append("s.company_name = %s")
+        params.append(company_name)
+    if user_username:
+        # Show sessions owned by this user only. Legacy sessions tagged
+        # '__legacy__' (Sprint 7 backfill) are hidden from regular users
+        # — they remain visible to super_admin who passes user_username=None.
+        where.append("s.user_username = %s")
+        params.append(user_username)
+    if where:
+        query += " WHERE " + " AND ".join(where)
+    query += " ORDER BY s.updated_at DESC"
+    cursor.execute(query, tuple(params))
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
     return rows
+
+
+def get_chat_sessions_multi(company_names, user_username=None):
+    """Get chat sessions for multiple companies at once, scoped to a user."""
+    _ensure_chat_user_column()
+    conn = get_conn()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    base = """
+        SELECT s.*, COALESCE(m.msg_count, 0) as message_count
+        FROM chat_sessions s
+        LEFT JOIN (SELECT session_id, COUNT(*) as msg_count FROM chat_messages GROUP BY session_id) m
+        ON s.id = m.session_id
+    """
+    where = []
+    params = []
+    if company_names:
+        placeholders = ','.join(['%s'] * len(company_names))
+        where.append(f"s.company_name IN ({placeholders})")
+        params.extend(company_names)
+    if user_username:
+        where.append("s.user_username = %s")
+        params.append(user_username)
+    if where:
+        base += " WHERE " + " AND ".join(where)
+    base += " ORDER BY s.updated_at DESC"
+    cursor.execute(base, tuple(params))
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return rows
+
+
+def get_chat_session_owner(session_id):
+    """Return the user_username + company_name of a session, used for /chat/messages auth."""
+    _ensure_chat_user_column()
+    conn = get_conn()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("SELECT user_username, company_name FROM chat_sessions WHERE id = %s", (session_id,))
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return row
 
 def save_chat_message(session_id, role, content, ui_type="text", ui_data=None):
     conn = get_conn()
@@ -707,6 +1407,174 @@ def get_history(company_name=None):
     conn.close()
     return rows
 
+
+def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limit=500, offset=0):
+    """Return merged vouchers from tally_vouchers + invoices, sorted by date desc.
+
+    Each row is normalized to a common shape for the frontend:
+      id, date, voucher_number, voucher_type, party_name, amount,
+      narration, source ('tally'|'invoice'), ledger_entries, ...
+    """
+    conn = get_conn()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    results = []
+
+    # --- Tally vouchers ---
+    tally_where = ["1=1"]
+    tally_params = []
+    if company_id:
+        tally_where.append("company_id = %s")
+        tally_params.append(company_id)
+    elif company_name:
+        tally_where.append("company_name = %s")
+        tally_params.append(company_name)
+    if voucher_type and voucher_type.lower() != 'all':
+        tally_where.append("LOWER(voucher_type) = LOWER(%s)")
+        tally_params.append(voucher_type)
+
+    cursor.execute(f"""
+        SELECT id, date, voucher_number, voucher_type, ledger_name AS party_name,
+               amount, narration, ledger_entries::text AS ledger_entries,
+               reference_no, place_of_supply, currency,
+               cost_centres::text AS cost_centres, bill_refs::text AS bill_refs,
+               taxable_value, cgst_amount, sgst_amount, igst_amount,
+               tally_master_id, instrument_number, reconciled,
+               'tally' AS source, updated_at
+        FROM tally_vouchers
+        WHERE {' AND '.join(tally_where)}
+        ORDER BY date DESC
+        LIMIT %s OFFSET %s
+    """, tally_params + [limit, offset])
+    tally_rows = cursor.fetchall()
+    for r in tally_rows:
+        # Parse JSON text fields back
+        try:
+            r['ledger_entries'] = json.loads(r['ledger_entries']) if r['ledger_entries'] else []
+        except Exception:
+            r['ledger_entries'] = []
+        try:
+            r['cost_centres'] = json.loads(r['cost_centres']) if r['cost_centres'] else []
+        except Exception:
+            r['cost_centres'] = []
+        try:
+            r['bill_refs'] = json.loads(r['bill_refs']) if r['bill_refs'] else []
+        except Exception:
+            r['bill_refs'] = []
+        # Normalize date to string
+        if r.get('date'):
+            r['date'] = str(r['date'])
+        results.append(r)
+
+    # --- Invoice-created vouchers (from invoices table) ---
+    # Sprint 33 — build two parallel where-lists: bare (for COUNT) and i.-qualified
+    # (for the JOIN query) so we don't do brittle string replacement.
+    inv_where = ["1=1"]
+    inv_qualified_where = ["1=1"]
+    inv_params = []
+    if company_name:
+        inv_where.append("company_name = %s")
+        inv_qualified_where.append("i.company_name = %s")
+        inv_params.append(company_name)
+    if voucher_type and voucher_type.lower() != 'all':
+        inv_where.append("LOWER(category) = LOWER(%s)")
+        inv_qualified_where.append("LOWER(i.category) = LOWER(%s)")
+        inv_params.append(voucher_type)
+
+    # Sprint 33 — also surface the invoice's own status, and let a pushed
+    # tally_outbox row authoritatively mark it 'synced' (the bridge agent
+    # ack'd it into Tally). This keeps the Vouchers list status column honest
+    # vs the end-to-end Tally sync state shown in Event Logs.
+    cursor.execute(f"""
+        SELECT i.id, i.created_at AS date, i.invoice_number AS voucher_number,
+               i.category AS voucher_type, i.party_name,
+               i.total_amount AS amount, '' AS narration,
+               '[]' AS ledger_entries, '' AS reference_no,
+               '' AS place_of_supply, 'INR' AS currency,
+               '[]' AS cost_centres, '[]' AS bill_refs,
+               0 AS taxable_value, 0 AS cgst_amount, 0 AS sgst_amount, 0 AS igst_amount,
+               NULL AS tally_master_id, '' AS instrument_number, FALSE AS reconciled,
+               'invoice' AS source, i.created_at AS updated_at,
+               i.file_url,
+               CASE
+                 WHEN ob.pushed_state THEN 'synced'
+                 ELSE COALESCE(i.status, 'pending')
+               END AS status,
+               ob.tally_voucher_guid
+        FROM invoices i
+        LEFT JOIN LATERAL (
+            SELECT BOOL_OR(o.state = 'pushed') AS pushed_state,
+                   MAX(o.tally_voucher_guid) AS tally_voucher_guid
+            FROM tally_outbox o
+            WHERE o.company_name = i.company_name
+              AND o.payload->>'invoice_number' = i.invoice_number
+        ) ob ON TRUE
+        WHERE {' AND '.join(inv_qualified_where)}
+        ORDER BY i.created_at DESC
+        LIMIT %s OFFSET %s
+    """, inv_params + [limit, offset])
+    inv_rows = cursor.fetchall()
+    for r in inv_rows:
+        if r.get('date'):
+            r['date'] = str(r['date'])
+        r['ledger_entries'] = []
+        r['cost_centres'] = []
+        r['bill_refs'] = []
+        results.append(r)
+
+    # Sprint 33 — Dedupe: when the same voucher_number exists from both a
+    # Tally sync and an invoice/PDF upload, keep the Tally row (it's the
+    # authoritative posted record) and drop the invoice duplicate. We carry
+    # the invoice's file_url onto the Tally row so the source PDF stays linked.
+    by_number = {}
+    deduped = []
+    for r in results:
+        num = (r.get('voucher_number') or '').strip()
+        if not num:
+            deduped.append(r)   # no number → can't dedupe, keep as-is
+            continue
+        key = num.lower()
+        if key not in by_number:
+            by_number[key] = r
+            deduped.append(r)
+        else:
+            existing = by_number[key]
+            # Prefer the tally-sourced row; merge file_url across
+            keep, drop = (existing, r) if existing.get('source') == 'tally' else (r, existing)
+            if r.get('source') == 'tally' and existing.get('source') != 'tally':
+                # Replace the previously-kept invoice row with the tally row
+                if not keep.get('file_url') and existing.get('file_url'):
+                    keep['file_url'] = existing.get('file_url')
+                idx = deduped.index(existing)
+                deduped[idx] = keep
+                by_number[key] = keep
+            else:
+                # existing is tally (or both same source) — keep existing,
+                # just inherit a file_url if the dropped row had one
+                if not keep.get('file_url') and drop.get('file_url'):
+                    keep['file_url'] = drop.get('file_url')
+    results = deduped
+
+    # Sort merged by date descending
+    results.sort(key=lambda r: r.get('date') or '', reverse=True)
+
+    # Get total count for pagination
+    cursor.execute(f"SELECT COUNT(*) FROM tally_vouchers WHERE {' AND '.join(tally_where)}", tally_params)
+    tally_total = cursor.fetchone()['count']
+    cursor.execute(f"SELECT COUNT(*) FROM invoices WHERE {' AND '.join(inv_where)}", inv_params)
+    inv_total = cursor.fetchone()['count']
+
+    cursor.close()
+    conn.close()
+
+    # Sprint 33 — total reflects the deduped set (the raw sum would double-count
+    # invoices that have a Tally twin).
+    return {
+        "vouchers": results[:limit],
+        "total": len(results),
+        "tally_count": tally_total,
+        "invoice_count": inv_total,
+    }
+
 def save_correction(field, original, corrected, party_name=None, embedding=None, company_name="Acme Corp"):
     conn = get_conn()
     cursor = conn.cursor()
@@ -747,18 +1615,3037 @@ def get_relevant_corrections(query_embedding, company_name="Acme Corp", limit=5)
     conn = get_conn()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     embedding_str = f"[{','.join(map(str, query_embedding))}]"
-    
+
     cursor.execute("""
-    SELECT data FROM knowledge_base 
+    SELECT data FROM knowledge_base
     WHERE type = 'correction' AND embedding IS NOT NULL AND data->>'company_name' = %s
-    ORDER BY embedding <=> %s::vector 
+    ORDER BY embedding <=> %s::vector
     LIMIT %s
     """, (company_name, embedding_str, limit))
-    
+
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
     return [r['data'] for r in rows]
+
+
+def semantic_search_tally(query_embedding, company_name, kb_types, limit=5):
+    """Search the new tally_master_* embeddings by cosine distance.
+
+    kb_types: list like ['tally_master_ledger', 'tally_master_party', 'tally_master_narration']
+    Returns list of {type, data, distance} sorted by distance ascending (best first).
+    """
+    if not query_embedding or not kb_types:
+        return []
+    conn = get_conn()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    embedding_str = f"[{','.join(map(str, query_embedding))}]"
+    placeholders = ','.join(['%s'] * len(kb_types))
+    cursor.execute(f"""
+        SELECT type, data, (embedding <=> %s::vector) AS distance
+        FROM knowledge_base
+        WHERE type IN ({placeholders})
+          AND data->>'company_name' = %s
+          AND embedding IS NOT NULL
+        ORDER BY embedding <=> %s::vector
+        LIMIT %s
+    """, [embedding_str] + list(kb_types) + [company_name, embedding_str, limit])
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return [{"type": r["type"], "data": r["data"], "distance": float(r["distance"])} for r in rows]
+
+
+def get_ledger_master_for_company(company_id=None, company_name=None):
+    """Return all ledger names + their parent_group for the active company.
+    Used to constrain AI suggestions to real ledgers (avoid hallucination).
+    """
+    conn = get_conn()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    if company_id:
+        cursor.execute("""
+            SELECT name, parent_group, ledger_type, closing_balance, is_sensitive
+            FROM tally_ledgers WHERE company_id = %s ORDER BY parent_group, name
+        """, (company_id,))
+    elif company_name:
+        cursor.execute("""
+            SELECT name, parent_group, ledger_type, closing_balance, is_sensitive
+            FROM tally_ledgers WHERE company_name = %s ORDER BY parent_group, name
+        """, (company_name,))
+    else:
+        cursor.execute("""
+            SELECT name, parent_group, ledger_type, closing_balance, is_sensitive
+            FROM tally_ledgers ORDER BY parent_group, name
+        """)
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return rows
+
+
+# ═══════════════════════════════════════════════════════════════
+# 360° Bank Transactions — ingestion + CRUD + health
+# ═══════════════════════════════════════════════════════════════
+
+def save_statement_upload(company_id, company_name, file_url, original_name,
+                          bank_ledger=None, period_from=None, period_to=None,
+                          line_count=0, total_credit=0, total_debit=0, sha256_hex=None,
+                          uploaded_by=None):
+    """Insert a row in bank_statement_uploads. Returns the new id."""
+    conn = get_conn()
+    cur = conn.cursor()
+    new_id = str(uuid.uuid4())
+    cur.execute("""
+        INSERT INTO bank_statement_uploads
+            (id, company_id, company_name, file_url, original_name, bank_ledger,
+             period_from, period_to, line_count, total_credit, total_debit,
+             sha256, uploaded_by)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (new_id, company_id, company_name, file_url, original_name, bank_ledger,
+          period_from, period_to, line_count, total_credit, total_debit,
+          sha256_hex, uploaded_by))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return new_id
+
+
+def find_statement_upload_by_sha(company_id, sha256_hex):
+    """Return the existing row if a file with this sha exists for the company, else None."""
+    if not sha256_hex:
+        return None
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT id, original_name, uploaded_at FROM bank_statement_uploads
+        WHERE company_id = %s AND sha256 = %s
+        ORDER BY uploaded_at DESC LIMIT 1
+    """, (company_id, sha256_hex))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row
+
+
+def _lookup_company_id_by_name(cur, company_name):
+    """Last-resort lookup of company_id by name. Uses an open cursor so it
+    participates in the caller's transaction."""
+    if not company_name:
+        return None
+    try:
+        cur.execute("SELECT id FROM companies WHERE name = %s LIMIT 1", (company_name,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        # cursor may be tuple-based or RealDictCursor
+        return str(row[0]) if not isinstance(row, dict) else str(row["id"])
+    except Exception as e:
+        print(f"[_lookup_company_id_by_name] {e}")
+        return None
+
+
+def save_bank_transactions(rows):
+    """Bulk insert into bank_transactions. Each row is a dict with the canonical
+    fields. Returns count inserted + skipped (already-existing) duplicates.
+
+    Per-line dedup: before inserting a 'bank_statement' or 'invoice' row, check if
+    a row already exists for the same (company_id, source, date, amount, reference)
+    OR (company_id, source, date, amount, description-token-overlap). If yes, skip.
+    Tally rows are deduped via the existing unique index.
+
+    Sprint 10: if a row arrives with company_id=NULL but company_name set, we
+    look it up and patch the row in-place so it never lands as orphaned.
+    """
+    if not rows:
+        return {"inserted": 0, "skipped_existing": 0, "skipped_error": 0}
+    conn = get_conn()
+    cur = conn.cursor()
+    inserted = 0
+    skipped_existing = 0   # row already existed in DB
+    skipped_error = 0       # DB error (other than dup)
+
+    # Sprint 10 — last-resort company_id resolution per batch (cached)
+    _name_to_id_cache = {}
+    null_cid_fixed = 0
+    null_cid_unresolved = 0
+    for r in rows:
+        if not r.get("company_id") and r.get("company_name"):
+            cname = r["company_name"]
+            if cname not in _name_to_id_cache:
+                _name_to_id_cache[cname] = _lookup_company_id_by_name(cur, cname)
+            resolved = _name_to_id_cache[cname]
+            if resolved:
+                r["company_id"] = resolved
+                null_cid_fixed += 1
+            else:
+                null_cid_unresolved += 1
+    if null_cid_fixed or null_cid_unresolved:
+        print(f"[save_bank_transactions] last-resort company_id: fixed={null_cid_fixed} unresolved={null_cid_unresolved}", flush=True)
+
+    for r in rows:
+        # Pre-check for per-line existing duplicates (statement / invoice / manual)
+        if r["source"] in ("bank_statement", "invoice", "manual"):
+            try:
+                cur.execute("""
+                    SELECT 1 FROM bank_transactions
+                    WHERE company_id = %s AND source = %s
+                          AND date = %s AND amount = %s
+                          AND (
+                              (reference IS NOT NULL AND reference = %s)
+                              OR
+                              (description IS NOT NULL AND %s IS NOT NULL AND description = %s)
+                          )
+                    LIMIT 1
+                """, (
+                    r.get("company_id"), r["source"],
+                    r["date"], r["amount"],
+                    r.get("reference") or "", r.get("description"), r.get("description"),
+                ))
+                if cur.fetchone():
+                    skipped_existing += 1
+                    continue
+            except Exception as dup_check_err:
+                print(f"[save_bank_transactions dup-check] {dup_check_err}")
+                # Fall through to insert and let DB-level constraint catch any clash
+
+        try:
+            cur.execute("SAVEPOINT btx")
+            cur.execute("""
+                INSERT INTO bank_transactions
+                    (id, company_id, company_name, source, source_record_id,
+                     source_file_id, source_row_idx, source_payload,
+                     date, value_date, description, reference, amount, currency,
+                     bank_ledger, party, head, voucher_type,
+                     instrument_type, instrument_number, payment_favouring,
+                     status, confidence, rationale, match_reason, linked_id, created_by,
+                     ai_touched, human_touched)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb,
+                        %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s,
+                        %s, %s)
+            """, (
+                r.get("id") or str(uuid.uuid4()),
+                r.get("company_id"), r["company_name"], r["source"],
+                r.get("source_record_id"), r.get("source_file_id"),
+                r.get("source_row_idx"),
+                json.dumps(r.get("source_payload") or {}),
+                r["date"], r.get("value_date"), r.get("description"),
+                r.get("reference"), r["amount"], r.get("currency", "INR"),
+                r.get("bank_ledger"), r.get("party"), r.get("head"),
+                r.get("voucher_type"),
+                r.get("instrument_type"), r.get("instrument_number"),
+                r.get("payment_favouring"),
+                r.get("status", "unmatched"), r.get("confidence", 0),
+                r.get("rationale"), r.get("match_reason"),
+                r.get("linked_id"), r.get("created_by"),
+                bool(r.get("ai_touched", False)),
+                bool(r.get("human_touched", False)),
+            ))
+            cur.execute("RELEASE SAVEPOINT btx")
+            inserted += 1
+        except Exception as e:
+            cur.execute("ROLLBACK TO SAVEPOINT btx")
+            if "duplicate key" in str(e).lower():
+                skipped_existing += 1
+            else:
+                skipped_error += 1
+                print(f"[save_bank_transactions] {e}")
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {
+        "inserted": inserted,
+        "skipped_existing": skipped_existing,
+        "skipped_error": skipped_error,
+        # Keep legacy key for callers that read 'skipped'
+        "skipped": skipped_existing + skipped_error,
+    }
+
+
+def ingest_bank_from_tally(company_id):
+    """Walk tally_vouchers for the company and emit a bank_transactions row for
+    every voucher leg that hits a Bank/Cash ledger. Idempotent."""
+    if not company_id:
+        return {"inserted": 0, "skipped": 0, "reason": "no company_id"}
+
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    # Find the set of bank/cash ledger names for this company
+    cur.execute("""
+        SELECT name, parent_group FROM tally_ledgers WHERE company_id = %s
+    """, (company_id,))
+    ledger_rows = cur.fetchall()
+    bank_set = set()
+    cash_set = set()
+    ledgers_by_name = {}     # Sprint 17 — look up parent_group when deciding Head
+    for L in ledger_rows:
+        pg = (L["parent_group"] or "").lower()
+        n = L["name"]
+        ledgers_by_name[n] = {"parent_group": pg}
+        if "bank account" in pg:
+            bank_set.add(n)
+        if "cash" in pg or n.lower() == "cash":
+            cash_set.add(n)
+    bank_or_cash = bank_set | cash_set
+    if not bank_or_cash:
+        cur.close(); conn.close()
+        return {"inserted": 0, "skipped": 0, "reason": "no bank/cash ledgers"}
+
+    # Pull all vouchers + check existing bank_transactions to avoid duplicates
+    cur.execute("""
+        SELECT id, date, voucher_number, ledger_name, amount, voucher_type,
+               instrument_number, narration, ledger_entries, reference_no,
+               company_name
+        FROM tally_vouchers
+        WHERE company_id = %s
+    """, (company_id,))
+    vouchers = cur.fetchall()
+
+    cur.execute("""
+        SELECT source_record_id, bank_ledger
+        FROM bank_transactions
+        WHERE company_id = %s AND source = 'tally'
+    """, (company_id,))
+    existing = {(str(r["source_record_id"]), r["bank_ledger"]) for r in cur.fetchall()}
+    cur.close()
+    conn.close()
+
+    rows_to_insert = []
+    for v in vouchers:
+        entries = v.get("ledger_entries") or []
+        if isinstance(entries, str):
+            try: entries = json.loads(entries)
+            except: entries = []
+        if not entries:
+            # Fallback: if no ledger_entries, but voucher's ledger_name is a bank
+            if v["ledger_name"] in bank_or_cash:
+                key = (str(v["id"]), v["ledger_name"])
+                if key not in existing:
+                    rows_to_insert.append({
+                        "company_id": company_id, "company_name": v["company_name"],
+                        "source": "tally", "source_record_id": str(v["id"]),
+                        "source_payload": dict(v) if False else None,
+                        "date": v["date"], "description": v.get("narration"),
+                        "reference": v.get("reference_no") or v.get("voucher_number"),
+                        "amount": v["amount"] or 0,
+                        "bank_ledger": v["ledger_name"],
+                        "party": None, "head": None,
+                        "voucher_type": v.get("voucher_type"),
+                        "instrument_type": None,
+                        "instrument_number": v.get("instrument_number"),
+                        "payment_favouring": None,
+                        "status": "matched", "confidence": 1.0,
+                        "rationale": "Imported from Tally voucher",
+                        "match_reason": "tally_ground_truth",
+                        "created_by": "tally_sync",
+                        "human_touched": True, "ai_touched": False,
+                    })
+            continue
+
+        # Find bank-leg entries and the "other side"
+        bank_entries = [e for e in entries if (e.get("ledger_name") or e.get("ledger") or "") in bank_or_cash]
+        other_entries = [e for e in entries if (e.get("ledger_name") or e.get("ledger") or "") not in bank_or_cash]
+
+        for be in bank_entries:
+            be_name = be.get("ledger_name") or be.get("ledger")
+            be_amount_raw = float(be.get("amount") or 0)
+            key = (str(v["id"]), be_name)
+            if key in existing:
+                continue
+
+            # Sprint 18 — Normalize amount sign to BANK perspective.
+            # Tally's per-ledger `amount` already encodes the sign per Tally's
+            # convention (Cr=+, Dr=-). From the bank's perspective these are
+            # OPPOSITE (cash IN = Dr bank = +ve in our model; cash OUT = Cr bank
+            # = -ve in our model). So a simple NEGATE converts the convention.
+            # Works correctly for:
+            #   - Payment vouchers (Cr bank +ve → -ve cash out)
+            #   - Receipt vouchers (Dr bank -ve → +ve cash in)
+            #   - Contra-Receipt or Contra-Payment vouchers with TWO bank legs
+            #     (each leg keeps its own opposite sign, so IDBI Cr +850000
+            #      and ICICI Dr -850000 become -850000 and +850000 respectively)
+            # If is_debit is explicitly set on the leg, prefer it (most reliable).
+            is_debit = be.get("is_debit")
+            vt = (v.get("voucher_type") or "").lower()
+            if is_debit is True:
+                be_amount = abs(be_amount_raw)
+            elif is_debit is False:
+                be_amount = -abs(be_amount_raw)
+            elif be_amount_raw != 0:
+                be_amount = -be_amount_raw
+            else:
+                # Last-resort fallback for vouchers with neither sign nor flag
+                if vt == "payment":   be_amount = -abs(be_amount_raw)
+                elif vt == "receipt": be_amount = abs(be_amount_raw)
+                else: be_amount = be_amount_raw
+
+            # Sprint 17 — Party = first non-bank ledger.
+            # Head = first non-bank ledger that is NOT a Sundry party (i.e. a real
+            # expense / revenue / asset account). Leave blank if the only non-bank
+            # leg is the Sundry party (typical for Payment / Receipt vouchers).
+            party = None
+            head = None
+            for oe in other_entries:
+                oe_name = oe.get("ledger_name") or oe.get("ledger") or ""
+                if not oe_name: continue
+                if party is None:
+                    party = oe_name
+                oe_pg = (ledgers_by_name.get(oe_name, {}).get("parent_group") or "").lower()
+                is_sundry = ("sundry" in oe_pg) or ("debtor" in oe_pg) or ("creditor" in oe_pg)
+                if head is None and not is_sundry:
+                    head = oe_name
+
+            # Instrument from bank_allocations (if present)
+            alloc = (be.get("bank_allocations") or [None])[0] if be.get("bank_allocations") else None
+            inst_type = (alloc or {}).get("transaction_type") if alloc else None
+            inst_num = (alloc or {}).get("instrument_number") or v.get("instrument_number") if alloc else v.get("instrument_number")
+            favour = (alloc or {}).get("payment_favouring") if alloc else None
+            value_date = None
+            if alloc and alloc.get("bank_date"):
+                bd = str(alloc["bank_date"])
+                if len(bd) == 8 and bd.isdigit():
+                    try:
+                        from datetime import date as _d
+                        value_date = _d(int(bd[:4]), int(bd[4:6]), int(bd[6:]))
+                    except: pass
+
+            rows_to_insert.append({
+                "company_id": company_id, "company_name": v["company_name"],
+                "source": "tally", "source_record_id": str(v["id"]),
+                "source_payload": be,
+                "date": v["date"], "value_date": value_date,
+                "description": v.get("narration") or v.get("voucher_number"),
+                "reference": v.get("reference_no") or v.get("voucher_number"),
+                "amount": be_amount,
+                "bank_ledger": be_name,
+                "party": party, "head": head,
+                "voucher_type": v.get("voucher_type"),
+                "instrument_type": inst_type,
+                "instrument_number": inst_num,
+                "payment_favouring": favour,
+                "status": "matched", "confidence": 1.0,
+                "rationale": f"Imported from Tally voucher {v.get('voucher_number') or ''}",
+                "match_reason": "tally_ground_truth",
+                "created_by": "tally_sync",
+                "human_touched": True, "ai_touched": False,
+            })
+
+    return save_bank_transactions(rows_to_insert)
+
+
+def ingest_bank_from_invoices(company_id, company_name):
+    """Emit a bank_transactions row for every paid invoice. Idempotent."""
+    if not company_id or not company_name:
+        return {"inserted": 0, "skipped": 0}
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT id, invoice_number, date, party_name, total_amount,
+               category, status, billing_party_name
+        FROM invoices
+        WHERE company_name = %s AND (status = 'paid' OR status = 'reconciled')
+    """, (company_name,))
+    invs = cur.fetchall()
+    cur.execute("""
+        SELECT source_record_id FROM bank_transactions
+        WHERE company_id = %s AND source = 'invoice'
+    """, (company_id,))
+    existing = {str(r["source_record_id"]) for r in cur.fetchall()}
+    cur.close()
+    conn.close()
+
+    rows = []
+    for inv in invs:
+        if str(inv["id"]) in existing:
+            continue
+        category = (inv.get("category") or "").lower()
+        amount = float(inv.get("total_amount") or 0)
+        # Sales invoice → inflow (positive). Purchase / vendor invoice → outflow (negative).
+        signed_amount = abs(amount) if category == "sales" else -abs(amount)
+        rows.append({
+            "company_id": company_id, "company_name": company_name,
+            "source": "invoice", "source_record_id": str(inv["id"]),
+            "source_payload": dict(inv) if False else None,
+            "date": inv.get("date"),
+            "description": f"Invoice {inv.get('invoice_number')}",
+            "reference": inv.get("invoice_number"),
+            "amount": signed_amount,
+            "party": inv.get("party_name") or inv.get("billing_party_name"),
+            "voucher_type": "Receipt" if signed_amount > 0 else "Payment",
+            "status": "ai_filled", "confidence": 0.9,
+            "rationale": "Auto-imported from paid invoice",
+            "match_reason": "invoice_paid",
+            "created_by": "invoice_extract",
+            "ai_touched": True, "human_touched": False,
+        })
+    return save_bank_transactions(rows)
+
+
+def link_bank_transactions(company_id):
+    """Cross-source linking: pair rows from different sources that represent
+    the same real-world event. Sets linked_id and bumps status to 'matched'.
+
+    Sprint 19 — Scored greedy linker:
+      1. Enumerate ALL candidate pairs (cross-source, same ABS amount, ≤7d apart).
+      2. Score each by evidence strength (UTR exact > UTR overlap > party+bank > bank+day).
+      3. Sort by score DESCENDING. Greedy-pick: highest-scoring pair wins.
+      4. Once a row is used, it can't be paired again.
+    This avoids the previous "first-match wins" bug where a weak token coincidence
+    burned a row that should have linked to a stronger candidate.
+    """
+    if not company_id:
+        return {"linked_pairs": 0}
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT id, source, date, amount, reference, party, bank_ledger,
+               description, bank_ledger AS bnk
+        FROM bank_transactions
+        WHERE company_id = %s AND linked_id IS NULL
+    """, (company_id,))
+    rows = cur.fetchall()
+
+    # Sprint 18 — Pre-extract UTR/UPI/cheque-style tokens from BOTH `reference`
+    # AND `description`. Bank statements put the UTR in the description (e.g.
+    # "INF/INFT/043999133351/JMK...") while Tally's `reference` is the voucher
+    # number (e.g. "16"). Matching on these long numeric tokens is the strongest
+    # signal real-world bank lines share.
+    import re as _re
+    def _ref_tokens(row):
+        out = set()
+        for fld in ("reference", "description"):
+            text = (row.get(fld) or "")
+            # Long alnum sequences (10+ chars): UTR (16 digits), IFT (12 digits),
+            # UPI ref (12-22 chars), cheque-like (6-10 digits) — we use 10 as a
+            # threshold to avoid false matches on small numbers.
+            for m in _re.findall(r'[A-Za-z0-9]{10,}', text):
+                out.add(m.upper())
+        return out
+    for r in rows:
+        r["_tokens"] = _ref_tokens(r)
+
+    linked = 0
+    by_amount = {}
+    for r in rows:
+        key = round(abs(float(r["amount"])), 2)
+        by_amount.setdefault(key, []).append(r)
+
+    # Sprint 19 — score every candidate pair, then greedy-pick highest first.
+    def _score_pair(a, b):
+        """Returns (score, reason) — higher is stronger evidence. 0 means reject."""
+        if a["source"] == b["source"]: return (0, "same-source")
+        # Date proximity
+        if a["date"] and b["date"]:
+            d_diff = abs((a["date"] - b["date"]).days)
+            if d_diff > 7: return (0, "date-too-far")
+        else:
+            d_diff = 7
+        # Bank ledger guard — never link across different bank ledgers when both set
+        bnk_a = (a.get("bank_ledger") or "").lower()
+        bnk_b = (b.get("bank_ledger") or "").lower()
+        if bnk_a and bnk_b and bnk_a != bnk_b:
+            return (0, "bank-mismatch")
+        # Tokens
+        toks_a = a.get("_tokens") or set()
+        toks_b = b.get("_tokens") or set()
+        common = toks_a & toks_b
+        # Reference exact / substring overlap
+        ref_a = (a.get("reference") or "").lower()
+        ref_b = (b.get("reference") or "").lower()
+        ref_hit = bool(ref_a) and bool(ref_b) and (ref_a in ref_b or ref_b in ref_a)
+        # Party tokens
+        party_a = (a.get("party") or "").lower()
+        party_b = (b.get("party") or "").lower()
+        party_hit = bool(party_a) and bool(party_b) and any(
+            t for t in party_a.split() if len(t) > 3 and t in party_b
+        )
+        # Score: longer common tokens > shorter; same-day > week-old; same-bank bonus
+        score = 0
+        if common:
+            # Reward by longest common token; UTR-length (16) is much stronger than 10
+            longest = max(len(t) for t in common)
+            score += 100 + longest * 2 + len(common) * 5
+        if ref_hit: score += 80
+        if party_hit: score += 30
+        if bnk_a and bnk_b and bnk_a == bnk_b: score += 20
+        # Date penalty
+        score -= d_diff * 3
+        # Same-bank-day fallback (lowest tier — kicks in when nothing else fires)
+        if score == 0 - d_diff * 3:
+            if bnk_a and bnk_b and bnk_a == bnk_b and d_diff <= 2:
+                score = 40 - d_diff * 3
+        return (score, f"d_diff={d_diff} common={len(common)} ref_hit={ref_hit} party_hit={party_hit} samebank={bnk_a==bnk_b}")
+
+    candidate_pairs = []  # list of (score, a_id, b_id)
+    for amt, group in by_amount.items():
+        if len(group) < 2: continue
+        # All cross-source pairs within the group
+        for i in range(len(group)):
+            for j in range(i+1, len(group)):
+                a, b = group[i], group[j]
+                if a["source"] == b["source"]: continue
+                score, _ = _score_pair(a, b)
+                if score > 0:
+                    candidate_pairs.append((score, str(a["id"]), str(b["id"])))
+
+    # Sort highest-score first. Greedy pick.
+    candidate_pairs.sort(key=lambda x: x[0], reverse=True)
+    used_ids = set()
+    pairs = []
+    for score, a_id, b_id in candidate_pairs:
+        if a_id in used_ids or b_id in used_ids: continue
+        pairs.append((a_id, b_id))
+        used_ids.add(a_id); used_ids.add(b_id)
+
+    for a_id, b_id in pairs:
+        try:
+            cur.execute("""
+                UPDATE bank_transactions SET linked_id = %s, status = 'matched',
+                       updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (b_id, a_id))
+            cur.execute("""
+                UPDATE bank_transactions SET linked_id = %s, status = 'matched',
+                       updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (a_id, b_id))
+            linked += 1
+        except Exception as e:
+            print(f"[link_bank_transactions] {e}")
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"linked_pairs": linked}
+
+
+def list_bank_transactions(company_id=None, company_name=None, source=None, status=None,
+                            from_date=None, to_date=None, q=None, view="per_source",
+                            sort="date_desc", limit=500, offset=0, tally_status=None,
+                            bank_ledger=None):
+    """Return a filtered list of bank_transactions for the active company."""
+    where = []
+    params = []
+    # Sprint 10 — OR-clause fallback so any row that slipped in with
+    # company_id=NULL but a matching company_name is still visible.
+    if company_id and company_name:
+        where.append("(bt.company_id = %s OR (bt.company_id IS NULL AND bt.company_name = %s))")
+        params.extend([company_id, company_name])
+    elif company_id:
+        where.append("(bt.company_id = %s OR bt.company_id IS NULL)")
+        params.append(company_id)
+    elif company_name:
+        where.append("bt.company_name = %s"); params.append(company_name)
+    # Sprint 15 — Bank Reco is strictly bank + cash. Invoices + manual entries
+    # live elsewhere (Vouchers tab). Unconditional floor regardless of any
+    # user filters; the table never returns invoice/manual rows.
+    where.append("bt.source IN ('tally','bank_statement')")
+    if source:
+        where.append("bt.source = %s"); params.append(source)
+    if status:
+        where.append("bt.status = %s"); params.append(status)
+    # Sprint 12 — derived "Tally Status" filter (presets over source/status/linked_id)
+    TS_CLAUSES = {
+        'needs_attention': "bt.status IN ('ai_filled','unmatched')",
+        # "Done" = anything not needing triage. Covers source=tally, status=matched
+        # (Phase 1 deterministic matches without persisted linked_id), status=posted,
+        # and rows with linked_id set. Simpler invariant: not in the needs-attention set.
+        'done':            "bt.status NOT IN ('ai_filled','unmatched')",
+        'ai_ready':        "bt.status='ai_filled'",
+        'needs_review':    "bt.status='unmatched'",
+        'linked':          "bt.linked_id IS NOT NULL",
+        'in_tally':        "bt.source='tally'",
+        'posted':          "bt.status='posted'",
+    }
+    if tally_status and tally_status in TS_CLAUSES:
+        where.append(TS_CLAUSES[tally_status])
+    # Sprint 14 — filter by bank / cash ledger
+    if bank_ledger:
+        where.append("bt.bank_ledger = %s"); params.append(bank_ledger)
+    if from_date:
+        where.append("bt.date >= %s"); params.append(from_date)
+    if to_date:
+        where.append("bt.date <= %s"); params.append(to_date)
+    if q:
+        where.append("(bt.description ILIKE %s OR bt.party ILIKE %s OR bt.reference ILIKE %s)")
+        params += [f"%{q}%", f"%{q}%", f"%{q}%"]
+    if view == "collapsed":
+        # Sprint 22 — Always keep the Tally side of every linked pair (hide the
+        # statement-side duplicate). Tally is the canonical books, so the survivor
+        # row carries authoritative voucher_number, party, head etc. This makes
+        # the collapsed view's "In Tally" count deterministic rather than UUID-random.
+        where.append("(bt.linked_id IS NULL OR bt.source = 'tally')")
+
+    # Sort
+    sort_map = {
+        "date_desc":   "bt.date DESC, bt.created_at DESC",
+        "date_asc":    "bt.date ASC, bt.created_at ASC",
+        "amount_desc": "ABS(bt.amount) DESC, bt.date DESC",
+        "amount_asc":  "ABS(bt.amount) ASC, bt.date DESC",
+        "status":      "bt.status, bt.date DESC",
+        "source":      "bt.source, bt.date DESC",
+    }
+    order_by = sort_map.get(sort, sort_map["date_desc"])
+
+    where_sql = " AND ".join(where) if where else "TRUE"
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute(f"""
+        SELECT bt.*,
+               bsu.original_name AS source_file_name,
+               bsu.file_url AS source_file_url
+        FROM bank_transactions bt
+        LEFT JOIN bank_statement_uploads bsu ON bsu.id = bt.source_file_id
+        WHERE {where_sql}
+        ORDER BY {order_by}
+        LIMIT %s OFFSET %s
+    """, params + [limit, offset])
+    rows = cur.fetchall()
+    cur.execute(f"""
+        SELECT COUNT(*) AS n FROM bank_transactions bt WHERE {where_sql}
+    """, params)
+    total = cur.fetchone()["n"]
+
+    # Sprint 16 — 5-state Tally Status aggregate (matches the column's logic).
+    # Mutually exclusive buckets in the same order the cell evaluates them:
+    #   In Tally  → source='tally'
+    #   Posted    → status='posted'  (and source != 'tally')
+    #   Linked    → linked_id IS NOT NULL  OR  (status='matched' AND source='bank_statement')
+    #               (handles Phase-1 deterministic matches that didn't persist linked_id)
+    #   AI Ready  → status='ai_filled'
+    #   Needs Review → status='unmatched'
+    cur.execute(f"""
+        SELECT
+          SUM(CASE WHEN bt.source='tally' THEN 1 ELSE 0 END) AS in_tally,
+          SUM(CASE WHEN bt.source<>'tally' AND bt.status='posted' THEN 1 ELSE 0 END) AS posted,
+          SUM(CASE WHEN bt.source<>'tally' AND bt.status<>'posted'
+                    AND (bt.linked_id IS NOT NULL
+                         OR (bt.status='matched' AND bt.source='bank_statement'))
+                   THEN 1 ELSE 0 END) AS linked,
+          SUM(CASE WHEN bt.source<>'tally' AND bt.status='ai_filled' THEN 1 ELSE 0 END) AS ai_ready,
+          SUM(CASE WHEN bt.source<>'tally' AND bt.status='unmatched' THEN 1 ELSE 0 END) AS needs_review
+        FROM bank_transactions bt
+        WHERE {where_sql}
+    """, params)
+    s = cur.fetchone() or {}
+    stats = {
+        "in_tally":     int(s.get("in_tally")     or 0),
+        "linked":       int(s.get("linked")       or 0),
+        "ai_ready":     int(s.get("ai_ready")     or 0),
+        "needs_review": int(s.get("needs_review") or 0),
+        "posted":       int(s.get("posted")       or 0),
+    }
+
+    cur.close()
+    conn.close()
+    return {"rows": rows, "total": total, "stats": stats}
+
+
+# ════════════════════════════════════════════════════════════════════
+# SPRINT 26 — AI Gap Scan for tally_vouchers
+# ════════════════════════════════════════════════════════════════════
+
+# Recognised GSTIN shape: 2-digit state code + 10-char PAN + 1 entity + Z + checksum
+_GSTIN_RE = None
+def _gstin_regex():
+    global _GSTIN_RE
+    if _GSTIN_RE is None:
+        import re as _re
+        _GSTIN_RE = _re.compile(r'\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[A-Z\d]{1}Z[A-Z\d]{1}\b')
+    return _GSTIN_RE
+
+
+def _resolve_co(company_id, company_name):
+    """Resolve company_id from company_name if only the latter was given."""
+    if company_id:
+        return company_id
+    if not company_name:
+        return None
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT id FROM companies WHERE name = %s LIMIT 1", (company_name,))
+        r = cur.fetchone()
+        return str(r[0]) if r else None
+    finally:
+        cur.close(); conn.close()
+
+
+def _purge_pending_suggestions(company_name):
+    """Idempotent: remove prior pending proposals so a re-scan doesn't double-write."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM voucher_ai_suggestions WHERE company_name = %s AND status = 'pending'",
+                    (company_name,))
+        n = cur.rowcount
+        conn.commit()
+        return n
+    finally:
+        cur.close(); conn.close()
+
+
+def _insert_suggestions(rows):
+    """Bulk insert. Each row is a dict with keys voucher_id, company_id, company_name,
+    gap_type, field, current_value, suggested_value, confidence, source, rationale,
+    payload, scan_run_id."""
+    if not rows:
+        return 0
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        from psycopg2.extras import execute_values
+        execute_values(cur, """
+            INSERT INTO voucher_ai_suggestions
+                (voucher_id, company_id, company_name, gap_type, field,
+                 current_value, suggested_value, confidence, source,
+                 rationale, payload, scan_run_id)
+            VALUES %s
+        """, [(
+            r["voucher_id"], r.get("company_id"), r["company_name"], r["gap_type"],
+            r.get("field"), r.get("current_value"), r.get("suggested_value"),
+            r.get("confidence") or 0, r.get("source"), r.get("rationale"),
+            json.dumps(r.get("payload") or {}) if r.get("payload") else None,
+            r.get("scan_run_id"),
+        ) for r in rows])
+        conn.commit()
+        return len(rows)
+    finally:
+        cur.close(); conn.close()
+
+
+def _detect_missing_gstin(company_id, company_name, scan_run_id):
+    """For Sales/Purchase vouchers missing party_gstin, propose a fill from
+    (1) tally_ledgers party-name match, (2) peer-voucher consensus from same
+    party that DO have GSTIN, (3) regex extraction from narration."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        # 1) Master ledger GSTIN lookup map: ledger_name -> gstin
+        cur.execute("""
+            SELECT name, gstin FROM tally_ledgers
+            WHERE company_name = %s AND gstin IS NOT NULL AND gstin != ''
+        """, (company_name,))
+        ledger_gstin = {r["name"]: r["gstin"] for r in cur.fetchall() if r["name"]}
+
+        # 2) Peer-voucher consensus: most common GSTIN per party from other vouchers
+        cur.execute("""
+            SELECT ledger_name AS party, party_gstin, COUNT(*) AS n
+            FROM tally_vouchers
+            WHERE company_name = %s AND party_gstin IS NOT NULL AND party_gstin != ''
+            GROUP BY ledger_name, party_gstin
+            ORDER BY ledger_name, n DESC
+        """, (company_name,))
+        peer = {}
+        for r in cur.fetchall():
+            peer.setdefault(r["party"], r["party_gstin"])  # first wins (highest count)
+
+        # 3) Pull missing-GSTIN vouchers (Sales / Purchase only)
+        cur.execute("""
+            SELECT id, ledger_name AS party, narration, voucher_number
+            FROM tally_vouchers
+            WHERE company_name = %s
+              AND voucher_type IN ('Sales','Purchase')
+              AND (party_gstin IS NULL OR party_gstin = '')
+              AND (discarded_at IS NULL)
+        """, (company_name,))
+        gaps = cur.fetchall()
+
+        rx = _gstin_regex()
+        out = []
+        for v in gaps:
+            party = v.get("party") or ""
+            narr  = v.get("narration") or ""
+            sug = None; conf = 0.0; source = None; rationale = None
+            # 1) ledger master
+            if party and party in ledger_gstin:
+                sug = ledger_gstin[party]; conf = 0.95; source = "ledger_master"
+                rationale = f"GSTIN found on '{party}' in Ledger Master."
+            # 2) peer voucher consensus
+            elif party in peer:
+                sug = peer[party]; conf = 0.90; source = "peer_voucher"
+                rationale = f"Same party uses GSTIN {sug} on other vouchers."
+            # 3) regex on narration
+            else:
+                m = rx.search(narr.upper()) if narr else None
+                if m:
+                    sug = m.group(0); conf = 0.75; source = "narration_regex"
+                    rationale = f"GSTIN-shaped token found in narration."
+            if sug:
+                out.append({
+                    "voucher_id": str(v["id"]), "company_id": company_id,
+                    "company_name": company_name, "gap_type": "missing_gstin",
+                    "field": "party_gstin", "current_value": None,
+                    "suggested_value": sug, "confidence": conf,
+                    "source": source, "rationale": rationale,
+                    "scan_run_id": scan_run_id,
+                })
+        return out
+    finally:
+        cur.close(); conn.close()
+
+
+def _detect_duplicates(company_id, company_name, scan_run_id):
+    """For each (voucher_number, ledger_name, amount) group with COUNT>1, pick
+    the keeper = the row with the most populated fields; propose discarding the rest."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        # Identify duplicate groups
+        cur.execute("""
+            SELECT voucher_number, ledger_name, amount,
+                   ARRAY_AGG(id ORDER BY created_at) AS ids
+            FROM tally_vouchers
+            WHERE company_name = %s AND discarded_at IS NULL
+              AND voucher_number IS NOT NULL AND voucher_number != ''
+            GROUP BY voucher_number, ledger_name, amount
+            HAVING COUNT(*) > 1
+        """, (company_name,))
+        groups = cur.fetchall()
+        out = []
+        for g in groups:
+            ids = [str(x) for x in g["ids"]]
+            # Score each candidate by populated-field count to pick a keeper
+            cur.execute("""
+                SELECT id, voucher_number, narration, party_gstin, reference_no,
+                       place_of_supply, taxable_value, cgst_amount, sgst_amount, igst_amount
+                FROM tally_vouchers WHERE id = ANY(%s)
+            """, (ids,))
+            scored = []
+            for row in cur.fetchall():
+                score = sum(1 for k in row.keys() if k != "id" and row[k] not in (None, '', 0))
+                scored.append((score, str(row["id"])))
+            scored.sort(reverse=True)
+            keeper = scored[0][1]
+            siblings = [vid for _, vid in scored[1:]]
+            # One suggestion per duplicate sibling (the row that should be discarded)
+            for sib in siblings:
+                out.append({
+                    "voucher_id": sib, "company_id": company_id,
+                    "company_name": company_name, "gap_type": "duplicate",
+                    "field": "discarded_at", "current_value": None,
+                    "suggested_value": "now()",
+                    "confidence": 0.88,
+                    "source": "duplicate_pair",
+                    "rationale": f"Duplicate of voucher {g['voucher_number']} (keeper: {keeper[:8]}…). Same number, party, amount.",
+                    "payload": {"keeper_voucher_id": keeper, "sibling_voucher_ids": siblings, "group_size": len(ids)},
+                    "scan_run_id": scan_run_id,
+                })
+        return out
+    finally:
+        cur.close(); conn.close()
+
+
+def _detect_unbalanced(company_id, company_name, scan_run_id):
+    """Vouchers whose ledger_entries SUM(debit) != SUM(credit) within ±0.01.
+    Surface for review — no auto-fix value (user must edit)."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT id, voucher_number, ledger_entries
+            FROM tally_vouchers
+            WHERE company_name = %s AND discarded_at IS NULL
+              AND ledger_entries IS NOT NULL
+              AND jsonb_array_length(COALESCE(ledger_entries::jsonb, '[]'::jsonb)) > 0
+        """, (company_name,))
+        out = []
+        for v in cur.fetchall():
+            entries = v["ledger_entries"]
+            if isinstance(entries, str):
+                try: entries = json.loads(entries)
+                except: entries = []
+            if not entries: continue
+            dr = 0.0; cr = 0.0
+            for e in entries:
+                amt = float(e.get("amount") or 0)
+                is_debit = e.get("is_debit")
+                if is_debit is True:
+                    dr += abs(amt)
+                elif is_debit is False:
+                    cr += abs(amt)
+                elif amt < 0:
+                    cr += abs(amt)
+                else:
+                    dr += amt
+            diff = round(dr - cr, 2)
+            if abs(diff) > 0.01:
+                out.append({
+                    "voucher_id": str(v["id"]), "company_id": company_id,
+                    "company_name": company_name, "gap_type": "unbalanced",
+                    "field": "ledger_entries", "current_value": f"Dr ₹{dr:.2f} / Cr ₹{cr:.2f}",
+                    "suggested_value": None,
+                    "confidence": 1.0,
+                    "source": "computed",
+                    "rationale": f"Voucher {v['voucher_number']}: Dr {dr:.2f}, Cr {cr:.2f}, diff {diff:+.2f}.",
+                    "payload": {"dr_total": dr, "cr_total": cr, "diff": diff},
+                    "scan_run_id": scan_run_id,
+                })
+        return out
+    finally:
+        cur.close(); conn.close()
+
+
+def _detect_missing_head_and_narration(company_id, company_name, scan_run_id):
+    """Vouchers missing narration; propose a 1-line summary from voucher_type + party + amount.
+    'Missing head' for now is just flagged if no non-bank/non-cash counter-leg exists in
+    ledger_entries — surfaces for human review (we don't auto-guess the head ledger)."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT id, voucher_number, voucher_type, ledger_name AS party, amount, narration, ledger_entries
+            FROM tally_vouchers
+            WHERE company_name = %s AND discarded_at IS NULL
+              AND (narration IS NULL OR narration = '')
+            LIMIT 5000
+        """, (company_name,))
+        out = []
+        for v in cur.fetchall():
+            vt = v.get("voucher_type") or "Voucher"
+            party = v.get("party") or ""
+            amt = float(v.get("amount") or 0)
+            sug = f"{vt} of ₹{abs(amt):,.2f}" + (f" to {party}" if party else "")
+            out.append({
+                "voucher_id": str(v["id"]), "company_id": company_id,
+                "company_name": company_name, "gap_type": "missing_narration",
+                "field": "narration", "current_value": None,
+                "suggested_value": sug, "confidence": 0.60,
+                "source": "template",
+                "rationale": "Voucher had no narration; generated a 1-line summary from voucher_type + party + amount.",
+                "scan_run_id": scan_run_id,
+            })
+        return out
+    finally:
+        cur.close(); conn.close()
+
+
+def run_voucher_ai_scan(company_id, company_name, gap_types=None):
+    """Dispatcher. Clears prior pending suggestions for the company and re-runs
+    the requested detectors. Returns {run_id, totals: {gap_type → count}}."""
+    if not company_name:
+        return {"error": "company_name required"}
+    company_id = _resolve_co(company_id, company_name)
+    purged = _purge_pending_suggestions(company_name)
+    run_id = str(uuid.uuid4())
+    detectors = {
+        "missing_gstin":     _detect_missing_gstin,
+        "duplicate":         _detect_duplicates,
+        "unbalanced":        _detect_unbalanced,
+        "missing_narration": _detect_missing_head_and_narration,
+    }
+    if gap_types:
+        detectors = {k: v for k, v in detectors.items() if k in gap_types}
+    totals = {}
+    all_rows = []
+    for gt, fn in detectors.items():
+        try:
+            rows = fn(company_id, company_name, run_id)
+            totals[gt] = len(rows)
+            all_rows.extend(rows)
+        except Exception as e:
+            print(f"[ai_scan] detector {gt} failed: {e}", flush=True)
+            totals[gt] = 0
+    _insert_suggestions(all_rows)
+    return {"run_id": run_id, "totals": totals, "purged_pending": purged,
+            "company_id": company_id, "company_name": company_name}
+
+
+def list_ai_suggestions(company_name, gap_type=None, status="pending", limit=10000):
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        where = ["s.company_name = %s", "s.status = %s"]
+        params = [company_name, status]
+        if gap_type:
+            where.append("s.gap_type = %s"); params.append(gap_type)
+        cur.execute(f"""
+            SELECT s.id, s.voucher_id, s.gap_type, s.field, s.current_value,
+                   s.suggested_value, s.confidence, s.source, s.rationale,
+                   s.payload, s.status, s.created_at,
+                   v.voucher_number, v.voucher_type, v.ledger_name AS party,
+                   v.amount, v.date AS voucher_date, v.party_gstin
+            FROM voucher_ai_suggestions s
+            LEFT JOIN tally_vouchers v ON v.id = s.voucher_id
+            WHERE {' AND '.join(where)}
+            ORDER BY s.confidence DESC, s.created_at DESC
+            LIMIT %s
+        """, params + [limit])
+        return cur.fetchall()
+    finally:
+        cur.close(); conn.close()
+
+
+def ai_suggestion_counts(company_name):
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT gap_type, COUNT(*) FROM voucher_ai_suggestions
+            WHERE company_name = %s AND status = 'pending'
+            GROUP BY gap_type
+        """, (company_name,))
+        return {r[0]: r[1] for r in cur.fetchall()}
+    finally:
+        cur.close(); conn.close()
+
+
+def accept_ai_suggestion(suggestion_id):
+    """Apply the suggested value to the parent tally_voucher and mark accepted."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT id, voucher_id, gap_type, field, suggested_value, payload, status
+            FROM voucher_ai_suggestions WHERE id = %s
+        """, (suggestion_id,))
+        s = cur.fetchone()
+        if not s:
+            return {"ok": False, "message": "Suggestion not found."}
+        if s["status"] != "pending":
+            return {"ok": False, "message": f"Suggestion already {s['status']}."}
+        gt = s["gap_type"]; field = s["field"]; sug = s["suggested_value"]
+        if gt == "duplicate":
+            # Soft-discard this voucher (the sibling, not the keeper).
+            cur.execute("UPDATE tally_vouchers SET discarded_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        (s["voucher_id"],))
+        elif gt == "unbalanced":
+            # No value to write — accept means "I've reviewed, please dismiss".
+            pass
+        elif gt == "missing_gstin" and field == "party_gstin" and sug:
+            cur.execute("UPDATE tally_vouchers SET party_gstin = %s WHERE id = %s",
+                        (sug, s["voucher_id"]))
+        elif gt == "missing_narration" and field == "narration" and sug:
+            cur.execute("UPDATE tally_vouchers SET narration = %s WHERE id = %s",
+                        (sug, s["voucher_id"]))
+        # Mark accepted
+        cur.execute("UPDATE voucher_ai_suggestions SET status='accepted', updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                    (suggestion_id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        cur.close(); conn.close()
+
+
+def reject_ai_suggestion(suggestion_id):
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("UPDATE voucher_ai_suggestions SET status='rejected', updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status='pending'",
+                    (suggestion_id,))
+        conn.commit()
+        return {"ok": cur.rowcount > 0}
+    finally:
+        cur.close(); conn.close()
+
+
+def bulk_accept_ai_suggestions(company_name, gap_type=None, min_confidence=0.0):
+    """Accept all pending suggestions matching the filter. Returns count applied."""
+    rows = list_ai_suggestions(company_name, gap_type=gap_type, status="pending")
+    applied = 0
+    for r in rows:
+        if (r.get("confidence") or 0) < min_confidence:
+            continue
+        res = accept_ai_suggestion(str(r["id"]))
+        if res.get("ok"): applied += 1
+    return {"applied": applied, "scanned": len(rows)}
+
+
+# ════════════════════════════════════════════════════════════════════
+# SPRINT 27 — Master AI Gap Scan (Party + Item)
+# ════════════════════════════════════════════════════════════════════
+
+# Indian state code → name (used to fill `place_of_supply` from GSTIN[0:2])
+_STATE_CODES = {
+    '01':'Jammu and Kashmir','02':'Himachal Pradesh','03':'Punjab','04':'Chandigarh',
+    '05':'Uttarakhand','06':'Haryana','07':'Delhi','08':'Rajasthan','09':'Uttar Pradesh',
+    '10':'Bihar','11':'Sikkim','12':'Arunachal Pradesh','13':'Nagaland','14':'Manipur',
+    '15':'Mizoram','16':'Tripura','17':'Meghalaya','18':'Assam','19':'West Bengal',
+    '20':'Jharkhand','21':'Odisha','22':'Chhattisgarh','23':'Madhya Pradesh','24':'Gujarat',
+    '25':'Daman and Diu','26':'Dadra and Nagar Haveli','27':'Maharashtra','28':'Andhra Pradesh',
+    '29':'Karnataka','30':'Goa','31':'Lakshadweep','32':'Kerala','33':'Tamil Nadu',
+    '34':'Puducherry','35':'Andaman and Nicobar Islands','36':'Telangana','37':'Andhra Pradesh',
+    '38':'Ladakh','97':'Other Territory','99':'Centre Jurisdiction',
+}
+
+# Tiny built-in HSN → GST rate table (top items; extend as needed).
+_HSN_GST_RATES = {
+    '7606': 18.0,   # Aluminium plates, sheets, strip
+    '7607': 18.0,   # Aluminium foil
+    '7308': 18.0,   # Iron / steel structures
+    '7210': 18.0,   # Flat-rolled iron / steel
+    '1006': 5.0,    # Rice
+    '1101': 5.0,    # Wheat flour
+    '2106': 18.0,   # Food preparations nesoi
+    '8443': 18.0,   # Printing machinery
+    '9018': 18.0,   # Medical instruments
+    '4901': 0.0,    # Printed books
+    '4820': 12.0,   # Registers / notebooks
+    '3923': 18.0,   # Plastic articles for packaging
+    '3926': 18.0,   # Other plastic articles
+    '8517': 18.0,   # Telephones / smartphones
+    '6403': 18.0,   # Footwear with leather uppers
+    '6204': 12.0,   # Women's apparel
+    '2202': 28.0,   # Aerated waters / sweetened drinks
+    '0401': 0.0,    # Fresh milk
+    '0813': 12.0,   # Dried fruits
+    '9983': 18.0,   # Other professional services (SAC)
+    '9954': 18.0,   # Construction services (SAC)
+    '9985': 18.0,   # Support services (SAC)
+    '9988': 5.0,    # Manufacturing services on physical inputs owned by others
+    '9971': 18.0,   # Financial / related services
+}
+
+
+def _purge_pending_master_suggestions(company_name, master_type=None):
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        if master_type:
+            cur.execute("""DELETE FROM master_ai_suggestions
+                           WHERE company_name=%s AND master_type=%s AND status='pending'""",
+                        (company_name, master_type))
+        else:
+            cur.execute("""DELETE FROM master_ai_suggestions
+                           WHERE company_name=%s AND status='pending'""", (company_name,))
+        n = cur.rowcount; conn.commit(); return n
+    finally:
+        cur.close(); conn.close()
+
+
+def _insert_master_suggestions(rows):
+    if not rows: return 0
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        from psycopg2.extras import execute_values
+        execute_values(cur, """
+            INSERT INTO master_ai_suggestions
+                (master_type, record_id, company_id, company_name, gap_type, field,
+                 current_value, suggested_value, confidence, source,
+                 rationale, payload, scan_run_id)
+            VALUES %s
+        """, [(
+            r["master_type"], r["record_id"], r.get("company_id"), r["company_name"],
+            r["gap_type"], r.get("field"), r.get("current_value"),
+            r.get("suggested_value"), r.get("confidence") or 0, r.get("source"),
+            r.get("rationale"),
+            json.dumps(r.get("payload") or {}) if r.get("payload") else None,
+            r.get("scan_run_id"),
+        ) for r in rows])
+        conn.commit(); return len(rows)
+    finally:
+        cur.close(); conn.close()
+
+
+def _detect_party_master_gaps(company_id, company_name, scan_run_id):
+    """Detect gaps on party-like tally_ledgers rows (Sundry Debtors/Creditors)."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        # Pull all party-type ledgers
+        cur.execute("""
+            SELECT id, name, gstin, pan, place_of_supply, gst_registration_type, address, parent_group
+            FROM tally_ledgers
+            WHERE company_name = %s
+              AND (parent_group ILIKE '%%sundry%%' OR parent_group ILIKE '%%debtor%%' OR parent_group ILIKE '%%creditor%%')
+        """, (company_name,))
+        parties = cur.fetchall()
+        # Peer-voucher consensus for missing GSTIN
+        cur.execute("""
+            SELECT ledger_name AS party, party_gstin, COUNT(*) AS n
+            FROM tally_vouchers
+            WHERE company_name = %s AND party_gstin IS NOT NULL AND party_gstin != ''
+            GROUP BY ledger_name, party_gstin
+            ORDER BY n DESC
+        """, (company_name,))
+        peer_gstin = {}
+        for r in cur.fetchall():
+            peer_gstin.setdefault(r["party"], r["party_gstin"])
+
+        out = []
+        for p in parties:
+            pid = str(p["id"]); name = p.get("name") or ""
+            gstin = (p.get("gstin") or "").strip().upper() or None
+            pan = (p.get("pan") or "").strip().upper() or None
+            pos = (p.get("place_of_supply") or "").strip() or None
+            regt = (p.get("gst_registration_type") or "").strip() or None
+
+            # 1) Missing GSTIN via peer consensus
+            if not gstin and name in peer_gstin:
+                cand = peer_gstin[name]
+                out.append({
+                    "master_type": "party", "record_id": pid,
+                    "company_id": company_id, "company_name": company_name,
+                    "gap_type": "missing_gstin", "field": "gstin",
+                    "current_value": None, "suggested_value": cand,
+                    "confidence": 0.90, "source": "peer_voucher",
+                    "rationale": f"Other vouchers for '{name}' use GSTIN {cand}.",
+                    "scan_run_id": scan_run_id,
+                })
+                gstin = cand  # downstream derivations use this
+
+            # 2) Missing PAN — derive from GSTIN positions 3-12
+            if not pan and gstin and len(gstin) >= 15:
+                derived_pan = gstin[2:12]
+                out.append({
+                    "master_type": "party", "record_id": pid,
+                    "company_id": company_id, "company_name": company_name,
+                    "gap_type": "missing_pan", "field": "pan",
+                    "current_value": None, "suggested_value": derived_pan,
+                    "confidence": 0.99, "source": "derived_from_gstin",
+                    "rationale": "PAN is embedded in GSTIN positions 3–12.",
+                    "scan_run_id": scan_run_id,
+                })
+
+            # 3) Missing place_of_supply — derive from GSTIN state code
+            if not pos and gstin and len(gstin) >= 2:
+                code = gstin[0:2]
+                state = _STATE_CODES.get(code)
+                if state:
+                    out.append({
+                        "master_type": "party", "record_id": pid,
+                        "company_id": company_id, "company_name": company_name,
+                        "gap_type": "missing_pos", "field": "place_of_supply",
+                        "current_value": None, "suggested_value": state,
+                        "confidence": 0.99, "source": "derived_from_gstin",
+                        "rationale": f"GSTIN state code '{code}' → {state}.",
+                        "scan_run_id": scan_run_id,
+                    })
+
+            # 4) Missing gst_registration_type
+            if not regt:
+                if gstin:
+                    sug = "Regular"; conf = 0.90
+                    rationale = "Party has a GSTIN → Regular registration."
+                else:
+                    sug = "Unregistered"; conf = 0.60
+                    rationale = "No GSTIN on record → likely Unregistered."
+                out.append({
+                    "master_type": "party", "record_id": pid,
+                    "company_id": company_id, "company_name": company_name,
+                    "gap_type": "missing_gst_registration_type", "field": "gst_registration_type",
+                    "current_value": None, "suggested_value": sug,
+                    "confidence": conf, "source": "derived_from_gstin",
+                    "rationale": rationale,
+                    "scan_run_id": scan_run_id,
+                })
+
+            # 5) Missing address (flag only)
+            if not (p.get("address") or "").strip():
+                out.append({
+                    "master_type": "party", "record_id": pid,
+                    "company_id": company_id, "company_name": company_name,
+                    "gap_type": "missing_address", "field": "address",
+                    "current_value": None, "suggested_value": None,
+                    "confidence": 1.0, "source": "computed",
+                    "rationale": "Address is blank — please fill.",
+                    "scan_run_id": scan_run_id,
+                })
+        return out
+    finally:
+        cur.close(); conn.close()
+
+
+def _detect_item_master_gaps(company_id, company_name, scan_run_id):
+    """Detect gaps on tally_stock_items rows. HSN inference via heuristic table;
+    Gemini is a future upgrade — for now we use name-based keyword matches that
+    work for the bulk of common items."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT id, name, hsn_code, gst_rate, unit, standard_rate,
+                   opening_qty, opening_value, parent_group
+            FROM tally_stock_items
+            WHERE company_name = %s
+        """, (company_name,))
+        items = cur.fetchall()
+        out = []
+        # Simple keyword → HSN map for common Indian goods (extend as needed)
+        keyword_hsn = [
+            ('aluminum sheet', '7606'), ('aluminium sheet', '7606'),
+            ('aluminium foil', '7607'), ('aluminum foil', '7607'),
+            ('iron rod', '7214'), ('steel rod', '7214'),
+            ('plastic bag', '3923'), ('packaging', '3923'),
+            ('book', '4901'), ('register', '4820'), ('notebook', '4820'),
+            ('rice', '1006'), ('wheat', '1101'), ('flour', '1101'),
+            ('milk', '0401'), ('biscuit', '1905'),
+            ('shoe', '6403'), ('footwear', '6403'),
+            ('phone', '8517'), ('mobile', '8517'),
+            ('soda', '2202'), ('drink', '2202'),
+            ('professional', '9983'), ('consulting', '9983'),
+            ('construction', '9954'), ('repair', '9985'),
+        ]
+        for it in items:
+            iid = str(it["id"]); name = (it.get("name") or "").lower()
+            hsn = (it.get("hsn_code") or "").strip() or None
+            rate = it.get("gst_rate")
+            unit = (it.get("unit") or "").strip() or None
+            sr = it.get("standard_rate")
+
+            # 1) Missing HSN via keyword heuristic
+            new_hsn = None
+            if not hsn:
+                for kw, code in keyword_hsn:
+                    if kw in name:
+                        new_hsn = code; break
+                if new_hsn:
+                    out.append({
+                        "master_type": "item", "record_id": iid,
+                        "company_id": company_id, "company_name": company_name,
+                        "gap_type": "missing_hsn_code", "field": "hsn_code",
+                        "current_value": None, "suggested_value": new_hsn,
+                        "confidence": 0.75, "source": "keyword_match",
+                        "rationale": f"Item name contains a keyword matching HSN {new_hsn}.",
+                        "scan_run_id": scan_run_id,
+                    })
+
+            # 2) Missing GST rate — derive from (existing OR new) HSN
+            eff_hsn = hsn or new_hsn
+            if (rate is None or rate == 0) and eff_hsn:
+                # Try 4-digit prefix first
+                cand = _HSN_GST_RATES.get(eff_hsn[:4]) if len(eff_hsn) >= 4 else None
+                if cand is None and len(eff_hsn) >= 2:
+                    # No fallback — only return if confident
+                    pass
+                if cand is not None:
+                    out.append({
+                        "master_type": "item", "record_id": iid,
+                        "company_id": company_id, "company_name": company_name,
+                        "gap_type": "missing_gst_rate", "field": "gst_rate",
+                        "current_value": None, "suggested_value": str(cand),
+                        "confidence": 0.95, "source": "hsn_rate_table",
+                        "rationale": f"HSN {eff_hsn[:4]} maps to GST rate {cand}%.",
+                        "scan_run_id": scan_run_id,
+                    })
+
+            # 3) Missing unit
+            if not unit:
+                u = None; conf = 0.5; src = "name_token"
+                if 'sheet' in name: u = 'Sheets'
+                elif 'kg' in name or 'kilo' in name: u = 'Kgs'
+                elif 'ltr' in name or 'litre' in name or 'liter' in name: u = 'Ltrs'
+                elif 'mtr' in name or 'meter' in name or 'metre' in name: u = 'Mtrs'
+                elif 'pc' in name or 'piece' in name: u = 'Pcs'
+                elif 'box' in name: u = 'Box'
+                else: u = 'Nos'; conf = 0.4
+                out.append({
+                    "master_type": "item", "record_id": iid,
+                    "company_id": company_id, "company_name": company_name,
+                    "gap_type": "missing_unit", "field": "unit",
+                    "current_value": None, "suggested_value": u,
+                    "confidence": conf, "source": src,
+                    "rationale": f"Inferred unit from item name.",
+                    "scan_run_id": scan_run_id,
+                })
+
+            # 4) Missing standard_rate — compute from opening_value / opening_qty
+            if (sr is None or sr == 0):
+                ov = float(it.get("opening_value") or 0)
+                oq = float(it.get("opening_qty") or 0)
+                if oq > 0 and ov > 0:
+                    val = round(ov / oq, 2)
+                    out.append({
+                        "master_type": "item", "record_id": iid,
+                        "company_id": company_id, "company_name": company_name,
+                        "gap_type": "missing_standard_rate", "field": "standard_rate",
+                        "current_value": None, "suggested_value": str(val),
+                        "confidence": 0.95, "source": "computed",
+                        "rationale": f"Opening value {ov:.2f} ÷ opening qty {oq:.2f} = {val:.2f}.",
+                        "scan_run_id": scan_run_id,
+                    })
+        return out
+    finally:
+        cur.close(); conn.close()
+
+
+def run_master_ai_scan(company_id, company_name, master_types=None):
+    """Dispatcher — clears prior pending suggestions then runs the requested
+    detectors. Returns {run_id, totals: {gap_type → count}, by_master}."""
+    if not company_name:
+        return {"error": "company_name required"}
+    company_id = _resolve_co(company_id, company_name)
+    types = master_types or ['party', 'item']
+    purged = _purge_pending_master_suggestions(company_name)
+    run_id = str(uuid.uuid4())
+    detectors = []
+    if 'party' in types: detectors.append(('party', _detect_party_master_gaps))
+    if 'item'  in types: detectors.append(('item',  _detect_item_master_gaps))
+    totals = {}; by_master = {}; all_rows = []
+    for label, fn in detectors:
+        try:
+            rows = fn(company_id, company_name, run_id)
+            all_rows.extend(rows)
+            by_master[label] = len(rows)
+            for r in rows:
+                gt = r["gap_type"]; totals[gt] = (totals.get(gt) or 0) + 1
+        except Exception as e:
+            print(f"[master_scan] detector {label} failed: {e}", flush=True)
+            by_master[label] = 0
+    _insert_master_suggestions(all_rows)
+    return {"run_id": run_id, "totals": totals, "by_master": by_master,
+            "purged_pending": purged, "company_id": company_id,
+            "company_name": company_name}
+
+
+def list_master_ai_suggestions(company_name, master_type=None, gap_type=None,
+                                status="pending", limit=20000):
+    """Return suggestions joined with the parent master row for display."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        where = ["s.company_name = %s", "s.status = %s"]
+        params = [company_name, status]
+        if master_type:
+            where.append("s.master_type = %s"); params.append(master_type)
+        if gap_type:
+            where.append("s.gap_type = %s"); params.append(gap_type)
+        cur.execute(f"""
+            SELECT s.id, s.master_type, s.record_id, s.gap_type, s.field,
+                   s.current_value, s.suggested_value, s.confidence, s.source,
+                   s.rationale, s.payload, s.status, s.created_at,
+                   CASE WHEN s.master_type='party' THEN l.name ELSE i.name END AS record_name,
+                   CASE WHEN s.master_type='party' THEN l.parent_group ELSE i.parent_group END AS parent_group
+            FROM master_ai_suggestions s
+            LEFT JOIN tally_ledgers     l ON s.master_type='party' AND l.id = s.record_id
+            LEFT JOIN tally_stock_items i ON s.master_type='item'  AND i.id = s.record_id
+            WHERE {' AND '.join(where)}
+            ORDER BY s.master_type, s.confidence DESC, s.created_at DESC
+            LIMIT %s
+        """, params + [limit])
+        return cur.fetchall()
+    finally:
+        cur.close(); conn.close()
+
+
+def master_ai_suggestion_counts(company_name):
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT master_type, gap_type, COUNT(*) FROM master_ai_suggestions
+            WHERE company_name = %s AND status = 'pending'
+            GROUP BY master_type, gap_type
+        """, (company_name,))
+        out = {"party": {}, "item": {}}
+        for r in cur.fetchall():
+            out[r[0]][r[1]] = r[2]
+        return out
+    finally:
+        cur.close(); conn.close()
+
+
+# Field whitelist per master_type for safe UPDATEs on accept
+_PARTY_UPDATE_FIELDS = {'gstin','pan','place_of_supply','gst_registration_type','address'}
+_ITEM_UPDATE_FIELDS  = {'hsn_code','gst_rate','unit','standard_rate','parent_group'}
+
+def accept_master_ai_suggestion(suggestion_id):
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""SELECT * FROM master_ai_suggestions WHERE id = %s""", (suggestion_id,))
+        s = cur.fetchone()
+        if not s: return {"ok": False, "message": "Suggestion not found."}
+        if s["status"] != "pending": return {"ok": False, "message": f"Already {s['status']}."}
+        mt = s["master_type"]; field = s["field"]; sug = s["suggested_value"]
+        if mt == "party":
+            if field not in _PARTY_UPDATE_FIELDS:
+                return {"ok": False, "message": f"Field {field} not writable for party master."}
+            if sug is None and field != 'address':
+                # No suggested value (e.g., flag-only); accept just dismisses.
+                pass
+            else:
+                cur.execute(f"UPDATE tally_ledgers SET {field} = %s WHERE id = %s",
+                            (sug, s["record_id"]))
+        elif mt == "item":
+            if field not in _ITEM_UPDATE_FIELDS:
+                return {"ok": False, "message": f"Field {field} not writable for item master."}
+            if sug is not None:
+                # Cast numeric where appropriate
+                val = sug
+                if field in ('gst_rate', 'standard_rate'):
+                    try: val = float(sug)
+                    except: pass
+                cur.execute(f"UPDATE tally_stock_items SET {field} = %s WHERE id = %s",
+                            (val, s["record_id"]))
+        cur.execute("""UPDATE master_ai_suggestions SET status='accepted', updated_at=CURRENT_TIMESTAMP
+                       WHERE id = %s""", (suggestion_id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        cur.close(); conn.close()
+
+
+def reject_master_ai_suggestion(suggestion_id):
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""UPDATE master_ai_suggestions SET status='rejected', updated_at=CURRENT_TIMESTAMP
+                       WHERE id=%s AND status='pending'""", (suggestion_id,))
+        conn.commit()
+        return {"ok": cur.rowcount > 0}
+    finally:
+        cur.close(); conn.close()
+
+
+def bulk_accept_master_ai_suggestions(company_name, master_type=None, gap_type=None, min_confidence=0.0):
+    rows = list_master_ai_suggestions(company_name, master_type=master_type, gap_type=gap_type, status="pending")
+    applied = 0
+    for r in rows:
+        if (r.get("confidence") or 0) < min_confidence:
+            continue
+        res = accept_master_ai_suggestion(str(r["id"]))
+        if res.get("ok"): applied += 1
+    return {"applied": applied, "scanned": len(rows)}
+
+
+# ════════════════════════════════════════════════════════════════════
+# SPRINT 28 — Tally outbox: real two-way sync contract with bridge agent
+# ════════════════════════════════════════════════════════════════════
+
+def enqueue_tally_push(payload, invoice_id=None, voucher_id=None,
+                       company_name=None, enqueued_by=None):
+    """Append a row to tally_outbox in state='pending'. The bridge agent
+    polls /api/tally/queue and processes pending rows."""
+    if not payload:
+        return None
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            INSERT INTO tally_outbox (invoice_id, voucher_id, company_name, payload, enqueued_by)
+            VALUES (%s, %s, %s, %s::jsonb, %s)
+            RETURNING id, enqueued_at, state
+        """, (invoice_id, voucher_id, company_name, json.dumps(payload), enqueued_by))
+        row = cur.fetchone()
+        conn.commit()
+        return {"id": str(row["id"]), "state": row["state"], "enqueued_at": row["enqueued_at"]}
+    finally:
+        cur.close(); conn.close()
+
+
+def claim_tally_outbox(company_name, limit=10, agent_id=None):
+    """Bridge agent calls this to atomically grab the next N pending rows
+    and flip them to state='pushing'. Returns the payloads."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            UPDATE tally_outbox
+            SET state = 'pushing', attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP
+            WHERE id IN (
+                SELECT id FROM tally_outbox
+                WHERE company_name = %s AND state = 'pending'
+                ORDER BY enqueued_at ASC
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING id, invoice_id, voucher_id, payload, enqueued_at, attempts
+        """, (company_name, limit))
+        rows = cur.fetchall()
+        conn.commit()
+        for r in rows:
+            r["id"] = str(r["id"])
+            if r.get("invoice_id"): r["invoice_id"] = str(r["invoice_id"])
+            if r.get("voucher_id"): r["voucher_id"] = str(r["voucher_id"])
+        return rows
+    finally:
+        cur.close(); conn.close()
+
+
+def ack_tally_outbox(outbox_id, tally_voucher_guid=None):
+    """Bridge agent confirms a successful push to Tally."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE tally_outbox
+            SET state = 'pushed', tally_voucher_guid = %s,
+                pushed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP,
+                last_error = NULL
+            WHERE id = %s
+        """, (tally_voucher_guid, outbox_id))
+        conn.commit()
+        return {"ok": cur.rowcount > 0}
+    finally:
+        cur.close(); conn.close()
+
+
+def add_tally_cleanup(company_name, voucher_number, voucher_type=None, party=None,
+                      amount=None, voucher_date=None, reason=None):
+    """Sprint 33 — Record a voucher the user must manually delete in Tally Prime."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""INSERT INTO tally_cleanup_log
+            (company_name, voucher_number, voucher_type, party, amount, voucher_date, reason)
+            VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+            (company_name, voucher_number, voucher_type, party, amount,
+             voucher_date if voucher_date else None, reason))
+        rid = cur.fetchone()[0]; conn.commit()
+        return str(rid)
+    finally:
+        cur.close(); conn.close()
+
+
+def list_tally_cleanup(company_name, status=None):
+    """List manual-Tally-cleanup items for a company."""
+    conn = get_conn()
+    from psycopg2.extras import RealDictCursor
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        q = "SELECT * FROM tally_cleanup_log WHERE company_name=%s"
+        p = [company_name]
+        if status:
+            q += " AND status=%s"; p.append(status)
+        q += " ORDER BY created_at DESC"
+        cur.execute(q, p)
+        rows = []
+        for r in cur.fetchall():
+            r["id"] = str(r["id"])
+            for k in ("created_at", "done_at", "voucher_date"):
+                if r.get(k): r[k] = str(r[k])
+            if r.get("amount") is not None: r["amount"] = float(r["amount"])
+            rows.append(r)
+        return rows
+    finally:
+        cur.close(); conn.close()
+
+
+def mark_tally_cleanup_done(cleanup_id, done=True):
+    """Mark a cleanup item done (user deleted it in Tally) or re-open it."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        if done:
+            cur.execute("UPDATE tally_cleanup_log SET status='done', done_at=CURRENT_TIMESTAMP WHERE id=%s", (cleanup_id,))
+        else:
+            cur.execute("UPDATE tally_cleanup_log SET status='pending', done_at=NULL WHERE id=%s", (cleanup_id,))
+        conn.commit()
+        return {"ok": cur.rowcount > 0}
+    finally:
+        cur.close(); conn.close()
+
+
+def fail_tally_outbox(outbox_id, error):
+    """Bridge agent reports a failed push."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE tally_outbox
+            SET state = 'error', last_error = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+        """, (str(error)[:2000], outbox_id))
+        conn.commit()
+        return {"ok": cur.rowcount > 0}
+    finally:
+        cur.close(); conn.close()
+
+
+def upsert_tally_heartbeat(company_name, agent_version=None, ip=None):
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO tally_bridge_heartbeat (company_name, agent_version, ip, last_seen)
+            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (company_name) DO UPDATE
+            SET agent_version = EXCLUDED.agent_version,
+                ip = EXCLUDED.ip,
+                last_seen = CURRENT_TIMESTAMP
+        """, (company_name, agent_version, ip))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        cur.close(); conn.close()
+
+
+def tally_outbox_status_for_invoice(invoice_id):
+    """For the UI to poll: returns the latest outbox state for one invoice."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT id, state, attempts, last_error, tally_voucher_guid,
+                   enqueued_at, pushed_at, updated_at
+            FROM tally_outbox
+            WHERE invoice_id = %s
+            ORDER BY enqueued_at DESC LIMIT 1
+        """, (invoice_id,))
+        return cur.fetchone()
+    finally:
+        cur.close(); conn.close()
+
+
+def tally_status_summary(company_name):
+    """For the UI: agent online?, pending count, errors, last push."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT agent_version, ip, last_seen,
+                   EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - last_seen)) AS seconds_since
+            FROM tally_bridge_heartbeat
+            WHERE company_name = %s
+        """, (company_name,))
+        hb = cur.fetchone() or {}
+        cur.execute("""
+            SELECT state, COUNT(*) AS n FROM tally_outbox
+            WHERE company_name = %s
+            GROUP BY state
+        """, (company_name,))
+        counts = {r["state"]: r["n"] for r in cur.fetchall()}
+        cur.execute("""
+            SELECT MAX(pushed_at) AS last_pushed_at FROM tally_outbox
+            WHERE company_name = %s AND state = 'pushed'
+        """, (company_name,))
+        last_pushed = cur.fetchone()
+        secs = hb.get("seconds_since")
+        # Agent considered "online" if heartbeat within 60s
+        agent_online = bool(secs is not None and secs < 60)
+        return {
+            "agent_online": agent_online,
+            "agent_last_seen": str(hb["last_seen"]) if hb.get("last_seen") else None,
+            "agent_version": hb.get("agent_version"),
+            "seconds_since_seen": float(secs) if secs is not None else None,
+            "pending": int(counts.get("pending", 0)),
+            "pushing": int(counts.get("pushing", 0)),
+            "pushed":  int(counts.get("pushed", 0)),
+            "error":   int(counts.get("error", 0)),
+            "last_pushed_at": str(last_pushed["last_pushed_at"]) if last_pushed and last_pushed.get("last_pushed_at") else None,
+        }
+    finally:
+        cur.close(); conn.close()
+
+
+def update_bank_transaction(tx_id, updates, user_id=None):
+    """Inline-edit one bank_transactions row. updates is a dict of fields → values.
+    Allowed fields: party, head, bank_ledger, voucher_type, status, confidence,
+    rationale, ai_touched, human_touched.
+
+    Sprint 11: if `user_id` is provided (= a human triggered this edit), we
+    automatically set human_touched=TRUE so the "Reconciled By" badge can
+    flip to 🤖+👤 AI+Human. We no longer overwrite `created_by` on edit —
+    the original creator signal is preserved for audit."""
+    allowed = {"party", "head", "bank_ledger", "voucher_type", "status",
+               "confidence", "rationale", "ai_touched", "human_touched"}
+    sets = []
+    params = []
+    for k, v in updates.items():
+        if k in allowed:
+            sets.append(f"{k} = %s")
+            params.append(v)
+    if not sets:
+        return None
+    sets.append("updated_at = CURRENT_TIMESTAMP")
+    if user_id:
+        # Mark this row as human-touched (additive — keeps ai_touched intact)
+        if "human_touched = %s" not in sets:
+            sets.append("human_touched = %s")
+            params.append(True)
+    params.append(tx_id)
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute(f"""
+        UPDATE bank_transactions SET {', '.join(sets)}
+        WHERE id = %s RETURNING *
+    """, params)
+    row = cur.fetchone()
+    conn.commit()
+    cur.close()
+    conn.close()
+    return row
+
+
+def bank_health_check(company_id, company_name):
+    """Compute health metrics for the Bank tab Health Check card.
+
+    Returns:
+      {
+        "closing_balance_match": [{bank_ledger, tally_balance, sum_bank_tx, diff, ok}, ...],
+        "coverage": [{bank_ledger, months_covered: [...], months_missing: [...]}, ...],
+        "duplicates": [{amount, date, reference, sources: [..], ids: [..]}, ...],
+        "orphans_tally": <int>,   # tally_vouchers bank-legs not yet ingested
+        "period_stats": [{month, total, matched, ai_filled, unmatched}, ...],
+        "totals": {total, matched, ai_filled, unmatched}
+      }
+    """
+    out = {
+        "closing_balance_match": [],
+        "coverage": [],
+        "duplicates": [],
+        "orphans_tally": 0,
+        "period_stats": [],
+        "totals": {},
+    }
+    if not company_id:
+        return out
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    # Closing balance check per bank ledger
+    cur.execute("""
+        SELECT l.name AS bank_ledger, l.closing_balance AS tally_balance,
+               COALESCE(SUM(bt.amount), 0) AS sum_bank_tx
+        FROM tally_ledgers l
+        LEFT JOIN bank_transactions bt
+          ON bt.bank_ledger = l.name AND bt.company_id = l.company_id
+              AND bt.source = 'tally'
+        WHERE l.company_id = %s
+          AND (l.parent_group ILIKE '%%bank account%%' OR l.parent_group ILIKE '%%cash%%')
+        GROUP BY l.name, l.closing_balance
+        ORDER BY l.name
+    """, (company_id,))
+    for r in cur.fetchall():
+        tb = float(r["tally_balance"] or 0)
+        sb = float(r["sum_bank_tx"] or 0)
+        out["closing_balance_match"].append({
+            "bank_ledger": r["bank_ledger"],
+            "tally_balance": tb,
+            "sum_bank_tx": sb,
+            "diff": round(tb - sb, 2),
+            "ok": abs(tb - sb) < 1.0,
+        })
+
+    # Coverage — for each bank_ledger inferred from statement uploads
+    cur.execute("""
+        SELECT bank_ledger,
+               array_agg(DISTINCT to_char(period_from, 'YYYY-MM')) AS months,
+               MIN(period_from) AS earliest, MAX(period_to) AS latest
+        FROM bank_statement_uploads
+        WHERE company_id = %s
+        GROUP BY bank_ledger
+    """, (company_id,))
+    for r in cur.fetchall():
+        out["coverage"].append({
+            "bank_ledger": r["bank_ledger"],
+            "months_covered": [m for m in (r["months"] or []) if m],
+            "earliest": str(r["earliest"]) if r["earliest"] else None,
+            "latest": str(r["latest"]) if r["latest"] else None,
+        })
+
+    # Duplicates: same amount+date+ref appearing in DIFFERENT sources but NOT linked
+    cur.execute("""
+        SELECT amount, date, reference,
+               array_agg(DISTINCT source) AS sources,
+               array_agg(id::text) AS ids,
+               COUNT(*) AS cnt
+        FROM bank_transactions
+        WHERE company_id = %s AND linked_id IS NULL
+              AND reference IS NOT NULL AND reference <> ''
+        GROUP BY amount, date, reference
+        HAVING COUNT(*) > 1 AND COUNT(DISTINCT source) > 1
+        LIMIT 50
+    """, (company_id,))
+    for r in cur.fetchall():
+        out["duplicates"].append({
+            "amount": float(r["amount"]),
+            "date": str(r["date"]),
+            "reference": r["reference"],
+            "sources": r["sources"],
+            "ids": r["ids"],
+            "count": r["cnt"],
+        })
+
+    # Orphans: tally bank-leg vouchers not yet in bank_transactions
+    cur.execute("""
+        SELECT COUNT(*) AS n FROM tally_vouchers v
+        WHERE v.company_id = %s
+          AND v.ledger_name IN (
+              SELECT name FROM tally_ledgers
+              WHERE company_id = %s AND parent_group ILIKE '%%bank account%%'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM bank_transactions bt
+              WHERE bt.company_id = v.company_id AND bt.source = 'tally'
+                    AND bt.source_record_id = v.id
+          )
+    """, (company_id, company_id))
+    out["orphans_tally"] = cur.fetchone()["n"]
+
+    # Period stats — last 6 months
+    cur.execute("""
+        SELECT to_char(date_trunc('month', date), 'YYYY-MM') AS month,
+               COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE status = 'matched') AS matched,
+               COUNT(*) FILTER (WHERE status = 'ai_filled') AS ai_filled,
+               COUNT(*) FILTER (WHERE status = 'unmatched') AS unmatched,
+               COUNT(*) FILTER (WHERE status = 'posted') AS posted
+        FROM bank_transactions
+        WHERE company_id = %s
+              AND date >= (CURRENT_DATE - INTERVAL '6 months')
+        GROUP BY 1 ORDER BY 1 DESC
+    """, (company_id,))
+    for r in cur.fetchall():
+        out["period_stats"].append(dict(r))
+
+    # Totals
+    cur.execute("""
+        SELECT COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE status = 'matched') AS matched,
+               COUNT(*) FILTER (WHERE status = 'ai_filled') AS ai_filled,
+               COUNT(*) FILTER (WHERE status = 'unmatched') AS unmatched,
+               COUNT(*) FILTER (WHERE status = 'posted') AS posted
+        FROM bank_transactions WHERE company_id = %s
+    """, (company_id,))
+    out["totals"] = dict(cur.fetchone())
+
+    cur.close()
+    conn.close()
+    return out
+
+
+def list_statement_uploads(company_id):
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT * FROM bank_statement_uploads
+        WHERE company_id = %s ORDER BY uploaded_at DESC
+    """, (company_id,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def get_statement_upload(upload_id):
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT * FROM bank_statement_uploads WHERE id = %s", (upload_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row
+
+
+def log_bank_sync_run(company_id, company_name, run_type, tally_res=None,
+                     invoice_res=None, statement_res=None, link_res=None,
+                     triggered_by=None, notes=None):
+    """Record a single sync attempt for transparency / audit."""
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO bank_sync_runs
+                (company_id, company_name, run_type,
+                 tally_inserted, tally_skipped,
+                 invoices_inserted, statement_inserted, statement_skipped, linked_pairs,
+                 triggered_by, notes)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            company_id, company_name, run_type,
+            (tally_res or {}).get("inserted", 0),
+            (tally_res or {}).get("skipped", 0),
+            (invoice_res or {}).get("inserted", 0),
+            (statement_res or {}).get("inserted", 0),
+            (statement_res or {}).get("skipped_existing", 0),
+            (link_res or {}).get("linked_pairs", 0),
+            triggered_by, notes,
+        ))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[log_bank_sync_run] {e}")
+
+
+def list_bank_sync_runs(company_id, limit=20):
+    if not company_id:
+        return []
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT * FROM bank_sync_runs WHERE company_id = %s
+        ORDER BY ran_at DESC LIMIT %s
+    """, (company_id, limit))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+# ═══════════════════════════════════════════════════════════════
+# Voucher Drafts — upload pipeline + review workflow
+# ═══════════════════════════════════════════════════════════════
+
+def save_voucher_draft(company_id, company_name, parsed_payload, source_file_url=None,
+                        source_file_name=None, source_file_type=None, voucher_type=None,
+                        ai_confidence=None, created_by=None):
+    """Persist an AI-parsed invoice/voucher waiting for review."""
+    conn = get_conn()
+    cur = conn.cursor()
+    new_id = str(uuid.uuid4())
+    cur.execute("""
+        INSERT INTO voucher_drafts
+            (id, company_id, company_name, source_file_url, source_file_name,
+             source_file_type, parsed_payload, voucher_type, ai_confidence, created_by)
+        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+    """, (new_id, company_id, company_name, source_file_url, source_file_name,
+          source_file_type, json.dumps(parsed_payload), voucher_type,
+          ai_confidence, created_by))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return new_id
+
+
+def get_voucher_draft(draft_id):
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT * FROM voucher_drafts WHERE id = %s", (draft_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row
+
+
+def list_voucher_drafts(company_id, status=None, limit=200):
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    if status:
+        cur.execute("""
+            SELECT id, source_file_name, source_file_type, voucher_type, status,
+                   ai_confidence, parsed_payload, reviewed_payload,
+                   created_at, updated_at
+            FROM voucher_drafts
+            WHERE company_id = %s AND status = %s
+            ORDER BY created_at DESC LIMIT %s
+        """, (company_id, status, limit))
+    else:
+        cur.execute("""
+            SELECT id, source_file_name, source_file_type, voucher_type, status,
+                   ai_confidence, parsed_payload, reviewed_payload,
+                   created_at, updated_at
+            FROM voucher_drafts
+            WHERE company_id = %s
+            ORDER BY created_at DESC LIMIT %s
+        """, (company_id, limit))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def update_voucher_draft(draft_id, reviewed_payload=None, voucher_type=None, status=None):
+    sets, params = [], []
+    if reviewed_payload is not None:
+        sets.append("reviewed_payload = %s::jsonb")
+        params.append(json.dumps(reviewed_payload))
+        sets.append("status = 'edited'")
+    if voucher_type is not None:
+        sets.append("voucher_type = %s")
+        params.append(voucher_type)
+    if status is not None:
+        sets.append("status = %s")
+        params.append(status)
+    if not sets:
+        return None
+    sets.append("updated_at = CURRENT_TIMESTAMP")
+    params.append(draft_id)
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute(f"UPDATE voucher_drafts SET {', '.join(sets)} WHERE id = %s RETURNING *", params)
+    row = cur.fetchone()
+    conn.commit()
+    cur.close()
+    conn.close()
+    return row
+
+
+def discard_voucher_draft(draft_id):
+    return update_voucher_draft(draft_id, status='discarded')
+
+
+def post_voucher_from_draft(draft_id):
+    """Take a draft's reviewed_payload (or parsed_payload), insert into
+    tally_vouchers, mark draft 'posted', return the voucher row."""
+    draft = get_voucher_draft(draft_id)
+    if not draft:
+        return {"error": "draft not found"}
+    payload = draft.get("reviewed_payload") or draft.get("parsed_payload") or {}
+    voucher = {
+        "date": payload.get("date") or "",
+        "type": payload.get("voucher_type") or draft.get("voucher_type") or "Purchase",
+        "voucher_type": payload.get("voucher_type") or draft.get("voucher_type") or "Purchase",
+        "party": payload.get("party_name") or payload.get("party") or "",
+        "number": payload.get("invoice_number") or payload.get("voucher_number") or "",
+        "amount": float(payload.get("total_amount") or payload.get("amount") or 0),
+        "narration": payload.get("narration") or payload.get("description") or "",
+        "ledger_entries": payload.get("ledger_entries") or [],
+        "reference_no": payload.get("reference_no") or payload.get("reference") or "",
+        "instrument_number": payload.get("instrument_number") or "",
+        "place_of_supply": payload.get("place_of_supply") or "",
+        "party_gstin": payload.get("party_gstin") or "",
+        "currency": payload.get("currency", "INR"),
+        "taxable_value": float(payload.get("taxable_value") or 0),
+        "cgst_amount": float(payload.get("cgst_amount") or 0),
+        "sgst_amount": float(payload.get("sgst_amount") or 0),
+        "igst_amount": float(payload.get("igst_amount") or 0),
+        "tally_master_id": None,
+    }
+    save_res = save_tally_vouchers(draft["company_name"], [voucher])
+    if save_res.get("upserted"):
+        # Backfill company_id
+        if draft.get("company_id"):
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE tally_vouchers SET company_id = %s
+                WHERE company_name = %s AND company_id IS NULL
+            """, (draft["company_id"], draft["company_name"]))
+            conn.commit()
+            cur.close()
+            conn.close()
+        update_voucher_draft(draft_id, status='posted')
+        return {"status": "posted", "voucher": voucher, "upserted": save_res["upserted"]}
+    return {"status": "error", "message": "save_tally_vouchers did not upsert"}
+
+
+def check_voucher_duplicate(company_name, invoice_number=None, party=None, amount=None, date=None):
+    """Return existing tally_voucher if it looks like the same."""
+    if not company_name:
+        return None
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    where = ["company_name = %s"]
+    params = [company_name]
+    if invoice_number:
+        where.append("voucher_number = %s")
+        params.append(invoice_number)
+    if amount is not None:
+        where.append("ABS(amount - %s) < 0.01")
+        params.append(float(amount))
+    if party:
+        where.append("ledger_name ILIKE %s")
+        params.append(f"%{party}%")
+    if date:
+        where.append("ABS(EXTRACT(EPOCH FROM (date - %s::date))) < 259200")  # ±3 days
+        params.append(date)
+    if len(where) < 3:
+        cur.close()
+        conn.close()
+        return None
+    cur.execute(f"""
+        SELECT id, voucher_number, date, ledger_name, amount, voucher_type
+        FROM tally_vouchers
+        WHERE {' AND '.join(where)}
+        LIMIT 1
+    """, params)
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if row:
+        for k in ("id", "date"):
+            if row.get(k) is not None:
+                row[k] = str(row[k])
+        if row.get("amount") is not None:
+            row["amount"] = float(row["amount"])
+    return row
+
+
+def next_voucher_number(company_name, voucher_type):
+    """Suggest next voucher number e.g. 'SAL-2026-042' by counting existing rows."""
+    if not company_name or not voucher_type:
+        return None
+    type_prefix = {
+        "Sales": "SAL", "Purchase": "PUR", "Payment": "PAY",
+        "Receipt": "REC", "Journal": "JNL", "Contra": "CON",
+    }.get(voucher_type, voucher_type[:3].upper())
+    from datetime import date as _d
+    fy_year = _d.today().year
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT COUNT(*) FROM tally_vouchers
+        WHERE company_name = %s AND voucher_type = %s
+              AND EXTRACT(YEAR FROM date) = %s
+    """, (company_name, voucher_type, fy_year))
+    n = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+    return f"{type_prefix}-{fy_year}-{n + 1:03d}"
+
+
+def lookup_party_by_gstin(gstin, company_id=None, company_name=None):
+    """Look up an existing ledger by GSTIN. Falls back to checking tally_vouchers
+    party_gstin if no direct match in tally_ledgers."""
+    if not gstin:
+        return None
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    # Try tally_ledgers first (most reliable)
+    if company_id:
+        cur.execute("""
+            SELECT name, parent_group, NULL AS context
+            FROM tally_ledgers
+            WHERE company_id = %s AND gstin = %s LIMIT 1
+        """, (company_id, gstin))
+    else:
+        cur.execute("""
+            SELECT name, parent_group, NULL AS context
+            FROM tally_ledgers
+            WHERE company_name = %s AND gstin = %s LIMIT 1
+        """, (company_name,) if company_name else (None,))
+    row = cur.fetchone()
+    if not row:
+        # Fallback: tally_vouchers party_gstin
+        if company_name:
+            cur.execute("""
+                SELECT ledger_name AS name, NULL AS parent_group, 'voucher' AS context
+                FROM tally_vouchers
+                WHERE company_name = %s AND party_gstin = %s
+                LIMIT 1
+            """, (company_name, gstin))
+            row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row
+
+
+def autocomplete_parties(company_id, q, limit=10):
+    """Autocomplete query for party dropdown — sundry creditors/debtors matching q."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    if company_id:
+        cur.execute("""
+            SELECT name, parent_group, gstin, closing_balance
+            FROM tally_ledgers
+            WHERE company_id = %s
+                  AND (parent_group ILIKE '%%sundry%%' OR parent_group ILIKE '%%debtor%%' OR parent_group ILIKE '%%creditor%%')
+                  AND name ILIKE %s
+            ORDER BY name LIMIT %s
+        """, (company_id, f"%{q or ''}%", limit))
+    else:
+        cur.execute("""
+            SELECT name, parent_group, gstin, closing_balance
+            FROM tally_ledgers
+            WHERE (parent_group ILIKE '%%sundry%%' OR parent_group ILIKE '%%debtor%%' OR parent_group ILIKE '%%creditor%%')
+                  AND name ILIKE %s
+            ORDER BY name LIMIT %s
+        """, (f"%{q or ''}%", limit))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+# ═══════════════════════════════════════════════════════════════
+# SPRINT 4 — GSTR Reconciliation helpers
+# ═══════════════════════════════════════════════════════════════
+
+def save_gstr_filing(company_id, company_name, period, return_type,
+                     source_file_url=None, source_file_name=None, sha256_hex=None,
+                     payload=None, uploaded_by=None):
+    """Insert a GSTR filing record. Returns the new id."""
+    conn = get_conn()
+    cur = conn.cursor()
+    new_id = str(uuid.uuid4())
+    cur.execute("""
+        INSERT INTO gstr_filings
+            (id, company_id, company_name, period, return_type,
+             source_file_url, source_file_name, sha256, payload, uploaded_by)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+    """, (new_id, company_id, company_name, period, return_type,
+          source_file_url, source_file_name, sha256_hex,
+          json.dumps(payload or {}), uploaded_by))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return new_id
+
+
+def match_gstr_against_vouchers(filing_id, company_id, company_name, portal_rows):
+    """For each portal row from a GSTR-2A/2B upload, find the best matching
+    purchase voucher in tally_vouchers and insert a gstr_reco_lines row.
+    portal_rows: list of dicts with keys (invoice_number, party_name, gstin,
+                                          invoice_date, amount, taxable, cgst, sgst, igst)
+    Returns counts: {matched, only_portal, only_books, mismatch}
+    """
+    if not company_name:
+        return {"matched": 0, "only_portal": 0, "only_books": 0, "mismatch": 0}
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    # Pull candidate purchase vouchers
+    cur.execute("""
+        SELECT id, voucher_number, date, ledger_name, amount, party_gstin,
+               taxable_value, cgst_amount, sgst_amount, igst_amount
+        FROM tally_vouchers
+        WHERE company_name = %s AND voucher_type = 'Purchase'
+    """, (company_name,))
+    voucher_rows = cur.fetchall()
+    # Index by (lower(voucher_number), round(amount)) for fast match
+    idx_by_num = {}
+    idx_by_amount = {}
+    for v in voucher_rows:
+        vn = (v.get("voucher_number") or "").strip().lower()
+        if vn:
+            idx_by_num.setdefault(vn, []).append(v)
+        amt = round(abs(float(v.get("amount") or 0)), 2)
+        idx_by_amount.setdefault(amt, []).append(v)
+
+    matched = 0
+    only_portal = 0
+    only_books = 0
+    mismatch = 0
+    matched_voucher_ids = set()
+
+    for p in portal_rows:
+        portal_num = (p.get("invoice_number") or "").strip().lower()
+        portal_amt = round(abs(float(p.get("amount") or p.get("invoice_value") or 0)), 2)
+
+        match = None
+        if portal_num and portal_num in idx_by_num:
+            for cand in idx_by_num[portal_num]:
+                if abs(round(abs(float(cand["amount"] or 0)), 2) - portal_amt) < 0.01:
+                    match = cand; break
+        if not match and portal_amt in idx_by_amount:
+            # amount match only — weaker
+            cands = idx_by_amount[portal_amt]
+            if len(cands) == 1:
+                match = cands[0]
+
+        if match:
+            matched += 1
+            matched_voucher_ids.add(str(match["id"]))
+            # Detect mismatch on tax fields
+            diff = {}
+            for k in ("taxable_value", "cgst_amount", "sgst_amount", "igst_amount"):
+                portal_v = float(p.get(k) or p.get(k.replace("_amount", "")) or 0)
+                book_v = float(match.get(k) or 0)
+                if abs(portal_v - book_v) > 1.0:
+                    diff[k] = {"portal": portal_v, "books": book_v}
+            status = "matched" if not diff else "mismatch"
+            if diff: mismatch += 1
+            cur.execute("""
+                INSERT INTO gstr_reco_lines
+                    (filing_id, company_id, portal_row, matched_voucher_id, match_status, match_diff, itc_eligible)
+                VALUES (%s, %s, %s::jsonb, %s, %s, %s::jsonb, %s)
+            """, (filing_id, company_id, json.dumps(p), str(match["id"]),
+                  status, json.dumps(diff), True))
+        else:
+            only_portal += 1
+            cur.execute("""
+                INSERT INTO gstr_reco_lines
+                    (filing_id, company_id, portal_row, match_status, itc_eligible)
+                VALUES (%s, %s, %s::jsonb, %s, %s)
+            """, (filing_id, company_id, json.dumps(p), "only_portal", False))
+
+    # Vouchers in books not matched to any portal row
+    for v in voucher_rows:
+        if str(v["id"]) not in matched_voucher_ids:
+            only_books += 1
+            cur.execute("""
+                INSERT INTO gstr_reco_lines
+                    (filing_id, company_id, portal_row, matched_voucher_id, match_status, itc_eligible)
+                VALUES (%s, %s, %s::jsonb, %s, %s, %s)
+            """, (filing_id, company_id,
+                  json.dumps({"voucher_number": v["voucher_number"],
+                              "party": v["ledger_name"],
+                              "amount": float(v["amount"] or 0)}),
+                  str(v["id"]), "only_books", None))
+
+    # Update filing match_summary
+    summary = {"matched": matched, "only_portal": only_portal,
+               "only_books": only_books, "mismatch": mismatch}
+    cur.execute("UPDATE gstr_filings SET match_summary = %s::jsonb, status = 'reconciled', updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (json.dumps(summary), filing_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return summary
+
+
+def list_gstr_filings(company_id, return_type=None, period=None, limit=50):
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    where = ["company_id = %s"]
+    params = [company_id]
+    if return_type:
+        where.append("return_type = %s"); params.append(return_type)
+    if period:
+        where.append("period = %s"); params.append(period)
+    cur.execute(f"""
+        SELECT id, period, return_type, source_file_name, status,
+               match_summary, created_at
+        FROM gstr_filings WHERE {' AND '.join(where)}
+        ORDER BY created_at DESC LIMIT %s
+    """, params + [limit])
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    return rows
+
+
+def get_gstr_filing_lines(filing_id, status=None, limit=500):
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    where = ["filing_id = %s"]
+    params = [filing_id]
+    if status:
+        where.append("match_status = %s"); params.append(status)
+    cur.execute(f"""
+        SELECT id, portal_row, matched_voucher_id, match_status, match_diff,
+               itc_eligible, rationale
+        FROM gstr_reco_lines WHERE {' AND '.join(where)}
+        ORDER BY match_status, id LIMIT %s
+    """, params + [limit])
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    return rows
+
+
+def update_gstr_reco_line(line_id, updates):
+    allowed = {"match_status", "itc_eligible", "rationale", "matched_voucher_id"}
+    sets, params = [], []
+    for k, v in updates.items():
+        if k in allowed:
+            sets.append(f"{k} = %s")
+            params.append(v)
+    if not sets:
+        return None
+    params.append(line_id)
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute(f"UPDATE gstr_reco_lines SET {', '.join(sets)} WHERE id = %s RETURNING *", params)
+    row = cur.fetchone()
+    conn.commit()
+    cur.close(); conn.close()
+    return row
+
+
+def itc_comparison(company_id, company_name, from_period, to_period):
+    """For each month in range, return claimed (from GSTR-3B) vs claimable (from GSTR-2B)."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    # Claimable from 2A/2B reco rows
+    cur.execute("""
+        SELECT period,
+               COALESCE(SUM((portal_row->>'cgst_amount')::numeric), 0) AS cgst_claimable,
+               COALESCE(SUM((portal_row->>'sgst_amount')::numeric), 0) AS sgst_claimable,
+               COALESCE(SUM((portal_row->>'igst_amount')::numeric), 0) AS igst_claimable
+        FROM gstr_filings f
+        LEFT JOIN gstr_reco_lines l ON l.filing_id = f.id AND l.itc_eligible = TRUE
+        WHERE f.company_id = %s AND f.return_type IN ('GSTR-2A','GSTR-2B')
+              AND f.period BETWEEN %s AND %s
+        GROUP BY period ORDER BY period
+    """, (company_id, from_period, to_period))
+    claimable = {r["period"]: r for r in cur.fetchall()}
+
+    # Claimed from tally purchase vouchers
+    cur.execute("""
+        SELECT TO_CHAR(date, 'YYYY-MM') AS period,
+               COALESCE(SUM(cgst_amount), 0) AS cgst_claimed,
+               COALESCE(SUM(sgst_amount), 0) AS sgst_claimed,
+               COALESCE(SUM(igst_amount), 0) AS igst_claimed
+        FROM tally_vouchers
+        WHERE company_name = %s AND voucher_type = 'Purchase'
+              AND TO_CHAR(date, 'YYYY-MM') BETWEEN %s AND %s
+        GROUP BY period ORDER BY period
+    """, (company_name, from_period, to_period))
+    claimed = {r["period"]: r for r in cur.fetchall()}
+    cur.close(); conn.close()
+
+    periods = sorted(set(list(claimable.keys()) + list(claimed.keys())))
+    out = []
+    for p in periods:
+        c = claimable.get(p, {})
+        b = claimed.get(p, {})
+        out.append({
+            "period": p,
+            "cgst_claimable": float(c.get("cgst_claimable") or 0),
+            "cgst_claimed":   float(b.get("cgst_claimed") or 0),
+            "sgst_claimable": float(c.get("sgst_claimable") or 0),
+            "sgst_claimed":   float(b.get("sgst_claimed") or 0),
+            "igst_claimable": float(c.get("igst_claimable") or 0),
+            "igst_claimed":   float(b.get("igst_claimed") or 0),
+        })
+    return out
+
+
+def gstr1_vs_3b_variance(company_name, period):
+    """Compare GSTR-1 outward supplies vs GSTR-3B reported sales for a period.
+    For now both come from tally_vouchers Sales — they should agree."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT COALESCE(SUM(taxable_value), 0) AS taxable,
+               COALESCE(SUM(cgst_amount), 0) AS cgst,
+               COALESCE(SUM(sgst_amount), 0) AS sgst,
+               COALESCE(SUM(igst_amount), 0) AS igst,
+               COUNT(*) AS n
+        FROM tally_vouchers
+        WHERE company_name = %s AND voucher_type = 'Sales'
+              AND TO_CHAR(date, 'YYYY-MM') = %s
+    """, (company_name, period))
+    r = cur.fetchone() or {}
+    cur.close(); conn.close()
+    return {
+        "period": period,
+        "gstr1": {k: float(r.get(k) or 0) for k in ("taxable","cgst","sgst","igst")} | {"count": r.get("n",0)},
+        "gstr3b": {k: float(r.get(k) or 0) for k in ("taxable","cgst","sgst","igst")} | {"count": r.get("n",0)},
+        "variance": {k: 0.0 for k in ("taxable","cgst","sgst","igst")},
+        "note": "Both GSTR-1 and GSTR-3B currently derived from same tally_vouchers Sales. Variance appears when GSTR-3B JSON is filed separately (future).",
+    }
+
+
+def gstr9_aggregate(company_name, fy):
+    """Aggregate 12 months of GSTR-1 + 3B data for annual GSTR-9.
+    fy format: '2025-26' meaning Apr-2025 to Mar-2026."""
+    try:
+        start_year = int(fy.split("-")[0])
+    except Exception:
+        return {"error": "invalid fy"}
+    periods = [f"{start_year}-{m:02d}" for m in range(4, 13)] + [f"{start_year+1}-{m:02d}" for m in range(1, 4)]
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT TO_CHAR(date, 'YYYY-MM') AS period,
+               voucher_type,
+               COALESCE(SUM(taxable_value), 0) AS taxable,
+               COALESCE(SUM(cgst_amount), 0) AS cgst,
+               COALESCE(SUM(sgst_amount), 0) AS sgst,
+               COALESCE(SUM(igst_amount), 0) AS igst,
+               COUNT(*) AS n
+        FROM tally_vouchers
+        WHERE company_name = %s
+              AND TO_CHAR(date, 'YYYY-MM') = ANY(%s)
+              AND voucher_type IN ('Sales', 'Purchase')
+        GROUP BY period, voucher_type ORDER BY period, voucher_type
+    """, (company_name, periods))
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    sales_total = {"taxable":0,"cgst":0,"sgst":0,"igst":0,"count":0}
+    purchase_total = {"taxable":0,"cgst":0,"sgst":0,"igst":0,"count":0}
+    per_month = {}
+    for r in rows:
+        t = r["voucher_type"]
+        for k in ("taxable","cgst","sgst","igst"):
+            v = float(r.get(k) or 0)
+            if t == "Sales": sales_total[k] += v
+            elif t == "Purchase": purchase_total[k] += v
+        if t == "Sales": sales_total["count"] += r.get("n",0)
+        elif t == "Purchase": purchase_total["count"] += r.get("n",0)
+        per_month.setdefault(r["period"], {})[t] = {k: float(r.get(k) or 0) for k in ("taxable","cgst","sgst","igst")}
+    return {"fy": fy, "sales": sales_total, "purchase": purchase_total, "per_month": per_month}
+
+
+def invoice_serial_gaps(company_name, voucher_type="Sales"):
+    """Detect gaps in voucher number sequence for a type."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT voucher_number, date FROM tally_vouchers
+        WHERE company_name = %s AND voucher_type = %s
+              AND voucher_number IS NOT NULL AND voucher_number <> ''
+        ORDER BY voucher_number
+    """, (company_name, voucher_type))
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    # Group by prefix, detect gaps in numeric suffix
+    import re as _re
+    groups = {}
+    for r in rows:
+        m = _re.match(r"^(.*?)(\d+)$", r["voucher_number"] or "")
+        if not m: continue
+        prefix, suffix = m.group(1), int(m.group(2))
+        groups.setdefault(prefix, []).append(suffix)
+    gaps = []
+    for prefix, nums in groups.items():
+        nums.sort()
+        for i in range(1, len(nums)):
+            if nums[i] - nums[i-1] > 1:
+                for missing in range(nums[i-1]+1, nums[i]):
+                    gaps.append({"prefix": prefix, "missing_number": missing,
+                                  "missing_voucher_id": f"{prefix}{missing:03d}",
+                                  "between": [f"{prefix}{nums[i-1]:03d}", f"{prefix}{nums[i]:03d}"]})
+    return gaps
+
+
+def hsn_summary(company_name, period):
+    """Aggregate by HSN for the period."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT hsn_code,
+               COUNT(*) AS items,
+               COALESCE(SUM(closing_value), 0) AS total_value
+        FROM tally_stock_items
+        WHERE company_name = %s AND hsn_code IS NOT NULL AND hsn_code <> ''
+        GROUP BY hsn_code ORDER BY total_value DESC
+    """, (company_name,))
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    return [{"hsn_code": r["hsn_code"], "items": r["items"], "total_value": float(r["total_value"] or 0)} for r in rows]
+
+
+# ═══════════════════════════════════════════════════════════════
+# SPRINT 5 — Filing deadlines + audit checks
+# ═══════════════════════════════════════════════════════════════
+
+def seed_filing_deadlines_for_fy(fy, company_id=None):
+    """Seed all due dates for a fiscal year. Idempotent via UNIQUE INDEX."""
+    try:
+        start_year = int(fy.split("-")[0])
+    except Exception:
+        return {"error": "invalid fy"}
+    from datetime import date as _d
+    deadlines = []
+    for m in range(4, 16):
+        year = start_year if m <= 12 else start_year + 1
+        month = m if m <= 12 else m - 12
+        period = f"{year}-{month:02d}"
+        # GSTR-1: 11th of next month
+        nxt_year = year + (1 if month == 12 else 0)
+        nxt_month = 1 if month == 12 else month + 1
+        deadlines.append(("GSTR-1", period, _d(nxt_year, nxt_month, 11), f"GSTR-1 for {period}"))
+        # GSTR-3B: 20th of next month
+        deadlines.append(("GSTR-3B", period, _d(nxt_year, nxt_month, 20), f"GSTR-3B for {period}"))
+    # TDS quarterly: Q1 → 31-Jul-Y, Q2 → 31-Oct, Q3 → 31-Jan-(Y+1), Q4 → 31-May-(Y+1)
+    deadlines.extend([
+        ("TDS-24Q-26Q", "Q1", _d(start_year, 7, 31), "TDS quarterly return (Q1: Apr-Jun)"),
+        ("TDS-24Q-26Q", "Q2", _d(start_year, 10, 31), "TDS quarterly return (Q2: Jul-Sep)"),
+        ("TDS-24Q-26Q", "Q3", _d(start_year + 1, 1, 31), "TDS quarterly return (Q3: Oct-Dec)"),
+        ("TDS-24Q-26Q", "Q4", _d(start_year + 1, 5, 31), "TDS quarterly return (Q4: Jan-Mar)"),
+        # Advance tax quarterly
+        ("ADVANCE-TAX", "Q1", _d(start_year, 6, 15), "Advance Tax — 15% by 15-Jun"),
+        ("ADVANCE-TAX", "Q2", _d(start_year, 9, 15), "Advance Tax — cumulative 45% by 15-Sep"),
+        ("ADVANCE-TAX", "Q3", _d(start_year, 12, 15), "Advance Tax — cumulative 75% by 15-Dec"),
+        ("ADVANCE-TAX", "Q4", _d(start_year + 1, 3, 15), "Advance Tax — 100% by 15-Mar"),
+        # GSTR-9 & ITR
+        ("GSTR-9", fy, _d(start_year + 1, 12, 31), f"GSTR-9 Annual return for FY {fy}"),
+        ("ITR-4", fy, _d(start_year + 1, 7, 31), f"ITR-4 for FY {fy}"),
+    ])
+
+    conn = get_conn()
+    cur = conn.cursor()
+    inserted = 0
+    skipped = 0
+    for ftype, period, due, desc in deadlines:
+        try:
+            cur.execute("SAVEPOINT fdsp")
+            cur.execute("""
+                INSERT INTO filing_deadlines (company_id, filing_type, period, due_date, description, fy)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (company_id, ftype, period, due, desc, fy))
+            cur.execute("RELEASE SAVEPOINT fdsp")
+            inserted += 1
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT fdsp")
+            skipped += 1
+    conn.commit()
+    cur.close(); conn.close()
+    return {"inserted": inserted, "skipped": skipped}
+
+
+def list_filing_deadlines(company_id, from_date=None, to_date=None):
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    where = ["(company_id = %s OR company_id IS NULL)"]
+    params = [company_id]
+    if from_date:
+        where.append("due_date >= %s"); params.append(from_date)
+    if to_date:
+        where.append("due_date <= %s"); params.append(to_date)
+    cur.execute(f"""
+        SELECT id, filing_type, period, due_date, description, fy
+        FROM filing_deadlines WHERE {' AND '.join(where)}
+        ORDER BY due_date
+    """, params)
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    for r in rows:
+        r["id"] = str(r["id"])
+        r["due_date"] = str(r["due_date"])
+    return rows
+
+
+def run_audit_checks(company_id, company_name):
+    """Run a subset of the 38 CA audit checks. Each returns
+    {check_id, category, name, status, count, message}.
+    v1 implements the most data-driven 12 checks; rest return 'pending' placeholders."""
+    if not company_id or not company_name:
+        return []
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    out = []
+
+    # 1. Suspense aging
+    try:
+        cur.execute("""
+            SELECT COUNT(*) AS n FROM tally_vouchers
+            WHERE company_name = %s AND ledger_name ILIKE '%%suspense%%'
+                  AND date < (CURRENT_DATE - INTERVAL '30 days')
+        """, (company_name,))
+        n = (cur.fetchone() or {}).get("n", 0)
+        out.append({"check_id": "suspense_aging", "category": "Reconciliation",
+                    "name": "Suspense > 30 days", "status": "pass" if n == 0 else "warn",
+                    "count": n, "message": f"{n} suspense entries older than 30 days" if n else "No stale suspense entries"})
+    except Exception as e:
+        out.append({"check_id": "suspense_aging", "category": "Reconciliation",
+                    "name": "Suspense > 30 days", "status": "skip", "count": 0, "message": str(e)})
+
+    # 2. Cash never negative
+    try:
+        cur.execute("""
+            WITH daily AS (
+                SELECT date,
+                       SUM(CASE WHEN voucher_type = 'Receipt' AND ledger_name ILIKE '%%cash%%' THEN amount
+                                WHEN voucher_type = 'Payment' AND ledger_name ILIKE '%%cash%%' THEN -amount
+                                ELSE 0 END) AS net
+                FROM tally_vouchers
+                WHERE company_name = %s
+                GROUP BY date
+            ),
+            cumul AS (
+                SELECT date, SUM(net) OVER (ORDER BY date) AS running FROM daily
+            )
+            SELECT COUNT(*) AS n FROM cumul WHERE running < 0
+        """, (company_name,))
+        n = (cur.fetchone() or {}).get("n", 0)
+        out.append({"check_id": "cash_non_negative", "category": "Balance Sheet",
+                    "name": "Cash never negative", "status": "pass" if n == 0 else "fail",
+                    "count": n, "message": "Cash balance stays ≥ 0" if n == 0 else f"{n} days where cash went negative"})
+    except Exception:
+        pass
+
+    # 3. Sales/Purchase missing GSTIN
+    try:
+        cur.execute("""
+            SELECT COUNT(*) AS n FROM tally_vouchers
+            WHERE company_name = %s AND voucher_type IN ('Sales', 'Purchase')
+                  AND (party_gstin IS NULL OR party_gstin = '')
+        """, (company_name,))
+        n = (cur.fetchone() or {}).get("n", 0)
+        out.append({"check_id": "missing_gstin", "category": "GST",
+                    "name": "Sales/Purchase missing GSTIN", "status": "pass" if n == 0 else "warn",
+                    "count": n, "message": f"{n} vouchers missing party GSTIN" if n else "All Sales/Purchase have GSTIN"})
+    except Exception: pass
+
+    # 4. Invoice serial gaps (Sales)
+    try:
+        gaps = invoice_serial_gaps(company_name, "Sales")
+        n = len(gaps)
+        out.append({"check_id": "invoice_serial_gaps_sales", "category": "GST",
+                    "name": "Sales invoice serial gaps", "status": "pass" if n == 0 else "warn",
+                    "count": n, "message": f"{n} gaps in Sales voucher numbering" if n else "Sales serial numbering is continuous"})
+    except Exception: pass
+
+    # 5. Debtor with credit balance (advance received)
+    try:
+        cur.execute("""
+            SELECT COUNT(*) AS n FROM tally_ledgers
+            WHERE company_id = %s AND parent_group ILIKE '%%sundry debtor%%'
+                  AND closing_balance < 0
+        """, (company_id,))
+        n = (cur.fetchone() or {}).get("n", 0)
+        out.append({"check_id": "debtor_credit_balance", "category": "Balance Sheet",
+                    "name": "Debtor with credit balance", "status": "pass" if n == 0 else "warn",
+                    "count": n, "message": f"{n} debtors with credit balance (advance received)" if n else "Clean"})
+    except Exception: pass
+
+    # 6. Creditor with debit balance (advance paid)
+    try:
+        cur.execute("""
+            SELECT COUNT(*) AS n FROM tally_ledgers
+            WHERE company_id = %s AND parent_group ILIKE '%%sundry creditor%%'
+                  AND closing_balance > 0
+        """, (company_id,))
+        n = (cur.fetchone() or {}).get("n", 0)
+        out.append({"check_id": "creditor_debit_balance", "category": "Balance Sheet",
+                    "name": "Creditor with debit balance", "status": "pass" if n == 0 else "warn",
+                    "count": n, "message": f"{n} creditors with debit balance (advance paid)" if n else "Clean"})
+    except Exception: pass
+
+    # 7. Bank balance match (uses bank_transactions sum vs ledger closing)
+    try:
+        cur.execute("""
+            SELECT l.name AS bank, l.closing_balance AS tally_bal,
+                   COALESCE(SUM(bt.amount), 0) AS bt_sum
+            FROM tally_ledgers l
+            LEFT JOIN bank_transactions bt ON bt.bank_ledger = l.name AND bt.company_id = l.company_id AND bt.source='tally'
+            WHERE l.company_id = %s AND l.parent_group ILIKE '%%bank account%%'
+            GROUP BY l.name, l.closing_balance
+        """, (company_id,))
+        mismatches = [r for r in cur.fetchall() if abs(float(r["tally_bal"] or 0) - float(r["bt_sum"] or 0)) > 1.0]
+        n = len(mismatches)
+        out.append({"check_id": "bank_balance_match", "category": "Reconciliation",
+                    "name": "Bank balance matches Tally", "status": "pass" if n == 0 else "fail",
+                    "count": n, "message": f"{n} bank ledgers don't reconcile" if n else "All bank balances match"})
+    except Exception: pass
+
+    # 8. Loans without secured/unsecured classification
+    try:
+        cur.execute("""
+            SELECT COUNT(*) AS n FROM tally_ledgers
+            WHERE company_id = %s AND parent_group ILIKE '%%loan%%'
+                  AND (parent_group NOT ILIKE '%%secured%%' AND parent_group NOT ILIKE '%%unsecured%%')
+        """, (company_id,))
+        n = (cur.fetchone() or {}).get("n", 0)
+        out.append({"check_id": "loans_classified", "category": "Balance Sheet",
+                    "name": "Loans classified secured/unsecured", "status": "pass" if n == 0 else "warn",
+                    "count": n, "message": f"{n} loan ledgers not classified" if n else "All loans classified"})
+    except Exception: pass
+
+    # 9. GSTR drafts pending
+    try:
+        cur.execute("SELECT COUNT(*) AS n FROM voucher_drafts WHERE company_id = %s AND status = 'ready_for_review'", (company_id,))
+        n = (cur.fetchone() or {}).get("n", 0)
+        out.append({"check_id": "voucher_drafts_pending", "category": "Workflow",
+                    "name": "Voucher drafts pending review", "status": "pass" if n == 0 else "warn",
+                    "count": n, "message": f"{n} drafts awaiting review"})
+    except Exception: pass
+
+    # 10. Sensitive ledgers count
+    try:
+        cur.execute("SELECT COUNT(*) AS n FROM tally_ledgers WHERE company_id = %s AND is_sensitive = TRUE", (company_id,))
+        n = (cur.fetchone() or {}).get("n", 0)
+        out.append({"check_id": "sensitive_ledgers", "category": "Audit",
+                    "name": "Sensitive ledgers flagged", "status": "pass", "count": n,
+                    "message": f"{n} sensitive ledgers under watch"})
+    except Exception: pass
+
+    # 11. GSTR filings status
+    try:
+        cur.execute("SELECT COUNT(*) AS n FROM gstr_filings WHERE company_id = %s", (company_id,))
+        n = (cur.fetchone() or {}).get("n", 0)
+        out.append({"check_id": "gstr_filings_uploaded", "category": "GST",
+                    "name": "GSTR filings uploaded", "status": "pass" if n > 0 else "warn",
+                    "count": n, "message": f"{n} GSTR filings recorded" if n else "No GSTR filings uploaded yet"})
+    except Exception: pass
+
+    # 12. TDS deductions recorded
+    try:
+        cur.execute("SELECT COUNT(*) AS n FROM tds_deductions WHERE company_id = %s", (company_id,))
+        n = (cur.fetchone() or {}).get("n", 0)
+        out.append({"check_id": "tds_deductions_recorded", "category": "TDS",
+                    "name": "TDS deductions recorded", "status": "pass" if n > 0 else "warn",
+                    "count": n, "message": f"{n} TDS entries recorded" if n else "No TDS entries yet"})
+    except Exception: pass
+
+    # Placeholders for the remaining 26 checks
+    placeholder_checks = [
+        ("opening_balance", "Balance Sheet", "Opening balance carry-forward"),
+        ("creditor_payments_traced", "Reconciliation", "Creditor payments via bank"),
+        ("debtor_receipts_traced", "Reconciliation", "Debtor receipts via bank"),
+        ("tds_rates_correct", "TDS", "TDS rates by section"),
+        ("gstr1_completeness", "GST", "GSTR-1 sales completeness"),
+        ("credit_notes_in_gstr1", "GST", "Credit notes in GSTR-1"),
+        ("reverse_charge", "GST", "Reverse charge tagging"),
+        ("gstr1_vs_3b", "GST", "GSTR-1 vs GSTR-3B variance"),
+        ("2a_vs_2b", "GST", "GSTR-2A vs 2B mismatch"),
+        ("gstr9_carry_forward", "GST", "GSTR-9 ITC carry-forward"),
+        ("fixed_asset_depreciation", "Fixed Assets", "Depreciation calculation"),
+        ("tds_payment_timely", "TDS", "TDS payment timeliness"),
+        ("aadhaar_pan_linked", "TDS", "Aadhaar-PAN linked"),
+        ("tds_on_gst", "TDS", "TDS on GST recorded"),
+        ("turnover_consistency", "GST", "Turnover GST/3B/Books"),
+        ("26as_match", "TDS", "Form 26AS reconciled"),
+        ("gst_dashboard_vs_books", "GST", "GST dashboard vs books"),
+        ("refund_split", "Income Tax", "Refund interest/principal split"),
+        ("provision_for_tax", "Income Tax", "Provision for tax"),
+        ("itc_comparison_sheet", "GST", "ITC comparison sheet"),
+        ("gst_on_advance", "GST", "GST on advance received"),
+        ("lut_for_exports", "GST", "LUT for exports"),
+        ("ineligible_itc", "GST", "Ineligible ITC tracked"),
+        ("audit_applicability", "Audit", "Audit applicability (5% cash)"),
+        ("secured_loan_closing", "Balance Sheet", "Secured loan closing balance"),
+        ("input_not_submitted", "GST", "Input not submitted by parties"),
+    ]
+    for cid, cat, name in placeholder_checks:
+        out.append({"check_id": cid, "category": cat, "name": name,
+                    "status": "pending", "count": 0,
+                    "message": "Will be implemented in upcoming sprint"})
+
+    cur.close(); conn.close()
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════
+# SPRINT 6 — TDS helpers
+# ═══════════════════════════════════════════════════════════════
+
+def list_tds_sections():
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT * FROM tds_sections WHERE is_active = TRUE ORDER BY code")
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    for r in rows:
+        for k in ("rate_individual", "rate_company", "threshold", "annual_threshold"):
+            if r.get(k) is not None: r[k] = float(r[k])
+    return rows
+
+
+def suggest_tds_for_voucher(voucher_payload, party_ledger=None):
+    """Given a voucher payload, suggest applicable TDS section.
+    voucher_payload: {voucher_type, party_name, total_amount, ...}
+    party_ledger: dict from tally_ledgers if available (has parent_group)
+    Returns: {section, rate, tds_amount, rationale} or None.
+    """
+    vtype = (voucher_payload.get("voucher_type") or "").lower()
+    amount = float(voucher_payload.get("total_amount") or voucher_payload.get("amount") or 0)
+    if vtype not in ("payment", "purchase") or amount <= 0:
+        return None
+    pg = (party_ledger or {}).get("parent_group", "") if party_ledger else ""
+    pg_lower = pg.lower()
+    # Heuristic mapping
+    if "rent" in pg_lower and amount >= 240000:
+        return {"section": "194I", "rate": 10.0, "tds_amount": round(amount * 0.10, 2),
+                "rationale": "Rent payment ≥ ₹2,40,000 → 194I @ 10%"}
+    if any(k in pg_lower for k in ("professional", "consultancy", "legal", "audit fees")) and amount >= 30000:
+        return {"section": "194J", "rate": 10.0, "tds_amount": round(amount * 0.10, 2),
+                "rationale": "Professional/technical service ≥ ₹30,000 → 194J @ 10%"}
+    if "commission" in pg_lower and amount >= 15000:
+        return {"section": "194H", "rate": 5.0, "tds_amount": round(amount * 0.05, 2),
+                "rationale": "Commission/brokerage ≥ ₹15,000 → 194H @ 5%"}
+    if any(k in pg_lower for k in ("contract", "transport", "freight")) and amount >= 30000:
+        return {"section": "194C", "rate": 1.0, "tds_amount": round(amount * 0.01, 2),
+                "rationale": "Contract payment ≥ ₹30,000 → 194C @ 1% (individual) / 2% (company)"}
+    return None
+
+
+def save_tds_deduction(company_id, company_name, voucher_id, party_name, section,
+                       gross_amount, tds_amount, rate_applied, deduction_date,
+                       fy, quarter, party_pan=None, created_by=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    new_id = str(uuid.uuid4())
+    cur.execute("""
+        INSERT INTO tds_deductions
+            (id, company_id, company_name, voucher_id, party_name, party_pan,
+             section, gross_amount, tds_amount, rate_applied, deduction_date,
+             fy, quarter, created_by)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (new_id, company_id, company_name, voucher_id, party_name, party_pan,
+          section, gross_amount, tds_amount, rate_applied, deduction_date,
+          fy, quarter, created_by))
+    conn.commit()
+    cur.close(); conn.close()
+    return new_id
+
+
+def list_tds_deductions(company_id, fy=None, quarter=None, section=None, limit=500):
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    where = ["company_id = %s"]
+    params = [company_id]
+    if fy:
+        where.append("fy = %s"); params.append(fy)
+    if quarter:
+        where.append("quarter = %s"); params.append(quarter)
+    if section:
+        where.append("section = %s"); params.append(section)
+    cur.execute(f"""
+        SELECT id, party_name, party_pan, section, gross_amount, tds_amount,
+               rate_applied, deduction_date, challan_number, deposited,
+               quarter, fy, return_filed
+        FROM tds_deductions WHERE {' AND '.join(where)}
+        ORDER BY deduction_date DESC LIMIT %s
+    """, params + [limit])
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    for r in rows:
+        r["id"] = str(r["id"])
+        for k in ("gross_amount", "tds_amount", "rate_applied"):
+            if r.get(k) is not None: r[k] = float(r[k])
+        if r.get("deduction_date"): r["deduction_date"] = str(r["deduction_date"])
+    return rows
+
+
+def tds_quarterly_summary(company_id, fy):
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT quarter,
+               COUNT(*) AS deductee_count,
+               COALESCE(SUM(tds_amount), 0) AS total_tds,
+               COUNT(*) FILTER (WHERE deposited = TRUE) AS deposited_count,
+               COUNT(*) FILTER (WHERE return_filed = TRUE) AS filed_count
+        FROM tds_deductions
+        WHERE company_id = %s AND fy = %s
+        GROUP BY quarter ORDER BY quarter
+    """, (company_id, fy))
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    for r in rows:
+        if r.get("total_tds") is not None: r["total_tds"] = float(r["total_tds"])
+    return rows
+
 
 def save_tally_vouchers(company_name, vouchers):
     """
@@ -853,16 +4740,16 @@ def save_tally_vouchers(company_name, vouchers):
                          narration, ledger_entries, reference_no, place_of_supply,
                          party_gstin, currency, cost_centres, bill_refs,
                          taxable_value, cgst_amount, sgst_amount, igst_amount,
-                         tally_master_id, raw_xml, updated_at)
+                         tally_master_id, raw_xml, created_by, updated_at)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,FALSE,
-                            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
+                            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
                 """, (
                     str(uuid.uuid4()), v_date, v_num, party, amount, v_type,
                     instrument_number, company_name,
                     narration, json.dumps(ledger_entries), reference_no, place_of_supply,
                     party_gstin, currency, json.dumps(cost_centres), json.dumps(bill_refs),
                     taxable_value, cgst_amount, sgst_amount, igst_amount,
-                    tally_master_id, raw_xml
+                    tally_master_id, raw_xml, v.get("created_by")
                 ))
             upserted += 1
         conn.commit()
@@ -1803,6 +5690,385 @@ def seed_builtin_recon_templates():
         except Exception as e:
             print(f"  ⚠️ Failed to seed template {fname}: {e}")
     return count
+
+# =============================================================================
+# MULTI-TENANT HELPERS (Phase A)
+# =============================================================================
+
+ROLE_PERMISSIONS = {
+    'super_admin':        ['*'],
+    'firm_owner':         ['view', 'create', 'edit', 'delete', 'finalize', 'export', 'reconcile_draft', 'manage_users', 'manage_billing'],
+    'firm_manager':       ['view', 'create', 'edit', 'delete', 'finalize', 'export', 'reconcile_draft'],
+    'firm_accountant':    ['view', 'create', 'edit', 'finalize', 'export', 'reconcile_draft'],
+    'firm_junior':        ['view', 'create', 'edit', 'reconcile_draft'],
+    'company_owner':      ['view', 'create', 'edit', 'delete', 'finalize', 'export', 'reconcile_draft', 'manage_users', 'manage_billing'],
+    'company_accountant': ['view', 'create', 'edit', 'finalize', 'export', 'reconcile_draft'],
+    'company_viewer':     ['view'],
+}
+
+# Map short role (owner/manager/accountant/junior/viewer) + org type -> full role key for permission lookup
+def _full_role_key(short_role, org_type):
+    """Convert ('owner','firm') -> 'firm_owner'."""
+    if short_role == 'super_admin':
+        return 'super_admin'
+    prefix = 'firm' if org_type == 'firm' else 'company'
+    # company-side doesn't have 'manager' or 'junior' in our matrix; map gracefully
+    if org_type == 'company' and short_role in ('manager', 'junior'):
+        short_role = 'accountant'
+    return f"{prefix}_{short_role}"
+
+
+def get_user_memberships(user_id):
+    """Return all memberships for a user, including org + companies list per membership."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT m.id AS membership_id, m.role, m.scope_company_ids,
+               o.id AS org_id, o.name AS org_name, o.type AS org_type, o.plan
+        FROM memberships m
+        JOIN organizations o ON m.org_id = o.id
+        WHERE m.user_id = %s AND o.archived_at IS NULL
+        ORDER BY m.joined_at ASC
+    """, (user_id,))
+    rows = cur.fetchall()
+    # Attach companies per org
+    for r in rows:
+        cur.execute("""
+            SELECT id, name, gstin, state_code, is_primary
+            FROM companies WHERE org_id = %s AND archived_at IS NULL
+            ORDER BY is_primary DESC, name ASC
+        """, (r['org_id'],))
+        r['companies'] = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def user_can(user_id, permission, company_id=None):
+    """Check if a user has a specific permission, optionally scoped to a company."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        # Super admin shortcut
+        cur.execute("SELECT is_super_admin FROM users WHERE id = %s", (user_id,))
+        u = cur.fetchone()
+        if u and u['is_super_admin']:
+            return True
+
+        if company_id:
+            # Find membership in the org that owns this company
+            cur.execute("""
+                SELECT m.role, m.scope_company_ids, o.type AS org_type
+                FROM memberships m
+                JOIN organizations o ON m.org_id = o.id
+                JOIN companies c ON c.org_id = o.id
+                WHERE m.user_id = %s AND c.id = %s
+            """, (user_id, company_id))
+            row = cur.fetchone()
+            if not row:
+                return False
+            # Check scope_company_ids
+            scope = row['scope_company_ids']
+            if scope is not None and isinstance(scope, list) and len(scope) > 0:
+                if str(company_id) not in [str(s) for s in scope]:
+                    return False
+            full_key = _full_role_key(row['role'], row['org_type'])
+        else:
+            # No company scope — just need ANY membership granting this perm
+            cur.execute("""
+                SELECT m.role, o.type AS org_type
+                FROM memberships m JOIN organizations o ON m.org_id = o.id
+                WHERE m.user_id = %s
+            """, (user_id,))
+            rows = cur.fetchall()
+            for r in rows:
+                full_key = _full_role_key(r['role'], r['org_type'])
+                perms = ROLE_PERMISSIONS.get(full_key, [])
+                if '*' in perms or permission in perms:
+                    return True
+            return False
+
+        perms = ROLE_PERMISSIONS.get(full_key, [])
+        return '*' in perms or permission in perms
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_companies_for_user(user_id):
+    """Return all companies the user has any access to (across all memberships)."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT DISTINCT c.id, c.name, c.gstin, c.org_id, o.name AS org_name, o.type AS org_type
+        FROM companies c
+        JOIN memberships m ON m.org_id = c.org_id
+        JOIN organizations o ON o.id = c.org_id
+        WHERE m.user_id = %s AND c.archived_at IS NULL AND o.archived_at IS NULL
+          AND (
+            m.scope_company_ids IS NULL
+            OR (jsonb_typeof(m.scope_company_ids) = 'array' AND m.scope_company_ids::text = '[]')
+            OR (m.scope_company_ids @> to_jsonb(c.id::text))
+          )
+        ORDER BY o.name, c.name
+    """, (user_id,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def create_organization(name, org_type, owner_user_id, gstin=None, plan='free'):
+    """Create a new organization (firm or company)."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        INSERT INTO organizations (name, type, gstin, plan, created_by_user_id)
+        VALUES (%s, %s, %s, %s, %s) RETURNING id
+    """, (name, org_type, gstin, plan, owner_user_id))
+    new_id = cur.fetchone()['id']
+    conn.commit()
+    cur.close()
+    conn.close()
+    return new_id
+
+
+def create_company(org_id, name, gstin=None, state_code=None, is_primary=False, client_owner_user_id=None):
+    """Create a company under an organization."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        INSERT INTO companies (org_id, name, gstin, state_code, is_primary, client_owner_user_id)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (org_id, name) DO UPDATE SET gstin = COALESCE(EXCLUDED.gstin, companies.gstin)
+        RETURNING id
+    """, (org_id, name, gstin, state_code, is_primary, client_owner_user_id))
+    new_id = cur.fetchone()['id']
+    conn.commit()
+    cur.close()
+    conn.close()
+    return new_id
+
+
+def create_membership(user_id, org_id, role, scope_company_ids=None, invited_by=None):
+    """Add a user to an org with a role."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    scope_json = json.dumps([str(s) for s in scope_company_ids]) if scope_company_ids else None
+    cur.execute("""
+        INSERT INTO memberships (user_id, org_id, role, scope_company_ids, invited_by)
+        VALUES (%s, %s, %s, %s::jsonb, %s)
+        ON CONFLICT (user_id, org_id) DO UPDATE SET role = EXCLUDED.role
+        RETURNING id
+    """, (user_id, org_id, role, scope_json, invited_by))
+    new_id = cur.fetchone()['id']
+    conn.commit()
+    cur.close()
+    conn.close()
+    return new_id
+
+
+def get_company_by_name_and_org(org_id, name):
+    """Resolve a company by (org_id, name) -> company row, or None."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT * FROM companies WHERE org_id = %s AND name = %s", (org_id, name))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row
+
+
+def embed_tally_master(company_id, company_name, embed_fn, batch_log=None):
+    """Embed Tally master data (ledgers, parties, vouchers, stock items) into knowledge_base
+    so RAG / semantic search can recall them later.
+
+    embed_fn(text) -> list[float] -- caller supplies the embedder (e.g. server.get_embedding)
+    so we don't take a hard dependency on the Gemini SDK in db.py.
+
+    Idempotent: skips rows whose (type, kb_key) is already embedded for this company.
+    Returns counts dict.
+    """
+    if not embed_fn:
+        return {"skipped_no_embed_fn": True}
+
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    def _already(kb_type, kb_key):
+        cur.execute("""
+            SELECT 1 FROM knowledge_base
+            WHERE type = %s AND data->>'company_name' = %s AND data->>'kb_key' = %s
+            LIMIT 1
+        """, (kb_type, company_name, kb_key))
+        return cur.fetchone() is not None
+
+    def _insert(kb_type, kb_key, text_for_embed, payload_dict):
+        try:
+            emb = embed_fn(text_for_embed)
+        except Exception as e:
+            print(f"[embed_tally_master] embed error for {kb_type} {kb_key}: {e}")
+            return False
+        if not emb:
+            return False
+        emb_str = "[" + ",".join(map(str, emb)) + "]"
+        payload_dict = dict(payload_dict)
+        payload_dict["company_name"] = company_name
+        payload_dict["company_id"] = str(company_id) if company_id else None
+        payload_dict["kb_key"] = kb_key
+        cur.execute(
+            "INSERT INTO knowledge_base (type, data, embedding) VALUES (%s, %s::jsonb, %s)",
+            (kb_type, json.dumps(payload_dict), emb_str),
+        )
+        return True
+
+    counts = {"ledgers": 0, "parties": 0, "narrations": 0, "stock_items": 0, "skipped": 0}
+
+    # 1. Ledgers
+    cur.execute("""
+        SELECT name, parent_group, COALESCE(gstin,'') AS gstin,
+               COALESCE(pan,'') AS pan, COALESCE(address,'') AS address,
+               COALESCE(ledger_type,'') AS ledger_type,
+               closing_balance
+        FROM tally_ledgers
+        WHERE company_id = %s OR (company_id IS NULL AND company_name = %s)
+    """, (company_id, company_name))
+    for r in cur.fetchall():
+        key = f"ledger::{r['name']}"
+        if _already("tally_master_ledger", key):
+            counts["skipped"] += 1
+            continue
+        text = (
+            f"Ledger '{r['name']}' under group '{r['parent_group'] or 'Unknown'}'. "
+            f"Type: {r['ledger_type'] or 'general'}. "
+            f"GSTIN: {r['gstin'] or 'n/a'}. PAN: {r['pan'] or 'n/a'}. "
+            f"Closing balance: {r['closing_balance']}. "
+            f"Address: {r['address'] or 'n/a'}."
+        )
+        if _insert("tally_master_ledger", key, text, {
+            "name": r["name"],
+            "parent_group": r["parent_group"],
+            "gstin": r["gstin"],
+            "pan": r["pan"],
+            "ledger_type": r["ledger_type"],
+        }):
+            counts["ledgers"] += 1
+            if batch_log: batch_log(f"  embedded ledger: {r['name']}")
+
+    # 2. Unique parties (from voucher.ledger_name — that's where PARTYLEDGERNAME lands)
+    cur.execute("""
+        SELECT ledger_name AS party, COUNT(*) AS n,
+               array_agg(DISTINCT voucher_type) AS vtypes
+        FROM tally_vouchers
+        WHERE (company_id = %s OR (company_id IS NULL AND company_name = %s))
+          AND ledger_name IS NOT NULL AND ledger_name != ''
+        GROUP BY ledger_name
+    """, (company_id, company_name))
+    for r in cur.fetchall():
+        key = f"party::{r['party']}"
+        if _already("tally_master_party", key):
+            counts["skipped"] += 1
+            continue
+        vtypes = ", ".join([v for v in (r["vtypes"] or []) if v]) or "various"
+        text = (
+            f"Party '{r['party']}' has {r['n']} historical transactions in {vtypes}."
+        )
+        if _insert("tally_master_party", key, text, {
+            "party": r["party"],
+            "transaction_count": r["n"],
+            "voucher_types": [v for v in (r["vtypes"] or []) if v],
+        }):
+            counts["parties"] += 1
+
+    # 3. Voucher narrations (only meaningful ones — >10 chars)
+    cur.execute("""
+        SELECT id, date, voucher_type, voucher_number, ledger_name AS party,
+               amount, narration
+        FROM tally_vouchers
+        WHERE (company_id = %s OR (company_id IS NULL AND company_name = %s))
+          AND narration IS NOT NULL AND LENGTH(narration) > 10
+        LIMIT 1000
+    """, (company_id, company_name))
+    for r in cur.fetchall():
+        key = f"narration::{r['id']}"
+        if _already("tally_master_narration", key):
+            counts["skipped"] += 1
+            continue
+        text = (
+            f"Voucher {r['date']} {r['voucher_type'] or ''} #{r['voucher_number'] or ''} "
+            f"for {r['party'] or 'n/a'} amount ₹{r['amount']}. "
+            f"Narration: {r['narration']}"
+        )
+        if _insert("tally_master_narration", key, text, {
+            "voucher_id": str(r["id"]),
+            "date": str(r["date"]),
+            "voucher_type": r["voucher_type"],
+            "voucher_number": r["voucher_number"],
+            "party": r["party"],
+            "amount": float(r["amount"] or 0),
+        }):
+            counts["narrations"] += 1
+
+    # 4. Stock items
+    cur.execute("""
+        SELECT name, parent_group, unit, hsn_code, gst_rate, closing_qty, closing_value
+        FROM tally_stock_items
+        WHERE company_id = %s OR (company_id IS NULL AND company_name = %s)
+    """, (company_id, company_name))
+    for r in cur.fetchall():
+        key = f"stockitem::{r['name']}"
+        if _already("tally_master_item", key):
+            counts["skipped"] += 1
+            continue
+        text = (
+            f"Stock item '{r['name']}' under '{r['parent_group'] or 'Primary'}'. "
+            f"HSN {r['hsn_code'] or 'n/a'}, GST {r['gst_rate'] or 'n/a'}%, "
+            f"unit {r['unit'] or 'unit'}, "
+            f"closing qty {r['closing_qty'] or 0}, value ₹{r['closing_value'] or 0}."
+        )
+        if _insert("tally_master_item", key, text, {
+            "name": r["name"],
+            "hsn_code": r["hsn_code"],
+            "gst_rate": float(r["gst_rate"] or 0),
+            "unit": r["unit"],
+        }):
+            counts["stock_items"] += 1
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    return counts
+
+
+def mark_sensitive_ledgers(company_id=None):
+    """Auto-flag tally ledgers whose name OR parent_group matches sensitive patterns.
+    Catches partner capital accounts that don't have 'capital' in the ledger name itself
+    (e.g. 'Charan Kaur' under parent_group 'Capital Account').
+    Returns count flagged.
+    """
+    pattern = r'salary|drawings|partner.*capital|owner.*equity|loan.*director|cash.*hand|capital account|proprietor|directors.*remuneration'
+    conn = get_conn()
+    cur = conn.cursor()
+    where_clause = """
+        (LOWER(COALESCE(name,'')) ~ %s OR LOWER(COALESCE(parent_group,'')) ~ %s)
+        AND is_sensitive = FALSE
+    """
+    if company_id:
+        cur.execute(
+            "UPDATE tally_ledgers SET is_sensitive = TRUE WHERE company_id = %s AND " + where_clause,
+            (company_id, pattern, pattern),
+        )
+    else:
+        cur.execute(
+            "UPDATE tally_ledgers SET is_sensitive = TRUE WHERE " + where_clause,
+            (pattern, pattern),
+        )
+    count = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    return count
+
 
 # Initialize on start
 try:

@@ -9,3 +9,11 @@ scratch/
 chat_temp_*
 temp_*
 .claude/
+
+# Sprint 33 — never track local credential temp files or large agent binaries
+*auth.json
+*auth_*.json
+C:*auth*.json
+*.exe
+agent_dump/build_old_*/
+static/uploads/
