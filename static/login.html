@@ -11,14 +11,20 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="YantrAI">
     <link rel="apple-touch-icon" href="https://img.icons8.com/color/192/000000/accounting.png">
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/style.css?v=39">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script>
-        // Register the service worker so the PWA install criteria are met on /login
+        // Register the service worker (PWA install criteria) + auto-reload on update
         if ('serviceWorker' in navigator) {
+            var _hadCtrl = !!navigator.serviceWorker.controller, _reloaded = false;
+            navigator.serviceWorker.addEventListener('controllerchange', function () {
+                if (_hadCtrl && !_reloaded) { _reloaded = true; window.location.reload(); }
+            });
             window.addEventListener('load', function () {
-                navigator.serviceWorker.register('/sw.js').catch(function (e) { console.log('SW register failed', e); });
+                navigator.serviceWorker.register('/sw.js')
+                    .then(function (reg) { reg.update().catch(function () {}); })
+                    .catch(function (e) { console.log('SW register failed', e); });
             });
         }
     </script>

@@ -221,7 +221,7 @@ async def get_all_vouchers(company_name: str = None, company_id: str = None,
 
 @app.get("/login")
 async def login_page():
-    return FileResponse('static/login.html')
+    return FileResponse('static/login.html', headers={"Cache-Control": "no-cache, must-revalidate"})
 
 # ── Sprint 28 — Tally Outbox endpoints (bridge-agent contract + UI polling) ──
 @app.get("/api/tally/ledgers")
@@ -588,17 +588,22 @@ async def handle_whatsapp_message(request: Request):
 # Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# PWA shell + service worker must always be revalidated so phones never get
+# stuck on a stale build. no-cache = "check with the server before reusing"
+# (cheap 304 when unchanged, fresh bytes when changed).
+_NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
+
 @app.get("/manifest.json")
 async def get_manifest():
-    return FileResponse('static/manifest.json', media_type='application/json')
+    return FileResponse('static/manifest.json', media_type='application/json', headers=_NOCACHE)
 
 @app.get("/sw.js")
 async def get_sw():
-    return FileResponse('static/sw.js', media_type='application/javascript')
+    return FileResponse('static/sw.js', media_type='application/javascript', headers=_NOCACHE)
 
 @app.get("/")
 async def read_index():
-    return FileResponse('static/index.html')
+    return FileResponse('static/index.html', headers=_NOCACHE)
 
 @app.get("/knowledge")
 async def get_knowledge():
