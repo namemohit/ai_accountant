@@ -312,6 +312,7 @@
             </div>
             <!-- Sprint 48 — Agentic store. data-view powers nav-from-installs. -->
             <div class="nav-item" data-view="store" data-platform="1" onclick="showView('store')"><span>🛍️</span> Store</div>
+            <div class="nav-item" data-view="uploads" data-platform="1" onclick="showView('uploads')"><span>📎</span> Upload anything</div>
 
             <div class="nav-item active" data-view="chat" onclick="showView('chat')"><span>💬</span> Chat</div>
 
@@ -366,7 +367,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v58</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v59</div>
         </div>
     </div>
 
@@ -1137,6 +1138,28 @@
             <iframe id="agent-remote-frame" title="Remote agent"
                     sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                     style="flex:1; width:100%; border:0; background:#1a1714;"></iframe>
+        </div>
+
+        <!-- Sprint 55 — Upload anything: company-scoped file library -->
+        <div id="uploads-view" class="dashboard-view" style="display: none;">
+            <header>
+                <h1>📎 Upload anything</h1>
+                <p style="color:#94a3b8;">Drop any file — invoices, statements, photos, sheets. Files are saved to <strong id="uploads-co-label">this company</strong> and reusable anywhere (send to chat, download).</p>
+            </header>
+            <div id="uploads-drop" onclick="document.getElementById('uploads-file-input').click()"
+                 ondragover="event.preventDefault(); this.style.borderColor='var(--primary)';"
+                 ondragleave="this.style.borderColor='var(--border)';"
+                 ondrop="event.preventDefault(); this.style.borderColor='var(--border)'; uploadAnything(event.dataTransfer.files);"
+                 style="margin-top:18px; border:2px dashed var(--border); border-radius:14px; padding:34px; text-align:center; cursor:pointer; color:#94a3b8;">
+                <div style="font-size:1.8rem;">📥</div>
+                <div style="margin-top:8px; font-weight:600; color:#e2e8f0;">Drop files here or click to upload</div>
+                <div style="font-size:0.8rem; margin-top:4px;">PDF · images · Excel/CSV · anything</div>
+                <input type="file" id="uploads-file-input" multiple style="display:none;" onchange="uploadAnything(this.files); this.value='';">
+            </div>
+            <div id="uploads-msg" style="font-size:0.82rem; margin-top:10px; color:#94a3b8;"></div>
+            <div id="uploads-grid" class="connector-grid" style="margin-top:18px;">
+                <div style="color:#64748b; font-size:0.85rem;">Loading…</div>
+            </div>
         </div>
 
         <div id="training-view" class="dashboard-view" style="display: none;">
@@ -2087,6 +2110,7 @@
                 </div>
             </div>
             <div class="mobile-drawer-item" data-view="store" data-platform="1" onclick="mobileNav('store')"><span>🛍️</span> Store</div>
+            <div class="mobile-drawer-item" data-view="uploads" data-platform="1" onclick="mobileNav('uploads')"><span>📎</span> Upload anything</div>
             <div class="mobile-drawer-item active" data-view="chat" onclick="mobileNav('chat')"><span>💬</span> Chat</div>
 
             <div class="mobile-drawer-item" data-view="vouchers" onclick="mobileNav('vouchers')"><span>📑</span> Vouchers</div>
@@ -2109,7 +2133,7 @@
         <div class="mobile-drawer-footer">
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
-            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v58</div>
+            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v59</div>
         </div>
     </div>
 
@@ -2613,7 +2637,7 @@
         // ── Sprint 48b — Agentic store: TWO-LEVEL nav (Store home + agent menus) ──
         // Platform views are agent-agnostic and visible everywhere. Agent views
         // (chat, vouchers, …) show ONLY when their agent is the active one.
-        window.__PLATFORM_VIEWS = new Set(['store','training','whatsapp','users','settings']);
+        window.__PLATFORM_VIEWS = new Set(['store','uploads','training','whatsapp','users','settings']);
         // Fallback agent (used if the installed-agents fetch fails) = today's full set.
         const _AGENT1_VIEWS = ['chat','vouchers','schema','bank','gstr-reco','recon',
                                'gstr','tds','itr','audit','reports','tasks'];
@@ -2828,6 +2852,83 @@
         }
         // Build nav from installs once the page is ready.
         window.addEventListener('load', () => setTimeout(bootstrapAgents, 600));
+
+        // ── Sprint 55 — Upload anything: company-scoped file library ────────
+        function _uploadsCo() { try { return JSON.parse(localStorage.getItem('currentUser')||'{}').company_name || ''; } catch(_) { return ''; } }
+        function _fileIcon(t) {
+            t = (t||'').toLowerCase();
+            if (t.includes('pdf')) return '📄';
+            if (t.includes('image')) return '🖼';
+            if (t.includes('sheet') || t.includes('excel') || t.includes('csv')) return '📊';
+            return '📎';
+        }
+        function _fmtSize(b) { b = b||0; return b > 1048576 ? (b/1048576).toFixed(1)+' MB' : Math.max(1,Math.round(b/1024))+' KB'; }
+        async function loadUploads() {
+            const co = _uploadsCo();
+            const lbl = document.getElementById('uploads-co-label'); if (lbl) lbl.textContent = co || 'this company';
+            const grid = document.getElementById('uploads-grid'); if (!grid) return;
+            try {
+                const r = await fetch(`${API}/api/files?company_name=${encodeURIComponent(co)}`);
+                const d = await r.json();
+                const files = (d && d.files) || [];
+                grid.innerHTML = files.length ? files.map(_uploadCard).join('')
+                    : '<div style="color:#64748b; font-size:0.85rem;">No files yet — drop something above.</div>';
+            } catch(e) { grid.innerHTML = '<div style="color:#f87171; font-size:0.85rem;">Could not load files.</div>'; }
+        }
+        function _uploadCard(f) {
+            const nm = escapeHtml(f.original_name || 'file');
+            const when = f.created_at ? new Date(f.created_at).toLocaleDateString('en-IN') : '';
+            return `<div class="connector-card" style="cursor:default;">
+                <div class="connector-card-header">
+                    <div class="connector-icon" style="background:rgba(56,189,248,0.1); color:#38bdf8;">${_fileIcon(f.file_type)}</div>
+                    <div class="connector-status" style="background:rgba(148,163,184,0.12); color:#94a3b8;">${_fmtSize(f.size_bytes)}</div>
+                </div>
+                <h4 class="connector-name" style="word-break:break-word;">${nm}</h4>
+                <p class="connector-desc">${when}</p>
+                <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;">
+                    <button onclick="sendUploadToChat('${f.file_url}', ${JSON.stringify(f.original_name||'file')}, ${JSON.stringify(f.file_type||'')})" style="flex:1; padding:7px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer;">Send to chat</button>
+                    <a href="${f.file_url}" target="_blank" rel="noopener" style="padding:7px 12px; background:var(--bg-light); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; text-decoration:none;">Open</a>
+                    <button onclick="deleteUpload('${f.id}')" title="Remove" style="padding:7px 10px; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.25); border-radius:8px; cursor:pointer;">✕</button>
+                </div>
+            </div>`;
+        }
+        async function uploadAnything(fileList) {
+            const files = Array.from(fileList || []);
+            if (!files.length) return;
+            const co = _uploadsCo();
+            const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
+            const msg = document.getElementById('uploads-msg');
+            let done = 0;
+            for (const file of files) {
+                msg.style.color = '#94a3b8'; msg.textContent = `Uploading ${file.name}… (${done+1}/${files.length})`;
+                try {
+                    const fd = new FormData();
+                    fd.append('file', file); fd.append('company_name', co); fd.append('username', u.username || '');
+                    const r = await fetch(`${API}/api/files/upload`, { method:'POST', body: fd });
+                    if (!r.ok) throw new Error('failed');
+                    done++;
+                } catch(e) { msg.style.color = '#f87171'; msg.textContent = `Failed to upload ${file.name}.`; }
+            }
+            if (done) { msg.style.color = '#4ade80'; msg.textContent = `${done} file${done>1?'s':''} uploaded.`; }
+            loadUploads();
+        }
+        async function sendUploadToChat(url, name, type) {
+            try {
+                const blob = await (await fetch(url)).blob();
+                const file = new File([blob], name || 'file', { type: type || blob.type });
+                if (typeof enterAgent === 'function' && window.__agentBySlug && window.__agentBySlug['ai-accountant']) enterAgent('ai-accountant');
+                else showView('chat');
+                setTimeout(() => { if (typeof attachFileToChat === 'function') attachFileToChat(file); }, 250);
+            } catch(e) { try { showChatToast && showChatToast('Could not load that file.', 'warn'); } catch(_) { alert('Could not load that file.'); } }
+        }
+        async function deleteUpload(id) {
+            if (!confirm('Remove this file from the library?')) return;
+            const co = _uploadsCo();
+            try {
+                await fetch(`${API}/api/files/delete`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id, company_name: co }) });
+                loadUploads();
+            } catch(e) {}
+        }
 
         // ── Sprint 50 — Developer Portal: register + manage your own remote apps ──
         function _devUser() { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } }
@@ -3346,6 +3447,11 @@
             if (view === 'dev-portal') {
                 setTimeout(() => { if (typeof loadDevPortal === 'function') loadDevPortal(); }, 50);
             }
+
+            // Sprint 55 — Upload anything view
+            if (view === 'uploads') {
+                setTimeout(() => { if (typeof loadUploads === 'function') loadUploads(); }, 50);
+            }
             
             if (!skipHashUpdate) {
                 if (view === 'chat' && currentSessionId) {
@@ -3393,8 +3499,9 @@
             if (drawerMatch) drawerMatch.classList.add('active');
 
             // Sprint 13 — Floating "+" FAB visibility: hide on chat (composer has its own +)
+            // Sprint 55 — floating + moved to the sidebar ("Upload anything"); keep FAB hidden.
             const fab = document.getElementById('add-fab');
-            if (fab) fab.style.display = (view === 'chat') ? 'none' : 'flex';
+            if (fab) fab.style.display = 'none';
             // Close any open + menu when switching views
             if (typeof closeAddMenu === 'function') closeAddMenu();
 

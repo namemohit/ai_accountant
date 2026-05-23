@@ -974,6 +974,69 @@ def get_user_by_username(username: str):
         conn.close()
 
 
+def _ensure_company_files():
+    """Sprint 55 — 'Upload anything': a company-scoped file library."""
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS company_files (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                company_name TEXT NOT NULL,
+                file_url TEXT NOT NULL,
+                original_name TEXT,
+                file_type TEXT,
+                size_bytes BIGINT,
+                uploaded_by TEXT,
+                archived_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_company_files_co ON company_files(company_name, created_at DESC)")
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f"[_ensure_company_files] {e}")
+
+
+def save_company_file(company_name, file_url, original_name=None, file_type=None,
+                      size_bytes=None, uploaded_by=None):
+    _ensure_company_files()
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""INSERT INTO company_files
+                         (company_name, file_url, original_name, file_type, size_bytes, uploaded_by)
+                       VALUES (%s,%s,%s,%s,%s,%s)
+                       RETURNING id, file_url, original_name, file_type, size_bytes, created_at""",
+                    (company_name, file_url, original_name, file_type, size_bytes, uploaded_by))
+        row = cur.fetchone(); conn.commit(); return row
+    finally:
+        cur.close(); conn.close()
+
+
+def list_company_files(company_name):
+    _ensure_company_files()
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""SELECT id, file_url, original_name, file_type, size_bytes, uploaded_by, created_at
+                       FROM company_files
+                       WHERE company_name=%s AND archived_at IS NULL
+                       ORDER BY created_at DESC""", (company_name,))
+        return cur.fetchall()
+    finally:
+        cur.close(); conn.close()
+
+
+def archive_company_file(file_id, company_name):
+    _ensure_company_files()
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("UPDATE company_files SET archived_at=CURRENT_TIMESTAMP WHERE id=%s AND company_name=%s",
+                    (file_id, company_name))
+        ok = cur.rowcount > 0; conn.commit(); return ok
+    except Exception as e:
+        conn.rollback(); print(f"[archive_company_file] {e}"); return False
+    finally:
+        cur.close(); conn.close()
+
+
 def get_user_by_auth_uid(auth_uid):
     """Sprint 51 — map a Supabase auth user (auth.users.id) to our accounting_users row."""
     if not auth_uid:

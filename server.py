@@ -5847,6 +5847,45 @@ async def api_webhook_razorpay(request: Request):
     return {"status": "ok"}
 
 
+# =============================================================================
+# Sprint 55 — "Upload anything": a company-scoped file library
+# =============================================================================
+@app.post("/api/files/upload")
+async def api_files_upload(file: UploadFile = File(...), company_name: str = Form(None),
+                           username: str = Form(None)):
+    import uuid as _uuid
+    if not company_name:
+        raise HTTPException(status_code=400, detail="company_name required")
+    os.makedirs("static/uploads", exist_ok=True)
+    ext = os.path.splitext(file.filename or "")[1]
+    stored = f"{_uuid.uuid4().hex}{ext}"
+    data = await file.read()
+    with open(f"static/uploads/{stored}", "wb") as f:
+        f.write(data)
+    url = f"/static/uploads/{stored}"
+    row = db.save_company_file(company_name, url, original_name=file.filename,
+                               file_type=file.content_type, size_bytes=len(data),
+                               uploaded_by=username)
+    return {"status": "success", "file": {"id": str(row["id"]), "file_url": url,
+            "original_name": file.filename, "file_type": file.content_type,
+            "size_bytes": len(data)}}
+
+
+@app.get("/api/files")
+async def api_files_list(company_name: str = None):
+    rows = db.list_company_files(company_name) if company_name else []
+    return {"status": "success", "files": [{
+        "id": str(r["id"]), "file_url": r["file_url"], "original_name": r["original_name"],
+        "file_type": r["file_type"], "size_bytes": r["size_bytes"],
+        "created_at": str(r["created_at"])} for r in rows]}
+
+
+@app.post("/api/files/delete")
+async def api_files_delete(payload: dict):
+    ok = db.archive_company_file(payload.get("id"), payload.get("company_name"))
+    return {"status": "success" if ok else "error"}
+
+
 @app.post("/api/wallet/credit")
 async def api_wallet_credit(payload: dict):
     """super_admin manual top-up (until the gateway is live). Credits tokens to an
