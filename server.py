@@ -5767,7 +5767,8 @@ async def api_wallet_recharge(payload: dict):
     if RAZORPAY_ENABLED:
         try:
             p = db.create_purchase(org_id, amount, tokens, created_by=username, provider="razorpay")
-            order = _razorpay_create_order(amount, receipt=f"wallet_{p['id']}",
+            receipt = ("r_" + str(p["id"]).replace("-", ""))[:40]   # Razorpay caps receipt at 40 chars
+            order = _razorpay_create_order(amount, receipt=receipt,
                                            notes={"purchase_id": str(p["id"]), "org_id": str(org_id)})
             # store the order id on the purchase so verify/webhook can match it
             db.mark_purchase_order(str(p["id"]), order["id"])

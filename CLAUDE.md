@@ -17,10 +17,14 @@ to a specific point if a later push breaks something.
   Tags only land on commit points, not arbitrary mid-day moments.
 
 ## Standing user rules (also in global CLAUDE.md)
+- **Commit locally only.** NEVER `git push` or deploy (Cloud Run / gcloud) unless the
+  user explicitly says to in that message. Default after any change = `git commit`
+  (+ dated `good-` tag) locally, then stop and wait. Do not auto-push.
 - Never deploy to Cloud Run / gcloud without explicit per-request permission.
 - Never delete anything (files, DB rows, tables, columns) without explicit permission.
 - Restarting the local server (kill PID on :8000 + relaunch `python server.py`) is
   pre-authorized — no need to ask each time.
+- Keep replies concise; avoid verbosity.
 
 ## Service worker cache
 `static/sw.js` `CACHE_NAME` must be bumped on every front-end change (currently the
