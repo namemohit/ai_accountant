@@ -912,6 +912,17 @@
                     <div class="connector-meta"><span>Accounting</span><span id="tally-card-ledgers">13 ledgers</span></div>
                 </div>
 
+                <!-- Connect your devices — install YantrAI as an app -->
+                <div class="connector-card" data-category="devices" onclick="installApp()">
+                    <div class="connector-card-header">
+                        <div class="connector-icon" style="background: rgba(56,189,248,0.1); color: #38bdf8;">📲</div>
+                        <div class="connector-status available">Install</div>
+                    </div>
+                    <h4 class="connector-name">Connect your devices</h4>
+                    <p class="connector-desc">Install YantrAI as an app on your phone or desktop — opens full-screen, works offline, launches from your home screen.</p>
+                    <div class="connector-meta"><span>Devices</span><span id="install-app-hint">Add to device</span></div>
+                </div>
+
                 <!-- GST Portal -->
                 <div class="connector-card" data-category="tax" onclick="openConnectorModal('gst-portal')">
                     <div class="connector-card-header">
@@ -1978,6 +1989,47 @@
         const API = window.location.origin;
         let currentSessionId = null;
         let selectedFile = null;
+
+        // ── PWA install: capture the prompt + show a permanent button ────
+        let _deferredInstallPrompt = null;
+        function _isStandalone() {
+            return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+        }
+        function _isIOS() {
+            return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+        }
+        function _refreshInstallButtons() {
+            // Reflect install state on the "Connect your devices" connector card.
+            if (!_isStandalone()) return;
+            const statusEl = document.querySelector('.connector-card[data-category="devices"] .connector-status');
+            if (statusEl) { statusEl.textContent = 'Installed'; statusEl.classList.remove('available'); statusEl.classList.add('connected'); }
+            const hintEl = document.getElementById('install-app-hint');
+            if (hintEl) hintEl.textContent = 'On this device';
+        }
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();                 // stop the one-time mini-infobar
+            _deferredInstallPrompt = e;         // stash it for our button
+            _refreshInstallButtons();
+        });
+        window.addEventListener('appinstalled', () => {
+            _deferredInstallPrompt = null;
+            _refreshInstallButtons();
+        });
+        async function installApp() {
+            if (_deferredInstallPrompt) {
+                _deferredInstallPrompt.prompt();
+                try { await _deferredInstallPrompt.userChoice; } catch (_) {}
+                _deferredInstallPrompt = null;
+                _refreshInstallButtons();
+                return;
+            }
+            if (_isIOS()) {
+                alert('To install on iPhone/iPad:\n\n1. Tap the Share button (□↑) in Safari\n2. Choose "Add to Home Screen"\n3. Tap Add');
+                return;
+            }
+            alert('Your browser will offer "Install app" from its menu (⋮) once the page is fully loaded. If you already installed it, it\'s on your home screen.');
+        }
+        document.addEventListener('DOMContentLoaded', _refreshInstallButtons);
 
         // ── Mobile viewport height fix ──────────────────────────────────
         // Some mobile browsers/webviews report 100vh as the *tallest* layout
