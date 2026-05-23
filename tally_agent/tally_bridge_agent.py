@@ -132,10 +132,11 @@ _lock_thread.start()
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".yantrai_bridge_config.json")
 DEFAULT_TALLY = "http://localhost:9000"
 
-# Server preset list — agent UI dropdown
+# Server preset list — agent UI dropdown.
+# Cloud Run is FIRST so fresh installs default to the cloud, not localhost.
 SERVER_PRESETS = [
-    {"label": "Localhost",  "url": "http://localhost:8000"},
     {"label": "Cloud Run",  "url": "https://yantrai-accounting-916641724782.asia-south1.run.app"},
+    {"label": "Localhost",  "url": "http://localhost:8000"},
 ]
 
 def http_to_ws(http_url: str) -> str:
@@ -160,6 +161,23 @@ def save_config(cfg):
         with open(CONFIG_FILE, "w") as f:
             json.dump(cfg, f, indent=2)
     except:
+        pass
+
+
+def _migrate_default_server(cfg):
+    """One-time: machines that ran an OLDER agent build have a saved
+    last_server_url=http://localhost:8000, so they'd keep landing on Localhost
+    even after downloading the Cloud-Run-default build. Flip that saved default
+    to Cloud Run ONCE. A dev who then re-picks Localhost keeps it (their save
+    re-sets localhost; the flag prevents re-overriding)."""
+    try:
+        if cfg.get("server_migrated_cloud"):
+            return
+        if (cfg.get("last_server_url") or "").rstrip("/") == "http://localhost:8000":
+            cfg["last_server_url"] = SERVER_PRESETS[0]["url"]  # Cloud Run
+        cfg["server_migrated_cloud"] = True
+        save_config(cfg)
+    except Exception:
         pass
 
 # ============================================================
@@ -530,7 +548,147 @@ def build_voucher_xml(voucher):
 # GUI Application
 # ============================================================
 import tkinter as tk
-from tkinter import scrolledtext, messagebox
+from tkinter import scrolledtext, messagebox, ttk
+
+# Optional deps for branding + tray (degrade gracefully if missing).
+try:
+    from PIL import Image as _PILImage, ImageTk as _PILImageTk
+except Exception:
+    _PILImage = None
+    _PILImageTk = None
+try:
+    import pystray as _pystray
+except Exception:
+    _pystray = None
+try:
+    import winreg as _winreg
+except Exception:
+    _winreg = None
+
+
+# ── YantrAI brand palette (matches the web app) ──────────────────
+THEME = {
+    "bg": "#2a2623", "surface": "#1e1b18", "card": "#221f1c",
+    "primary": "#da7756", "primary_light": "#e8a87c", "accent": "#38bdf8",
+    "text": "#f5f1ec", "muted": "#a8a199", "border": "#3a3530",
+    "ok": "#4ade80", "warn": "#f59e0b", "err": "#ef4444",
+    "console_bg": "#16130f", "console_fg": "#cbd5e1",
+}
+APP_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+APP_RUN_NAME = "YantrAITallyBridge"
+
+
+def resource_path(rel):
+    """Resolve a bundled asset path (works in dev + PyInstaller onefile)."""
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    p = os.path.join(base, rel)
+    if os.path.exists(p):
+        return p
+    # dev fallback: assets/ next to this file
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), rel)
+
+
+def _icon_pil():
+    """Load the branded icon as a PIL image (for the tray), or None."""
+    if _PILImage is None:
+        return None
+    try:
+        return _PILImage.open(resource_path(os.path.join("assets", "yantrai_256.png")))
+    except Exception:
+        return None
+
+
+def apply_theme(root):
+    """Dark, Claude-style ttk theming on top of the 'clam' base."""
+    root.configure(bg=THEME["bg"])
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except Exception:
+        pass
+    t = THEME
+    style.configure(".", background=t["bg"], foreground=t["text"], fieldbackground=t["card"],
+                    bordercolor=t["border"], font=("Segoe UI", 10))
+    style.configure("TFrame", background=t["bg"])
+    style.configure("Card.TFrame", background=t["card"])
+    style.configure("Surface.TFrame", background=t["surface"])
+    style.configure("TLabel", background=t["bg"], foreground=t["text"])
+    style.configure("Card.TLabel", background=t["card"], foreground=t["text"])
+    style.configure("Muted.TLabel", background=t["bg"], foreground=t["muted"])
+    style.configure("CardMuted.TLabel", background=t["card"], foreground=t["muted"])
+    style.configure("Title.TLabel", background=t["surface"], foreground=t["text"], font=("Segoe UI", 16, "bold"))
+    style.configure("H2.TLabel", background=t["bg"], foreground=t["text"], font=("Segoe UI", 13, "bold"))
+    style.configure("TEntry", fieldbackground=t["card"], foreground=t["text"], insertcolor=t["text"],
+                    bordercolor=t["border"], lightcolor=t["border"], darkcolor=t["border"])
+    style.map("TEntry", bordercolor=[("focus", t["primary"])])
+    style.configure("TButton", background=t["card"], foreground=t["text"], bordercolor=t["border"],
+                    focuscolor=t["card"], padding=(12, 7), font=("Segoe UI", 10))
+    style.map("TButton", background=[("active", t["border"])])
+    style.configure("Accent.TButton", background=t["primary"], foreground="#ffffff",
+                    bordercolor=t["primary"], padding=(14, 9), font=("Segoe UI", 11, "bold"))
+    style.map("Accent.TButton", background=[("active", t["primary_light"])])
+    style.configure("TCombobox", fieldbackground=t["card"], background=t["card"], foreground=t["text"],
+                    arrowcolor=t["muted"], bordercolor=t["border"], padding=(8, 6))
+    style.map("TCombobox",
+              fieldbackground=[("readonly", t["card"]), ("focus", t["card"])],
+              foreground=[("readonly", t["text"])],
+              selectbackground=[("readonly", t["card"])],
+              selectforeground=[("readonly", t["text"])],
+              bordercolor=[("focus", t["primary"])])
+    style.configure("TCheckbutton", background=t["bg"], foreground=t["muted"])
+    style.map("TCheckbutton", background=[("active", t["bg"])])
+    # Theme the Combobox drop-down list (a tk Listbox) — fixes the white-on-hover.
+    root.option_add("*TCombobox*Listbox.background", t["card"])
+    root.option_add("*TCombobox*Listbox.foreground", t["text"])
+    root.option_add("*TCombobox*Listbox.selectBackground", t["primary"])
+    root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+    root.option_add("*TCombobox*Listbox.borderWidth", 0)
+    return style
+
+
+# ── Windows auto-start (HKCU Run) ────────────────────────────────
+def _agent_launch_command():
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" --autostart'
+    return f'"{sys.executable}" "{os.path.abspath(__file__)}" --autostart'
+
+
+def set_autostart(enable):
+    """Add/remove the HKCU Run entry. No-op on non-Windows."""
+    if _winreg is None:
+        return False
+    try:
+        key = _winreg.OpenKey(_winreg.HKEY_CURRENT_USER, APP_RUN_KEY, 0,
+                              _winreg.KEY_SET_VALUE | _winreg.KEY_QUERY_VALUE)
+    except FileNotFoundError:
+        key = _winreg.CreateKey(_winreg.HKEY_CURRENT_USER, APP_RUN_KEY)
+    try:
+        if enable:
+            _winreg.SetValueEx(key, APP_RUN_NAME, 0, _winreg.REG_SZ, _agent_launch_command())
+        else:
+            try:
+                _winreg.DeleteValue(key, APP_RUN_NAME)
+            except FileNotFoundError:
+                pass
+        return True
+    finally:
+        _winreg.CloseKey(key)
+
+
+def is_autostart_enabled():
+    if _winreg is None:
+        return False
+    try:
+        key = _winreg.OpenKey(_winreg.HKEY_CURRENT_USER, APP_RUN_KEY, 0, _winreg.KEY_QUERY_VALUE)
+        try:
+            _winreg.QueryValueEx(key, APP_RUN_NAME)
+            return True
+        except FileNotFoundError:
+            return False
+        finally:
+            _winreg.CloseKey(key)
+    except Exception:
+        return False
 
 
 # ============================================================
@@ -541,7 +699,7 @@ from tkinter import scrolledtext, messagebox
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.3.0"   # Sprint 34 — push pipeline (pacing, ledger resolution, Dr=Cr, voucher types)
+AGENT_VERSION = "0.4.0"   # Sprint 42 — modern UI, tray, autostart, branding, Cloud-Run default
 
 
 def _post_json(url, body, timeout=15.0):
@@ -1189,18 +1347,46 @@ import urllib.parse
 
 
 class TallyBridgeApp:
-    def __init__(self):
+    def __init__(self, start_minimized=False):
         self.root = tk.Tk()
-        self.root.title(f"YantrAI Tally Bridge Agent · v{AGENT_VERSION}")
-        self.root.geometry("560x560")
-        self.root.resizable(False, False)
+        self.root.title(f"YantrAI Tally Bridge · v{AGENT_VERSION}")
+        self.root.geometry("560x600")
+        self.root.minsize(520, 560)
+
+        # Theme + window/taskbar icon
+        apply_theme(self.root)
+        self._icon_photo = None     # full-size, for the window/taskbar icon
+        self._header_logo = None    # small, for the in-app header bar
+        try:
+            ico = resource_path(os.path.join("assets", "yantrai.ico"))
+            if os.path.exists(ico):
+                self.root.iconbitmap(default=ico)
+        except Exception:
+            pass
+        try:
+            png = resource_path(os.path.join("assets", "yantrai_256.png"))
+            if _PILImage is not None and _PILImageTk is not None and os.path.exists(png):
+                src = _PILImage.open(png).convert("RGBA")
+                self._icon_photo = _PILImageTk.PhotoImage(src)
+                self.root.iconphoto(True, self._icon_photo)
+                small = src.resize((40, 40), _PILImage.LANCZOS)
+                self._header_logo = _PILImageTk.PhotoImage(small)
+        except Exception:
+            pass
 
         # State
         self.is_connected = False
         self.synced_count = 0
         self.config = load_config()
+        _migrate_default_server(self.config)
         self.ws_thread = None
         self.should_run = False
+        self.start_minimized = start_minimized
+
+        # Tray
+        self.tray_icon = None
+        self._tray_notified = False
+        self._quitting = False
 
         # Auth state — populated after successful login
         self.session_token = None
@@ -1215,8 +1401,97 @@ class TallyBridgeApp:
         # Always start at the login wizard — passwords are never persisted
         self.build_login_wizard()
 
-        # Handle window close
+        # System tray (background running). Built once; survives screen swaps.
+        self._init_tray()
+
+        # Handle window close → minimize to tray instead of quitting
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        if self.start_minimized:
+            self.root.after(300, self._hide_to_tray)
+
+    # --------------------------------------------------------
+    # System tray + background lifecycle
+    # --------------------------------------------------------
+    def _init_tray(self):
+        if _pystray is None or _PILImage is None:
+            return
+        img = _icon_pil()
+        if img is None:
+            return
+        try:
+            menu = _pystray.Menu(
+                _pystray.MenuItem("Open YantrAI Bridge", lambda *a: self._show_from_tray(), default=True),
+                _pystray.MenuItem("Test Tally connection", lambda *a: self.root.after(0, self.test_tally)),
+                _pystray.MenuItem("Sign out", lambda *a: self.root.after(0, self.sign_out)),
+                _pystray.Menu.SEPARATOR,
+                _pystray.MenuItem("Quit", lambda *a: self.root.after(0, self.quit_app)),
+            )
+            self.tray_icon = _pystray.Icon("yantrai_bridge", img, "YantrAI Tally Bridge", menu)
+            threading.Thread(target=self.tray_icon.run, daemon=True).start()
+        except Exception as e:
+            print("tray init failed:", e)
+
+    def _hide_to_tray(self):
+        self.root.withdraw()
+        if self.tray_icon and not self._tray_notified:
+            self._tray_notified = True
+            try:
+                self.tray_icon.notify("Still running in the background. Right-click the tray icon to quit.",
+                                      "YantrAI Tally Bridge")
+            except Exception:
+                pass
+
+    def _show_from_tray(self):
+        def _do():
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+        self.root.after(0, _do)
+
+    def quit_app(self):
+        self._quitting = True
+        self.should_run = False
+        try:
+            if getattr(self, "_outbox_stop_event", None):
+                self._outbox_stop_event.set()
+            if getattr(self, "_heartbeat_stop_event", None):
+                self._heartbeat_stop_event.set()
+        except Exception:
+            pass
+        try:
+            if self.tray_icon:
+                self.tray_icon.stop()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        os._exit(0)
+
+    # --------------------------------------------------------
+    # Branded header bar (reused across screens)
+    # --------------------------------------------------------
+    def _build_header(self, parent, subtitle=""):
+        bar = tk.Frame(parent, bg=THEME["surface"])
+        bar.pack(fill="x")
+        inner = tk.Frame(bar, bg=THEME["surface"])
+        inner.pack(fill="x", padx=20, pady=12)
+        if self._header_logo is not None:
+            tk.Label(inner, image=self._header_logo, bg=THEME["surface"]).pack(side="left", padx=(0, 12))
+        txt = tk.Frame(inner, bg=THEME["surface"])
+        txt.pack(side="left", fill="y")
+        tk.Label(txt, text="YantrAI Tally Bridge", bg=THEME["surface"], fg=THEME["text"],
+                 font=("Segoe UI", 15, "bold")).pack(anchor="w")
+        if subtitle:
+            tk.Label(txt, text=subtitle, bg=THEME["surface"], fg=THEME["muted"],
+                     font=("Segoe UI", 9)).pack(anchor="w")
+        tk.Label(inner, text=f"v{AGENT_VERSION}", bg=THEME["surface"], fg=THEME["muted"],
+                 font=("Segoe UI", 8)).pack(side="right", anchor="ne")
+        # accent rule
+        tk.Frame(parent, bg=THEME["primary"], height=2).pack(fill="x")
+        return bar
 
     # --------------------------------------------------------
     # Step 1 — Login Wizard (Server + Username + Password)
@@ -1225,79 +1500,69 @@ class TallyBridgeApp:
         for w in self.root.winfo_children():
             w.destroy()
 
-        outer = tk.Frame(self.root, padx=20, pady=20)
+        self._build_header(self.root, "Connect your local Tally to YantrAI Cloud")
+
+        outer = tk.Frame(self.root, bg=THEME["bg"], padx=22, pady=16)
         outer.pack(fill="both", expand=True)
 
-        # Title
-        tk.Label(outer, text="🔗 YantrAI Tally Bridge", font=("Helvetica", 18, "bold")).pack(pady=(0, 4))
-        tk.Label(outer, text="Sign in to push Tally data to YantrAI Cloud", font=("Helvetica", 10)).pack(pady=(0, 14))
-
         # Tally status banner — quick check
-        self.tally_banner = tk.Label(outer, text="⏳ Checking local Tally…", font=("Helvetica", 9), fg="#666666",
-                                     wraplength=480, justify="center")
-        self.tally_banner.pack(pady=(0, 6))
-        tk.Button(outer, text="↻ Recheck Tally", font=("Helvetica", 9),
-                  command=lambda: threading.Thread(target=self._async_tally_probe, daemon=True).start()).pack(pady=(0, 12))
+        self.tally_banner = tk.Label(outer, text="⏳ Checking local Tally…", bg=THEME["bg"], fg=THEME["muted"],
+                                     font=("Segoe UI", 9), wraplength=480, justify="center")
+        self.tally_banner.pack(pady=(0, 4))
+        ttk.Button(outer, text="↻ Recheck Tally",
+                   command=lambda: threading.Thread(target=self._async_tally_probe, daemon=True).start()).pack(pady=(0, 12))
         threading.Thread(target=self._async_tally_probe, daemon=True).start()
 
-        # Form
-        form = tk.LabelFrame(outer, text=" Sign in ", padx=15, pady=15)
-        form.pack(fill="both", expand=True, pady=(0, 14))
+        # Sign-in card
+        form = tk.Frame(outer, bg=THEME["card"], highlightbackground=THEME["border"],
+                        highlightthickness=1, padx=16, pady=16)
+        form.pack(fill="both", expand=True, pady=(0, 12))
 
-        # Server preset dropdown
-        tk.Label(form, text="Server:", font=("Helvetica", 10, "bold")).pack(anchor="w", pady=(0, 2))
+        def _flbl(text, big=False):
+            tk.Label(form, text=text, bg=THEME["card"], fg=THEME["text"] if big else THEME["muted"],
+                     font=("Segoe UI", 10, "bold") if big else ("Segoe UI", 9)).pack(anchor="w", pady=(0, 3))
+
+        _flbl("Server", big=True)
         self.server_var = tk.StringVar(self.root)
         last_url = self.config.get("last_server_url") or SERVER_PRESETS[0]["url"]
-        # find label for last_url, else default
-        initial_label = next((p["label"] for p in SERVER_PRESETS if p["url"] == last_url), "Custom URL")
+        initial_label = next((p["label"] for p in SERVER_PRESETS if p["url"] == last_url), "Custom URL…")
         labels = [p["label"] for p in SERVER_PRESETS] + ["Custom URL…"]
         self.server_var.set(initial_label)
-        opt = tk.OptionMenu(form, self.server_var, *labels, command=self._on_server_changed)
-        opt.config(font=("Helvetica", 10))
-        opt.pack(fill="x", pady=(0, 4))
-
-        self.server_url_entry = tk.Entry(form, font=("Courier", 9))
+        server_cb = ttk.Combobox(form, textvariable=self.server_var, values=labels, state="readonly")
+        server_cb.pack(fill="x", pady=(0, 4))
+        server_cb.bind("<<ComboboxSelected>>", lambda e: self._on_server_changed(self.server_var.get()))
+        self.server_url_entry = ttk.Entry(form, font=("Consolas", 9))
         self.server_url_entry.insert(0, last_url)
         self.server_url_entry.pack(fill="x", pady=(0, 12))
 
-        # Username
-        tk.Label(form, text="Username:", font=("Helvetica", 10, "bold")).pack(anchor="w", pady=(0, 2))
-        self.username_entry = tk.Entry(form, font=("Helvetica", 11))
+        _flbl("Username", big=True)
+        self.username_entry = ttk.Entry(form, font=("Segoe UI", 11))
         last_username = self.config.get("last_username", "")
         if last_username:
             self.username_entry.insert(0, last_username)
         self.username_entry.pack(fill="x", pady=(0, 12))
 
-        # Password
-        tk.Label(form, text="Password:", font=("Helvetica", 10, "bold")).pack(anchor="w", pady=(0, 2))
-        self.password_entry = tk.Entry(form, font=("Helvetica", 11), show="•")
+        _flbl("Password", big=True)
+        self.password_entry = ttk.Entry(form, font=("Segoe UI", 11), show="•")
         self.password_entry.pack(fill="x", pady=(0, 12))
 
-        # Tally URL (advanced)
-        tk.Label(form, text="Local Tally URL:", font=("Helvetica", 9)).pack(anchor="w", pady=(0, 2))
-        self.tally_entry = tk.Entry(form, font=("Courier", 9))
+        _flbl("Local Tally URL")
+        self.tally_entry = ttk.Entry(form, font=("Consolas", 9))
         self.tally_entry.insert(0, self.config.get("tally_url", DEFAULT_TALLY))
-        self.tally_entry.pack(fill="x", pady=(0, 4))
+        self.tally_entry.pack(fill="x", pady=(0, 2))
 
-        # Error label
-        self.login_error = tk.Label(outer, text="", font=("Helvetica", 9), fg="#cc3333")
-        self.login_error.pack()
+        self.login_error = tk.Label(outer, text="", bg=THEME["bg"], fg=THEME["err"], font=("Segoe UI", 9), wraplength=480)
+        self.login_error.pack(pady=(2, 0))
 
-        # Submit
-        btn = tk.Button(outer, text="Authenticate →", font=("Helvetica", 11, "bold"), command=self._do_login)
-        btn.pack(fill="x", ipady=6, pady=(8, 0))
+        ttk.Button(outer, text="Authenticate  →", style="Accent.TButton", command=self._do_login).pack(fill="x", pady=(8, 0))
 
-        # Trust notice
-        tk.Label(outer, text="Your Tally data stays local. Only the data you sync is sent.",
-                 font=("Helvetica", 9)).pack(pady=(12, 0))
+        tk.Label(outer, text="Your Tally data stays local. Only what you sync is sent.",
+                 bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 8)).pack(pady=(10, 0))
 
-        # Focus
         if last_username:
             self.password_entry.focus()
         else:
             self.username_entry.focus()
-
-        # Submit on Enter
         self.root.bind("<Return>", lambda e: self._do_login())
 
     def _on_server_changed(self, label):
@@ -1402,12 +1667,13 @@ class TallyBridgeApp:
         for w in self.root.winfo_children():
             w.destroy()
 
-        outer = tk.Frame(self.root, padx=20, pady=20)
+        self._build_header(self.root, f"Welcome, {self.user_name}")
+
+        outer = tk.Frame(self.root, bg=THEME["bg"], padx=22, pady=18)
         outer.pack(fill="both", expand=True)
 
-        tk.Label(outer, text=f"Welcome, {self.user_name}", font=("Helvetica", 16, "bold")).pack(pady=(0, 4))
         firm_names = ", ".join(m["org_name"] for m in self.memberships) or "(no firms)"
-        tk.Label(outer, text=firm_names, font=("Helvetica", 10)).pack(pady=(0, 14))
+        tk.Label(outer, text=firm_names, bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 12))
 
         # Tally company readout
         tally_banner_text = (
@@ -1415,15 +1681,18 @@ class TallyBridgeApp:
             if self.tally_company_name else
             "⚠ Tally not detected — using simulator company name"
         )
-        tk.Label(outer, text=tally_banner_text, font=("Helvetica", 10, "bold")).pack(pady=(0, 14))
+        tk.Label(outer, text=tally_banner_text, bg=THEME["bg"],
+                 fg=(THEME["ok"] if self.tally_company_name else THEME["warn"]),
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 14))
 
-        # Company picker
-        frame = tk.LabelFrame(outer, text=" Push this Tally data to which YantrAI company? ",
-                              padx=15, pady=15)
-        frame.pack(fill="both", expand=True, pady=(0, 12))
+        # Company picker card
+        frame = tk.Frame(outer, bg=THEME["card"], highlightbackground=THEME["border"],
+                         highlightthickness=1, padx=16, pady=16)
+        frame.pack(fill="x", pady=(0, 12))
+        tk.Label(frame, text="Push this Tally data to which YantrAI company?", bg=THEME["card"],
+                 fg=THEME["text"], font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
 
-        # Build flat list: "Firm Name — Company Name" -> company_id
-        self.company_choices = []  # list of dicts {label, company_id, company_name, org_name}
+        self.company_choices = []
         for m in self.memberships:
             for c in m.get("companies", []):
                 self.company_choices.append({
@@ -1434,10 +1703,9 @@ class TallyBridgeApp:
                 })
 
         if not self.company_choices:
-            tk.Label(frame, text="(No companies linked to this account)", fg="#cc3333").pack()
+            tk.Label(frame, text="(No companies linked to this account)", bg=THEME["card"], fg=THEME["err"]).pack(anchor="w")
         else:
             self.company_var = tk.StringVar(self.root)
-            # Pre-select last-used company if remembered
             last_cid = self.config.get("last_company_id")
             default_label = self.company_choices[0]["label"]
             for ch in self.company_choices:
@@ -1445,23 +1713,17 @@ class TallyBridgeApp:
                     default_label = ch["label"]
                     break
             self.company_var.set(default_label)
-            opt = tk.OptionMenu(frame, self.company_var,
-                                *[c["label"] for c in self.company_choices])
-            opt.config(font=("Helvetica", 11))
-            opt.pack(fill="x")
+            ttk.Combobox(frame, textvariable=self.company_var, state="readonly",
+                         values=[c["label"] for c in self.company_choices]).pack(fill="x")
 
-        # Error label
-        self.picker_error = tk.Label(outer, text="", font=("Helvetica", 9), fg="#cc3333", wraplength=480)
-        self.picker_error.pack(pady=(8, 0))
+        self.picker_error = tk.Label(outer, text="", bg=THEME["bg"], fg=THEME["err"], font=("Segoe UI", 9), wraplength=480)
+        self.picker_error.pack(anchor="w", pady=(6, 0))
 
-        # Buttons
-        btn_frame = tk.Frame(outer)
-        btn_frame.pack(fill="x", pady=(10, 0))
-        tk.Button(btn_frame, text="← Back", font=("Helvetica", 10),
-                  command=lambda: self.build_login_wizard()).pack(side="left", padx=(0, 6))
-        tk.Button(btn_frame, text="Continue →", font=("Helvetica", 11, "bold"),
-                  command=lambda: self._on_company_selected(server_url, tally_url)).pack(side="right",
-                                                                                          ipadx=10, ipady=4)
+        btn_frame = tk.Frame(outer, bg=THEME["bg"])
+        btn_frame.pack(fill="x", pady=(12, 0))
+        ttk.Button(btn_frame, text="← Back", command=lambda: self.build_login_wizard()).pack(side="left")
+        ttk.Button(btn_frame, text="Continue  →", style="Accent.TButton",
+                   command=lambda: self._on_company_selected(server_url, tally_url)).pack(side="right")
 
     def _on_company_selected(self, server_url, tally_url):
         """User clicked Continue on company picker — enforce name match, then dashboard."""
@@ -1501,6 +1763,13 @@ class TallyBridgeApp:
         # Store legacy config keys too so existing dashboard code works
         self.config["server_url"] = http_to_ws(server_url)
         self.config["token"] = chosen["company_id"]  # legacy field — kept for compatibility
+        self.config["last_company_name"] = chosen["company_name"]
+        # Enable Windows auto-start by default on first successful setup
+        # (unless the user has explicitly turned it off before).
+        if "autostart" not in self.config:
+            self.config["autostart"] = True
+            try: set_autostart(True)
+            except Exception: pass
         save_config(self.config)
 
         self.build_dashboard()
@@ -1530,65 +1799,72 @@ class TallyBridgeApp:
         for w in self.root.winfo_children():
             w.destroy()
 
-        outer = tk.Frame(self.root, padx=15, pady=15)
+        self._build_header(self.root, "Two-way sync · running in the background")
+
+        outer = tk.Frame(self.root, bg=THEME["bg"], padx=18, pady=14)
         outer.pack(fill="both", expand=True)
 
-        # Header Row
-        hdr = tk.Frame(outer)
-        hdr.pack(fill="x", pady=(0, 10))
-        tk.Label(hdr, text="🔗 YantrAI Tally Bridge", font=("Helvetica", 14, "bold")).pack(side="left")
-
-        # Status
-        self.status_label = tk.Label(hdr, text="🔴 Disconnected", font=("Helvetica", 10, "bold"))
-        self.status_label.pack(side="right")
-
-        # Info Frame
-        info_frame = tk.LabelFrame(outer, text=" Connection Status ", padx=10, pady=10)
-        info_frame.pack(fill="x", pady=(0, 10))
-
-        # Grid cols
-        info_frame.columnconfigure(0, weight=1)
-        info_frame.columnconfigure(1, weight=1)
-        info_frame.columnconfigure(2, weight=1)
-
-        # Tally Status Card
-        tk.Label(info_frame, text="Tally ERP", font=("Helvetica", 9)).grid(row=0, column=0)
-        self.tally_status_label = tk.Label(info_frame, text="Checking...", font=("Helvetica", 10, "bold"))
-        self.tally_status_label.grid(row=1, column=0, pady=(2, 0))
-
-        # Synced Card
-        tk.Label(info_frame, text="Synced Today", font=("Helvetica", 9)).grid(row=0, column=1)
-        self.synced_label = tk.Label(info_frame, text="0", font=("Helvetica", 12, "bold"))
-        self.synced_label.grid(row=1, column=1, pady=(2, 0))
-
-        # Active Company Card (shows logged-in user → selected company)
-        tk.Label(info_frame, text="Pushing to", font=("Helvetica", 9)).grid(row=0, column=2)
-        ctx_display = self.selected_company_name or "—"
-        tk.Label(info_frame, text=ctx_display, font=("Helvetica", 10, "bold")).grid(row=1, column=2, pady=(2, 0))
-
-        # Auth status banner
+        # Status pill row
+        pill_row = tk.Frame(outer, bg=THEME["bg"])
+        pill_row.pack(fill="x", pady=(0, 12))
+        self.status_label = tk.Label(pill_row, text="🔴 Disconnected", bg=THEME["card"], fg=THEME["text"],
+                                     font=("Segoe UI", 10, "bold"), padx=12, pady=5)
+        self.status_label.pack(side="left")
         if self.username and self.selected_company_name:
-            auth_line = f"Signed in as {self.username} · pushing to {self.selected_company_name}"
-            tk.Label(outer, text=auth_line, font=("Helvetica", 9), fg="#1f7a3a").pack(anchor="w", pady=(0, 6))
+            tk.Label(pill_row, text=f"  {self.username} → {self.selected_company_name}",
+                     bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9)).pack(side="left", padx=(8, 0))
 
-        # Log Text Box
-        tk.Label(outer, text="Activity Log:", font=("Helvetica", 10, "bold")).pack(anchor="w", pady=(0, 4))
-        self.log_text = scrolledtext.ScrolledText(outer, height=8, font=("Courier", 9), state="disabled", wrap="word")
+        # Stat cards
+        cards = tk.Frame(outer, bg=THEME["bg"])
+        cards.pack(fill="x", pady=(0, 12))
+        cards.columnconfigure((0, 1, 2), weight=1, uniform="c")
+
+        def _stat_card(col, caption, value_attr, value_text, value_color=None):
+            card = tk.Frame(cards, bg=THEME["card"], highlightbackground=THEME["border"], highlightthickness=1)
+            card.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 6, 0))
+            tk.Label(card, text=caption, bg=THEME["card"], fg=THEME["muted"], font=("Segoe UI", 8)).pack(pady=(10, 0))
+            lbl = tk.Label(card, text=value_text, bg=THEME["card"], fg=value_color or THEME["text"],
+                           font=("Segoe UI", 12, "bold"), wraplength=150)
+            lbl.pack(pady=(2, 10), padx=8)
+            setattr(self, value_attr, lbl)
+
+        _stat_card(0, "TALLY ERP", "tally_status_label", "Checking…", THEME["accent"])
+        _stat_card(1, "SYNCED TODAY", "synced_label", "0", THEME["ok"])
+        _stat_card(2, "PUSHING TO", "_company_card_label", self.selected_company_name or "—", THEME["primary_light"])
+
+        # Activity log (dark console)
+        tk.Label(outer, text="Activity Log", bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 4))
+        self.log_text = scrolledtext.ScrolledText(outer, height=8, font=("Consolas", 9), state="disabled",
+                                                  wrap="word", bg=THEME["console_bg"], fg=THEME["console_fg"],
+                                                  insertbackground=THEME["console_fg"], relief="flat",
+                                                  highlightbackground=THEME["border"], highlightthickness=1, bd=0)
         self.log_text.pack(fill="both", expand=True, pady=(0, 10))
 
-        # Bottom Buttons
-        btn_row = tk.Frame(outer)
+        # Auto-start toggle
+        self.autostart_var = tk.BooleanVar(value=self.config.get("autostart", is_autostart_enabled()))
+        ttk.Checkbutton(outer, text="Start automatically on Windows (keep syncing in the background)",
+                        variable=self.autostart_var, command=self._on_autostart_toggle).pack(anchor="w", pady=(0, 10))
+
+        # Bottom buttons
+        btn_row = tk.Frame(outer, bg=THEME["bg"])
         btn_row.pack(fill="x")
-
-        tk.Button(btn_row, text="Test Connection", font=("Helvetica", 10), command=self.test_tally).pack(side="left")
-        tk.Button(btn_row, text="Reset", font=("Helvetica", 10), command=self.reset_config).pack(side="left", padx=8)
-
-        self.toggle_btn = tk.Button(btn_row, text="Disconnect", font=("Helvetica", 10, "bold"), command=self.toggle_connection)
+        ttk.Button(btn_row, text="Test connection", command=self.test_tally).pack(side="left")
+        ttk.Button(btn_row, text="Reset", command=self.reset_config).pack(side="left", padx=8)
+        self.toggle_btn = ttk.Button(btn_row, text="Disconnect", style="Accent.TButton", command=self.toggle_connection)
         self.toggle_btn.pack(side="right")
-
-        tk.Button(btn_row, text="Sign out", font=("Helvetica", 10), command=self.sign_out).pack(side="right", padx=(0, 6))
+        ttk.Button(btn_row, text="Sign out", command=self.sign_out).pack(side="right", padx=(0, 6))
 
         # start_tunnel is idempotent — caller (e.g. _on_company_selected) handles the actual launch
+
+    def _on_autostart_toggle(self):
+        enabled = bool(self.autostart_var.get())
+        self.config["autostart"] = enabled
+        try:
+            set_autostart(enabled)
+        except Exception as e:
+            self.log(f"Auto-start change failed: {e}")
+        save_config(self.config)
+        self.log(f"Auto-start on Windows {'enabled' if enabled else 'disabled'}.")
 
     def sign_out(self):
         """Clear in-memory session and return to login wizard."""
@@ -1876,12 +2152,17 @@ class TallyBridgeApp:
             self.build_setup_wizard()
 
     def on_close(self):
-        self.should_run = False
-        self.root.destroy()
+        # X button → keep running in the background (tray), don't quit.
+        # If the tray isn't available (no pystray), fall back to a real quit.
+        if self.tray_icon is not None:
+            self._hide_to_tray()
+        else:
+            self.quit_app()
 
     def run(self):
         self.root.mainloop()
 
 if __name__ == "__main__":
-    app = TallyBridgeApp()
+    _autostart = ("--autostart" in sys.argv) or ("--minimized" in sys.argv)
+    app = TallyBridgeApp(start_minimized=_autostart)
     app.run()

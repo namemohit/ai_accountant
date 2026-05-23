@@ -2,6 +2,7 @@ requests
 google-generativeai
 python-dotenv
 pillow
+pystray
 flask
 fastapi
 uvicorn
