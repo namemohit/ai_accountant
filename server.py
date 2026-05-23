@@ -953,7 +953,14 @@ def _charge_ai(username, company_name, action, response=None, est_text=None,
         p, o, t = _usage_from_response(response)
         if t <= 0 and est_text:
             t = max(1, len(est_text) // 4)   # embeddings / no-metadata fallback
-        charged = int(round(t * TOKEN_MARKUP))
+        # Sprint 54 — charge via the model's pricing weight (credits per 1,000 tokens),
+        # normalising different models to one credit currency. Falls back to the flat
+        # rate if the model isn't priced yet.
+        weight = db.get_model_weight(model)
+        if weight is not None:
+            charged = int(round((t / 1000.0) * weight))
+        else:
+            charged = int(round(t * TOKEN_MARKUP))
         if charged <= 0:
             return
         db.debit_tokens(org_id, charged, action=action, model=model, user_id=uid,

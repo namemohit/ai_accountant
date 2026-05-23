@@ -1315,6 +1315,22 @@ def _ensure_billing_schema():
         # Sprint 53 — Razorpay: store the gateway order id to match verify/webhook.
         cur.execute("ALTER TABLE token_purchases ADD COLUMN IF NOT EXISTS provider_order_id TEXT")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_token_purch_order ON token_purchases(provider_order_id)")
+        # Sprint 54 — per-model pricing weight (credits charged per 1,000 tokens) so
+        # different models normalise to the same credit currency at a target margin.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS model_pricing (
+                model TEXT PRIMARY KEY,
+                label TEXT,
+                cost_per_1k NUMERIC,          -- our real provider cost, ₹ / 1k tokens (informational)
+                markup NUMERIC DEFAULT 3,     -- target gross multiple (informational)
+                weight NUMERIC NOT NULL,      -- CREDITS charged per 1,000 tokens (the live knob)
+                active BOOLEAN DEFAULT TRUE,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );""")
+        # Seed Gemini Flash: cost ~₹0.03/1k × ~3.3 markup → 100 credits/1k (≈₹0.10/1k to user).
+        cur.execute("""INSERT INTO model_pricing (model, label, cost_per_1k, markup, weight)
+                       VALUES ('gemini-flash-latest','Gemini Flash',0.03,3.3,100)
+                       ON CONFLICT (model) DO NOTHING""")
         conn.commit(); cur.close(); conn.close()
         _seed_agents()
     except Exception as e:
@@ -1804,6 +1820,21 @@ def mark_purchase_paid(purchase_id, provider_ref=None):
                    RETURNING org_id, tokens""", (provider_ref, purchase_id))
     row = cur.fetchone(); conn.commit(); cur.close(); conn.close()
     return row
+
+
+def get_model_weight(model):
+    """Sprint 54 — credits charged per 1,000 tokens for a model (None if not set)."""
+    if not model:
+        return None
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT weight FROM model_pricing WHERE model=%s AND active", (model,))
+        r = cur.fetchone()
+        return float(r[0]) if r and r[0] is not None else None
+    except Exception as e:
+        print(f"[get_model_weight] {e}"); return None
+    finally:
+        cur.close(); conn.close()
 
 
 def mark_purchase_order(purchase_id, order_id):
