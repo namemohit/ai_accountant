@@ -335,6 +335,20 @@
             <!-- Sprint 24 — User Manager (super_admin only) -->
             <div class="nav-item" data-view="users" data-platform="1" data-role-gated="super_admin" onclick="showView('users')"><span>👥</span> User Manager</div>
         </nav>
+        <script>
+          /* Sprint 55b — hide agent-scoped nav items at first paint (no full→reduced
+             flicker). Runs inline right after the nav so it executes before paint.
+             Platform items (data-platform) stay; agent views show only inside an agent. */
+          (function () {
+            var active = null; try { active = localStorage.getItem('activeAgent'); } catch (e) {}
+            var AG1 = ['chat','vouchers','schema','bank','gstr-reco','recon','gstr','tds','itr','audit','reports','tasks'];
+            document.querySelectorAll('nav [data-view]').forEach(function (el) {
+              if (el.hasAttribute('data-platform')) return;
+              var v = el.getAttribute('data-view');
+              if (!(active && AG1.indexOf(v) >= 0)) el.style.display = 'none';
+            });
+          })();
+        </script>
         <div style="margin-top: auto; padding-top: 20px; border-top: 1px solid var(--border);">
             <div id="active-user-badge" style="padding: 10px 15px; margin-bottom: 12px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
                 <div style="font-size: 0.75rem; color: #a1a1aa; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;">Logged In As</div>
@@ -367,7 +381,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v60</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v61</div>
         </div>
     </div>
 
@@ -2133,7 +2147,7 @@
         <div class="mobile-drawer-footer">
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
-            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v60</div>
+            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v61</div>
         </div>
     </div>
 
@@ -2850,8 +2864,12 @@
                 loadStore();
             } catch(e) { try { showChatToast && showChatToast(e.message, 'warn'); } catch(_) { alert(e.message); } }
         }
-        // Build nav from installs once the page is ready.
-        window.addEventListener('load', () => setTimeout(bootstrapAgents, 600));
+        // Sprint 55b — paint the correct nav IMMEDIATELY (kills the full→reduced
+        // flicker): seed a static AI-Accountant map + render now, again on
+        // DOMContentLoaded (after role flags set), then refine with the real fetch.
+        try { _buildAgentMaps([_FALLBACK_AGENT]); _renderNav(); } catch (_) {}
+        document.addEventListener('DOMContentLoaded', () => { try { _buildAgentMaps([_FALLBACK_AGENT]); _renderNav(); } catch (_) {} });
+        window.addEventListener('load', () => setTimeout(bootstrapAgents, 200));
 
         // ── Sprint 55 — Upload anything: company-scoped file library ────────
         function _uploadsCo() { try { return JSON.parse(localStorage.getItem('currentUser')||'{}').company_name || ''; } catch(_) { return ''; } }
