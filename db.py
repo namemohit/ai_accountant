@@ -973,6 +973,37 @@ def get_user_by_username(username: str):
         cursor.close()
         conn.close()
 
+
+def get_user_by_auth_uid(auth_uid):
+    """Sprint 51 — map a Supabase auth user (auth.users.id) to our accounting_users row."""
+    if not auth_uid:
+        return None
+    conn = get_conn()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute("SELECT * FROM accounting_users WHERE auth_uid = %s LIMIT 1", (str(auth_uid),))
+        return cursor.fetchone()
+    except Exception as e:
+        print(f"[get_user_by_auth_uid] {e}")
+        return None
+    finally:
+        cursor.close(); conn.close()
+
+
+def link_auth_uid(username, auth_uid):
+    """Store the Supabase auth user id on both identity tables for `username`."""
+    _ensure_billing_schema()
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("UPDATE accounting_users SET auth_uid=%s WHERE username=%s", (str(auth_uid), username))
+        cur.execute("UPDATE users SET auth_uid=%s WHERE username=%s", (str(auth_uid), username))
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback(); print(f"[link_auth_uid] {e}"); return False
+    finally:
+        cur.close(); conn.close()
+
 def add_company_to_user(username: str, new_company_name: str):
     conn = get_conn()
     cursor = conn.cursor()
@@ -1276,6 +1307,11 @@ def _ensure_billing_schema():
         cur.execute("ALTER TABLE store_agents ADD COLUMN IF NOT EXISTS client_id     TEXT")
         cur.execute("ALTER TABLE store_agents ADD COLUMN IF NOT EXISTS signing_key   TEXT")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_store_agents_owner ON store_agents(owner_org_id)")
+        # Sprint 51 — Supabase Auth: link our identity rows to the auth user (auth.users.id).
+        cur.execute("ALTER TABLE users            ADD COLUMN IF NOT EXISTS auth_uid UUID")
+        cur.execute("ALTER TABLE accounting_users ADD COLUMN IF NOT EXISTS auth_uid UUID")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_users_auth_uid      ON users(auth_uid)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_acct_users_auth_uid ON accounting_users(auth_uid)")
         conn.commit(); cur.close(); conn.close()
         _seed_agents()
     except Exception as e:

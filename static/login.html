@@ -179,6 +179,9 @@
 
                 const data = await res.json();
                 localStorage.setItem('currentUser', JSON.stringify(data.user));
+                // Sprint 51 — store Supabase session tokens (present once auth is enabled).
+                if (data.access_token) localStorage.setItem('access_token', data.access_token);
+                if (data.refresh_token) localStorage.setItem('refresh_token', data.refresh_token);
                 sessionStorage.setItem('yantrai_just_logged_in', '1');  // triggers the install popup once after login
                 window.location.href = '/';
             } catch (error) {
@@ -226,6 +229,8 @@
                 }
                 const data = await res.json();
                 localStorage.setItem('currentUser', JSON.stringify(data.user));
+                if (data.access_token) localStorage.setItem('access_token', data.access_token);
+                if (data.refresh_token) localStorage.setItem('refresh_token', data.refresh_token);
                 sessionStorage.setItem('yantrai_just_logged_in', '1');  // triggers the install popup once after login
 
                 successEl.innerText = 'Account created! Redirecting…';

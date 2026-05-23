@@ -461,23 +461,54 @@ async def _role_gate_middleware(request, call_next):
     # CORS preflight bypass
     if request.method == "OPTIONS":
         return await call_next(request)
-    # Username can come from X-User header (preferred) or ?username= query param (legacy)
-    username = request.headers.get("x-user") or request.query_params.get("username")
-    if not username:
-        return _JSONResponse(
-            {"detail": "Forbidden — this feature requires super_admin (no user identified)."},
-            status_code=403,
-        )
-    try:
-        user = db.get_user_by_username(username)
-    except Exception as e:
-        print(f"[role_gate] lookup error: {e}", flush=True)
-        user = None
+    # Prefer the verified identity from the JWT middleware (Sprint 51); fall back to
+    # the legacy X-User header / ?username= when no token is present.
+    user = getattr(request.state, "user_row", None)
+    if not user:
+        username = request.headers.get("x-user") or request.query_params.get("username")
+        if not username:
+            return _JSONResponse(
+                {"detail": "Forbidden — this feature requires super_admin (no user identified)."},
+                status_code=403,
+            )
+        try:
+            user = db.get_user_by_username(username)
+        except Exception as e:
+            print(f"[role_gate] lookup error: {e}", flush=True)
+            user = None
     if not user or (user.get("role") if isinstance(user, dict) else None) != "super_admin":
         return _JSONResponse(
             {"detail": "Forbidden — super_admin only."},
             status_code=403,
         )
+    return await call_next(request)
+
+
+# ── Sprint 51 — Auth middleware (runs BEFORE the role gate; added later = outer). ──
+# Verifies the Supabase Bearer JWT and stamps request.state with the trusted
+# identity. Best-effort by default; only REJECTS missing/invalid tokens when
+# AUTH_ENFORCE=1 (flip on after the user migration). Legacy callers are unaffected
+# until then.
+@app.middleware("http")
+async def _auth_middleware(request, call_next):
+    request.state.user_row = None
+    request.state.username = None
+    request.state.users_id = None
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    if SUPABASE_AUTH_ENABLED:
+        claims = _verify_token(request.headers.get("authorization") or "")
+        if claims:
+            try:
+                row = db.get_user_by_auth_uid(claims.get("sub"))
+            except Exception as e:
+                print(f"[auth_mw] {e}", flush=True); row = None
+            if row:
+                request.state.user_row = row
+                request.state.username = row.get("username")
+                request.state.users_id = row.get("users_id")
+        if AUTH_ENFORCE and request.state.user_row is None and not _is_auth_whitelisted(request.url.path):
+            return _JSONResponse({"detail": "Authentication required."}, status_code=401)
     return await call_next(request)
 
 
@@ -661,6 +692,112 @@ def get_embedding(text: str):
     except Exception as e:
         print(f"Error generating embedding: {e}")
         return None
+
+# ─────────────────────────────────────────────────────────────
+# Sprint 51 — Supabase Auth (real login + verified sessions). DUAL-MODE:
+# when keys are configured we use Supabase Auth; otherwise we fall back to the
+# legacy plaintext path so the app keeps working until keys are provided.
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://vxnflumpectzqdamjqsc.supabase.co").rstrip("/")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
+SUPABASE_AUTH_ENABLED = bool(SUPABASE_ANON_KEY)   # JWKS verifies asymmetric tokens; JWT_SECRET only needed for legacy HS256
+# Require a valid Bearer token on browser /api/* — flip ON only AFTER users are
+# migrated into Supabase Auth (env AUTH_ENFORCE=1). Default OFF = no lockout risk.
+AUTH_ENFORCE = os.getenv("AUTH_ENFORCE", "0") == "1"
+SYNTH_EMAIL_DOMAIN = "yantrai.app"
+if not SUPABASE_AUTH_ENABLED:
+    print("[auth] Supabase Auth not configured (missing SUPABASE_ANON_KEY/JWT_SECRET) — "
+          "running on legacy plaintext login.", flush=True)
+
+def _login_email(user):
+    """The email a user's Supabase auth account is keyed by (must be identical in
+    migration, login and onboard)."""
+    try:
+        em = (user.get("email") if isinstance(user, dict) else None) or ""
+        un = (user.get("username") if isinstance(user, dict) else None) or ""
+    except Exception:
+        em, un = "", ""
+    return em.strip() or f"{un}@{SYNTH_EMAIL_DOMAIN}"
+
+def _supabase_password_grant(email, password):
+    """Exchange email+password for Supabase tokens. Raises on failure."""
+    import requests as _rq
+    r = _rq.post(f"{SUPABASE_URL}/auth/v1/token?grant_type=password",
+                 headers={"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"},
+                 json={"email": email, "password": password}, timeout=15)
+    if r.status_code != 200:
+        raise ValueError(f"grant {r.status_code}: {r.text[:200]}")
+    return r.json()
+
+def _supabase_refresh(refresh_token):
+    import requests as _rq
+    r = _rq.post(f"{SUPABASE_URL}/auth/v1/token?grant_type=refresh_token",
+                 headers={"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"},
+                 json={"refresh_token": refresh_token}, timeout=15)
+    if r.status_code != 200:
+        raise ValueError(f"refresh {r.status_code}: {r.text[:200]}")
+    return r.json()
+
+def _supabase_admin_create_user(email, password):
+    """Create a Supabase auth user (service role). Returns the auth user id, or None."""
+    import requests as _rq
+    r = _rq.post(f"{SUPABASE_URL}/auth/v1/admin/users",
+                 headers={"apikey": SUPABASE_SERVICE_ROLE_KEY,
+                          "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                          "Content-Type": "application/json"},
+                 json={"email": email, "password": password, "email_confirm": True}, timeout=15)
+    if r.status_code in (200, 201):
+        return (r.json() or {}).get("id")
+    # already exists → look it up
+    if r.status_code == 422:
+        g = _rq.get(f"{SUPABASE_URL}/auth/v1/admin/users",
+                    headers={"apikey": SUPABASE_SERVICE_ROLE_KEY,
+                             "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}"},
+                    params={"email": email}, timeout=15)
+        if g.status_code == 200:
+            users = (g.json() or {}).get("users") or (g.json() or {}).get("data") or []
+            if users:
+                return users[0].get("id")
+    print(f"[supabase_admin_create_user] {r.status_code}: {r.text[:200]}", flush=True)
+    return None
+
+_JWKS_CLIENT = None
+def _jwks_client():
+    global _JWKS_CLIENT
+    if _JWKS_CLIENT is None:
+        import jwt as _jwt
+        _JWKS_CLIENT = _jwt.PyJWKClient(f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json")
+    return _JWKS_CLIENT
+
+def _verify_token(authz):
+    """Verify a Supabase Bearer JWT. Supports ES256/RS256 (asymmetric, via the
+    project JWKS) and legacy HS256 (shared secret). Returns claims or None."""
+    if not authz or not authz.lower().startswith("bearer "):
+        return None
+    token = authz.split(" ", 1)[1].strip()
+    try:
+        import jwt as _jwt
+        alg = (_jwt.get_unverified_header(token) or {}).get("alg", "")
+        if alg == "HS256":
+            if not SUPABASE_JWT_SECRET:
+                return None
+            return _jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"],
+                               audience="authenticated")
+        key = _jwks_client().get_signing_key_from_jwt(token).key
+        return _jwt.decode(token, key, algorithms=["ES256", "RS256"], audience="authenticated")
+    except Exception as e:
+        print(f"[verify_token] {e}", flush=True)
+        return None
+
+# Paths that never require a session (login, onboard, public, desktop agent, static).
+_AUTH_WHITELIST_PREFIXES = ("/api/login", "/api/auth/", "/api/onboard", "/api/register",
+                            "/api/agent/", "/tally/", "/api/agents/verify-sso",
+                            "/static/", "/tally_bridge_agent")
+_AUTH_WHITELIST_EXACT = ("/", "/login", "/sw.js", "/manifest.json", "/favicon.ico")
+def _is_auth_whitelisted(path):
+    return path in _AUTH_WHITELIST_EXACT or any(path.startswith(p) for p in _AUTH_WHITELIST_PREFIXES)
+
 
 # ─────────────────────────────────────────────────────────────
 # Sprint 47 — Token wallet metering (per-workspace/org).
@@ -5361,7 +5498,19 @@ async def api_onboard(payload: dict):
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("error", "Onboarding failed"))
     user = db.get_user_by_username(payload.get("username"))
-    return {"status": "success", "user": _user_payload(user)}
+    # Sprint 51 — also create the Supabase auth user + link it, and return tokens.
+    access_token = refresh_token = None
+    if SUPABASE_AUTH_ENABLED and user:
+        try:
+            uid = _supabase_admin_create_user(_login_email(user), payload.get("password"))
+            if uid:
+                db.link_auth_uid(user["username"], uid)
+                grant = _supabase_password_grant(_login_email(user), payload.get("password"))
+                access_token = grant.get("access_token"); refresh_token = grant.get("refresh_token")
+        except Exception as e:
+            print(f"[onboard] supabase auth provisioning failed: {e}", flush=True)
+    return {"status": "success", "user": _user_payload(user),
+            "access_token": access_token, "refresh_token": refresh_token}
 
 
 @app.post("/api/register")
@@ -5386,13 +5535,29 @@ async def api_register(payload: dict):
 async def api_login(credentials: dict):
     username = credentials.get("username")
     password = credentials.get("password")
-    
+
     if not username or not password:
         raise HTTPException(status_code=400, detail="Username and password are required")
-        
+
     user = db.get_user_by_username(username)
-    if not user or user["password"] != password:
+    if not user:
         raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    # Sprint 51 — DUAL-MODE. If Supabase Auth is configured AND this user is migrated
+    # (has auth_uid), verify the password against Supabase and issue a real JWT.
+    # Otherwise fall back to the legacy plaintext check so login keeps working until
+    # keys are provided / the user is migrated.
+    access_token = refresh_token = None
+    if SUPABASE_AUTH_ENABLED and user.get("auth_uid"):
+        try:
+            grant = _supabase_password_grant(_login_email(user), password)
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        access_token = grant.get("access_token")
+        refresh_token = grant.get("refresh_token")
+    else:
+        if user.get("password") != password:
+            raise HTTPException(status_code=401, detail="Invalid username or password")
 
     # Memberships (Phase-B org model) — present once the user is onboarded/backfilled.
     memberships = []
@@ -5405,7 +5570,23 @@ async def api_login(credentials: dict):
     return {
         "status": "success",
         "user": _user_payload(user, {"memberships": memberships}),
+        "access_token": access_token,
+        "refresh_token": refresh_token,
     }
+
+
+@app.post("/api/auth/refresh")
+async def api_auth_refresh(payload: dict):
+    """Exchange a Supabase refresh token for a fresh access token."""
+    rt = (payload or {}).get("refresh_token")
+    if not (SUPABASE_AUTH_ENABLED and rt):
+        raise HTTPException(status_code=400, detail="No refresh token / auth not enabled.")
+    try:
+        g = _supabase_refresh(rt)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Could not refresh session.")
+    return {"status": "success", "access_token": g.get("access_token"),
+            "refresh_token": g.get("refresh_token")}
 
 
 # =============================================================================
