@@ -4745,26 +4745,24 @@ async def upload_training_data(
         print(f"Error in training upload: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/training/stats")
+async def get_training_stats(company_name: str = "Acme Corp"):
+    try:
+        return {"status": "success", "stats": db.training_stats(company_name)}
+    except Exception as e:
+        print(f"Error fetching training stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/training/optimize")
 async def optimize_training_model(payload: dict):
     try:
         company = payload.get("company_name", "Acme Corp")
-        
-        conn = db.get_conn()
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM knowledge_base WHERE type = 'correction'")
-        total_mappings = cursor.fetchone()[0]
-        cursor.close()
-        conn.close()
-        
+        stats = db.training_stats(company)
+        stats["optimization_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return {
             "status": "success",
             "message": "AI Accountant model optimization completed successfully!",
-            "stats": {
-                "total_mappings": total_mappings,
-                "confidence_score": 98.4,
-                "optimization_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
+            "stats": stats
         }
     except Exception as e:
         print(f"Error in optimization: {e}")

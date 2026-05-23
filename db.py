@@ -2502,6 +2502,28 @@ def get_corrections(company_name="Acme Corp"):
     conn.close()
     return [r['data'] for r in rows]
 
+def training_stats(company_name="Acme Corp"):
+    """Real AI-training stats for a company: how many learned correction mappings
+    exist and how many are vectorized (embedded). Confidence = vectorized ratio."""
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT COUNT(*), COUNT(embedding) FROM knowledge_base "
+            "WHERE type = 'correction' AND data->>'company_name' = %s",
+            (company_name,))
+        total, vectorized = cursor.fetchone()
+        total = int(total or 0); vectorized = int(vectorized or 0)
+    finally:
+        cursor.close(); conn.close()
+    if total == 0:
+        confidence = 0.0; status = "Untrained"
+    else:
+        confidence = round(vectorized * 100.0 / total, 1)
+        status = "Vectorized" if vectorized == total else ("Training" if vectorized else "Pending")
+    return {"total_mappings": total, "vectorized": vectorized,
+            "confidence_score": confidence, "status": status}
+
 def get_relevant_corrections(query_embedding, company_name="Acme Corp", limit=5):
     if not query_embedding:
         return []

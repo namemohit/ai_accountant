@@ -238,6 +238,7 @@
 
         function handleLogout() {
             localStorage.removeItem('currentUser');
+            try { localStorage.removeItem('lastRoute'); localStorage.removeItem('activeAgent'); } catch(_) {}
             window.location.href = '/login';
         }
 
@@ -310,6 +311,8 @@
                     <span id="agent-nav-name" style="font-weight:600; color:#f4f4f5; font-size:0.92rem;">Agent</span>
                 </div>
             </div>
+            <!-- Sprint 56 — Home dashboard -->
+            <div class="nav-item" data-view="home" data-platform="1" onclick="showView('home')"><span>🏠</span> Home</div>
             <!-- Sprint 48 — Agentic store. data-view powers nav-from-installs. -->
             <div class="nav-item" data-view="store" data-platform="1" onclick="showView('store')"><span>🛍️</span> Store</div>
             <div class="nav-item" data-view="uploads" data-platform="1" onclick="showView('uploads')"><span>📎</span> Upload anything</div>
@@ -381,7 +384,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v61</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v62</div>
         </div>
     </div>
 
@@ -1094,6 +1097,83 @@
 
         <!-- AI Training View -->
         <!-- Sprint 48 — Agentic Store -->
+        <!-- Sprint 56 — Home dashboard (landing for first-time / empty sessions) -->
+        <div id="home-view" class="dashboard-view" style="display: none;">
+            <header>
+                <h1 id="home-greeting">Good to see you</h1>
+                <p style="color: #94a3b8;">Your workspace at a glance — pick up where you left off, or jump into an agent.</p>
+            </header>
+
+            <!-- Wallet card -->
+            <div class="card" id="home-wallet-card" style="margin-top:8px; display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;">
+                <div>
+                    <div style="font-size:0.78rem; color:#94a3b8; text-transform:uppercase; letter-spacing:0.04em;">Token wallet</div>
+                    <div style="font-size:1.6rem; font-weight:700; color:#f4f4f5; margin-top:4px;">
+                        <span style="color:var(--primary);">⚡</span> <span id="home-wallet-balance">…</span>
+                    </div>
+                </div>
+                <button class="btn confirm-btn" onclick="if(typeof openWalletModal==='function') openWalletModal();"
+                        style="padding:10px 20px;">Recharge</button>
+            </div>
+
+            <!-- AI Model Performance Bar (real, company-scoped) -->
+            <h3 style="margin-top:28px; margin-bottom:12px; font-size:1rem; color:#e2e8f0;">AI learning</h3>
+            <div style="padding: 16px 20px; background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px;">
+                <div style="display: flex; align-items: center; gap: 24px; flex-wrap: wrap;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="color: #94a3b8; font-size: 0.82rem;">Learned Mappings</span>
+                        <span id="stat-mappings" style="font-weight: 800; color: white; font-size: 0.95rem;">0 Mapped</span>
+                    </div>
+                    <div style="width: 1px; height: 20px; background: var(--border);"></div>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="color: #94a3b8; font-size: 0.82rem;">Confidence</span>
+                        <span id="stat-confidence" style="font-weight: 800; color: #4ade80; font-size: 0.95rem;">—</span>
+                    </div>
+                    <div style="width: 1px; height: 20px; background: var(--border);"></div>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="color: #94a3b8; font-size: 0.82rem;">Status</span>
+                        <span id="stat-status" style="background: rgba(16, 185, 129, 0.15); color: #10b981; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 0.72rem;">—</span>
+                    </div>
+                </div>
+                <button class="btn" onclick="startModelOptimization()" style="background: var(--accent); color: white; border: none; font-weight: bold; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; gap: 8px;">
+                    <i class="fas fa-bolt"></i> Optimize AI
+                </button>
+            </div>
+            <!-- Optimizer Console (hidden by default, shown during optimization) -->
+            <div id="optimizer-console-wrapper" style="margin-top: 16px; display: none;">
+                <div class="card" style="background: var(--bg-surface); border-color: rgba(255,255,255,0.05);">
+                    <h4 style="margin: 0 0 12px 0; color: #94a3b8; display: flex; align-items: center; gap: 8px;"><i class="fas fa-terminal" style="font-size: 0.8rem;"></i> Optimization Log</h4>
+                    <div id="optimizer-console" style="font-family: monospace; font-size: 0.8rem; color: #4ade80; text-align: left; height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;">
+                        <div style="color: #64748b;">[Ready] Click 'Optimize AI' to train model.</div>
+                    </div>
+                </div>
+            </div>
+
+            <h3 style="margin-top:28px; margin-bottom:12px; font-size:1rem; color:#e2e8f0;">Your agents</h3>
+            <div class="connector-grid" id="home-agents">
+                <div style="color:#64748b; font-size:0.85rem;">Loading…</div>
+            </div>
+
+            <h3 style="margin-top:28px; margin-bottom:12px; font-size:1rem; color:#e2e8f0;">Quick actions</h3>
+            <div class="connector-grid" id="home-quick-actions">
+                <div class="connector-card" style="cursor:pointer;" onclick="homeNewChat()">
+                    <div class="connector-icon">💬</div>
+                    <div class="connector-name">New chat</div>
+                    <div class="connector-desc">Ask AI Accountant or record a voucher</div>
+                </div>
+                <div class="connector-card" style="cursor:pointer;" onclick="showView('uploads')">
+                    <div class="connector-icon">📎</div>
+                    <div class="connector-name">Upload anything</div>
+                    <div class="connector-desc">Add invoices, statements & docs</div>
+                </div>
+                <div class="connector-card" style="cursor:pointer;" onclick="exitToStore()">
+                    <div class="connector-icon">🛍️</div>
+                    <div class="connector-name">Store</div>
+                    <div class="connector-desc">Browse & install more agents</div>
+                </div>
+            </div>
+        </div>
+
         <div id="store-view" class="dashboard-view" style="display: none;">
             <header>
                 <h1>🛍️ Store</h1>
@@ -1351,44 +1431,11 @@
                 </div>
             </div>
 
-            <!-- AI Model Performance Bar (compact) -->
-            <div style="margin-top: 24px; padding: 16px 20px; background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px;">
-                <div style="display: flex; align-items: center; gap: 24px; flex-wrap: wrap;">
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <span style="color: #94a3b8; font-size: 0.82rem;">Learned Mappings</span>
-                        <span id="stat-mappings" style="font-weight: 800; color: white; font-size: 0.95rem;">0 Mapped</span>
-                    </div>
-                    <div style="width: 1px; height: 20px; background: var(--border);"></div>
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <span style="color: #94a3b8; font-size: 0.82rem;">Confidence</span>
-                        <span style="font-weight: 800; color: #4ade80; font-size: 0.95rem;">98.4%</span>
-                    </div>
-                    <div style="width: 1px; height: 20px; background: var(--border);"></div>
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <span style="color: #94a3b8; font-size: 0.82rem;">Status</span>
-                        <span style="background: rgba(16, 185, 129, 0.15); color: #10b981; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 0.72rem;">Vectorized</span>
-                    </div>
-                </div>
-                <button class="btn" onclick="startModelOptimization()" style="background: var(--accent); color: white; border: none; font-weight: bold; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; gap: 8px;">
-                    <i class="fas fa-bolt"></i> Optimize AI
-                </button>
-            </div>
-
             <!-- Hidden file inputs (preserved for JS functions) -->
             <input type="file" id="tally-training-file" hidden accept=".csv,.xml" onchange="handleTrainingFileSelect(this, 'tally')">
             <input type="file" id="gst-training-file" hidden accept=".csv,.xlsx,.xls,.json" onchange="handleTrainingFileSelect(this, 'gst')">
             <input type="file" id="bank-training-file" hidden accept=".csv,.xlsx,.xls" onchange="handleTrainingFileSelect(this, 'bank')">
             <input type="file" id="tally-xml-upload" hidden accept=".xml" onchange="handleTallyXmlDumpUpload(this)">
-
-            <!-- Optimizer Console (hidden by default, shown during optimization) -->
-            <div id="optimizer-console-wrapper" style="margin-top: 16px; display: none;">
-                <div class="card" style="background: var(--bg-surface); border-color: rgba(255,255,255,0.05);">
-                    <h4 style="margin: 0 0 12px 0; color: #94a3b8; display: flex; align-items: center; gap: 8px;"><i class="fas fa-terminal" style="font-size: 0.8rem;"></i> Optimization Log</h4>
-                    <div id="optimizer-console" style="font-family: monospace; font-size: 0.8rem; color: #4ade80; text-align: left; height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;">
-                        <div style="color: #64748b;">[Ready] Click 'Optimize AI' to train model.</div>
-                    </div>
-                </div>
-            </div>
 
             <!-- ===== CONNECTOR CONFIG MODAL ===== -->
             <div id="connector-modal" class="connector-modal-overlay" style="display: none;" onclick="if(event.target===this)closeConnectorModal()">
@@ -2123,6 +2170,7 @@
                     <span id="agent-drawer-name" style="font-weight:600; color:#f4f4f5; font-size:0.95rem;">Agent</span>
                 </div>
             </div>
+            <div class="mobile-drawer-item" data-view="home" data-platform="1" onclick="mobileNav('home')"><span>🏠</span> Home</div>
             <div class="mobile-drawer-item" data-view="store" data-platform="1" onclick="mobileNav('store')"><span>🛍️</span> Store</div>
             <div class="mobile-drawer-item" data-view="uploads" data-platform="1" onclick="mobileNav('uploads')"><span>📎</span> Upload anything</div>
             <div class="mobile-drawer-item active" data-view="chat" onclick="mobileNav('chat')"><span>💬</span> Chat with Tally</div>
@@ -2147,7 +2195,7 @@
         <div class="mobile-drawer-footer">
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
-            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v61</div>
+            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v62</div>
         </div>
     </div>
 
@@ -2651,7 +2699,7 @@
         // ── Sprint 48b — Agentic store: TWO-LEVEL nav (Store home + agent menus) ──
         // Platform views are agent-agnostic and visible everywhere. Agent views
         // (chat, vouchers, …) show ONLY when their agent is the active one.
-        window.__PLATFORM_VIEWS = new Set(['store','uploads','training','whatsapp','users','settings']);
+        window.__PLATFORM_VIEWS = new Set(['home','store','uploads','training','whatsapp','users','settings']);
         // Fallback agent (used if the installed-agents fetch fails) = today's full set.
         const _AGENT1_VIEWS = ['chat','vouchers','schema','bank','gstr-reco','recon',
                                'gstr','tds','itr','audit','reports','tasks'];
@@ -2719,9 +2767,18 @@
             } else if (baseView === 'store') {
                 exitToStore();
             } else {
-                const list = window.__installedAgents || [];
-                if (list.length === 1) enterAgent(list[0].slug);
-                else exitToStore();
+                // No deep-link hash. Sprint 56: returning users resume exactly where
+                // they left off (last view / agent / open chat session); first-time
+                // or empty → Home dashboard.
+                let last = '';
+                try { last = localStorage.getItem('lastRoute') || ''; } catch(_) {}
+                const lb = (last.split('/')[0] || '');
+                if (last && lb !== 'home') {
+                    location.hash = last;
+                    if (typeof handleHashChange === 'function') handleHashChange();
+                } else {
+                    showView('home');
+                }
             }
         }
         function enterAgent(slug) {
@@ -2788,6 +2845,61 @@
                     if (ne) ne.textContent = meta.name || active;
                 }
             });
+        }
+
+        // Sprint 56 — Home dashboard loader.
+        async function loadHome() {
+            const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
+            const greet = document.getElementById('home-greeting');
+            if (greet) greet.textContent = `Good to see you${u.name ? ', ' + u.name.split(' ')[0] : ''}`;
+            // Wallet balance
+            try {
+                const r = await fetch(`${API}/api/wallet?username=${encodeURIComponent(u.username||'')}`);
+                const d = await r.json();
+                const bal = document.getElementById('home-wallet-balance');
+                if (bal) bal.textContent = (d && typeof d.balance === 'number') ? d.balance.toLocaleString('en-IN') : '—';
+            } catch(_) {
+                const bal = document.getElementById('home-wallet-balance');
+                if (bal) bal.textContent = '—';
+            }
+            // Installed agents → launcher cards
+            const grid = document.getElementById('home-agents');
+            if (grid) {
+                if (typeof _fetchInstalled === 'function' && !(window.__installedAgents && window.__installedAgents.length)) {
+                    try { await _fetchInstalled(); } catch(_) {}
+                }
+                const list = window.__installedAgents || [];
+                grid.innerHTML = list.length ? list.map(a => `
+                    <div class="connector-card" style="cursor:pointer;" onclick="enterAgent('${escapeHtml(a.slug)}')">
+                        <div class="connector-icon">${a.icon || '🧩'}</div>
+                        <div class="connector-name">${escapeHtml(a.name || a.slug)}</div>
+                        <div class="connector-desc">${escapeHtml(a.tagline || 'Open agent')}</div>
+                    </div>`).join('')
+                    : '<div style="color:#64748b; font-size:0.85rem;">No agents installed yet. Visit the Store to add one.</div>';
+            }
+            if (typeof loadTrainingStats === 'function') loadTrainingStats();
+        }
+        // Sprint 56 — real, company-scoped AI training stats.
+        async function loadTrainingStats() {
+            const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
+            try {
+                const r = await fetch(`${API}/training/stats?company_name=${encodeURIComponent(u.company_name||'')}`);
+                const d = await r.json();
+                if (d && d.status === 'success') _renderTrainingStats(d.stats);
+            } catch(_) {}
+        }
+        function _renderTrainingStats(s) {
+            if (!s) return;
+            const m = document.getElementById('stat-mappings');
+            const c = document.getElementById('stat-confidence');
+            const st = document.getElementById('stat-status');
+            if (m) m.innerText = `${(s.total_mappings||0).toLocaleString('en-IN')} Mapped`;
+            if (c) c.innerText = `${s.confidence_score != null ? s.confidence_score : 0}%`;
+            if (st) st.innerText = s.status || '—';
+        }
+        function homeNewChat() {
+            if (typeof enterAgent === 'function') enterAgent('ai-accountant');
+            setTimeout(() => { if (typeof startNewChat === 'function') startNewChat(); }, 60);
         }
 
         async function loadStore() {
@@ -3419,7 +3531,10 @@
                 const host = document.getElementById('agent-remote-view');
                 if (host) host.style.display = 'flex';
                 if (typeof loadRemoteAgent === 'function') loadRemoteAgent(_rOwner);
-                if (!skipHashUpdate) window.location.hash = view;
+                if (!skipHashUpdate) {
+                    window.location.hash = view;
+                    try { localStorage.setItem('lastRoute', view); } catch(_) {}
+                }
                 return;   // remote agents have no local view hooks
             }
             const targetView = document.getElementById(view + '-view');
@@ -3456,6 +3571,11 @@
                 setTimeout(() => { if (typeof loadAuditHealth === 'function') loadAuditHealth(); }, 50);
             }
 
+            // Sprint 56 — Home dashboard
+            if (view === 'home') {
+                setTimeout(() => { if (typeof loadHome === 'function') loadHome(); }, 50);
+            }
+
             // Sprint 48 — Store view
             if (view === 'store') {
                 setTimeout(() => { if (typeof loadStore === 'function') loadStore(); }, 50);
@@ -3480,8 +3600,10 @@
                 } else {
                     window.location.hash = view;
                 }
+                // Sprint 56 — remember the last route so returning users resume here.
+                try { localStorage.setItem('lastRoute', (location.hash || '').replace(/^#/, '')); } catch(_) {}
             }
-            
+
             if (view === 'schema') {
                 loadChartOfAccounts();   // Sprint 36 — default COA tab loads on entry
                 loadPartyMaster();
@@ -10562,7 +10684,7 @@
                 });
                 const result = await response.json();
                 if (result.status === 'success') {
-                    document.getElementById('stat-mappings').innerText = `${result.stats.total_mappings} Mapped`;
+                    if (typeof _renderTrainingStats === 'function') _renderTrainingStats(result.stats);
                     logToOptimizerConsole(`[FINISHED] Model weight matrices optimized completely at ${result.stats.optimization_date}.`);
                 }
             } catch (err) {
@@ -10721,20 +10843,8 @@
         }
 
         async function fetchTrainingStats() {
-            const currentUser = JSON.parse(localStorage.getItem('currentUser'));
-            try {
-                const response = await fetch('/training/optimize', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ company_name: currentUser ? currentUser.company_name : 'Acme Corp' })
-                });
-                const result = await response.json();
-                if (result.status === 'success') {
-                    document.getElementById('stat-mappings').innerText = `${result.stats.total_mappings} Mapped`;
-                }
-            } catch (err) {
-                console.error("Error fetching training stats: ", err);
-            }
+            // Sprint 56 — stats now live on the Home dashboard; reuse the real loader.
+            if (typeof loadTrainingStats === 'function') return loadTrainingStats();
         }
 
         function _timeAgo(iso) {
