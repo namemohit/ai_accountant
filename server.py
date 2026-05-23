@@ -780,8 +780,10 @@ def _usage_from_response(resp):
         pass
     return 0, 0, 0
 
-def _charge_ai(username, company_name, action, response=None, est_text=None, model="gemini-flash-latest"):
-    """Deduct tokens for one AI call. Best-effort — never breaks the AI flow."""
+def _charge_ai(username, company_name, action, response=None, est_text=None,
+               model="gemini-flash-latest", agent="ai-accountant"):
+    """Deduct tokens for one AI call. Best-effort — never breaks the AI flow.
+    `agent` tags which store agent consumed the tokens (per-agent usage breakdown)."""
     try:
         org_id, (uid, _) = _billing_org_id(username, company_name)
         if org_id is None:
@@ -793,7 +795,8 @@ def _charge_ai(username, company_name, action, response=None, est_text=None, mod
         if charged <= 0:
             return
         db.debit_tokens(org_id, charged, action=action, model=model, user_id=uid,
-                        company_name=company_name, prompt_tokens=p, output_tokens=o, total_tokens=t)
+                        company_name=company_name, prompt_tokens=p, output_tokens=o,
+                        total_tokens=t, agent_slug=agent)
     except Exception as e:
         print(f"[_charge_ai] {e}")
 
@@ -5538,6 +5541,122 @@ async def api_wallet_credit(payload: dict):
         bal = db.credit_tokens(org_id, int(tokens), reason="admin_adjust",
                                note=payload.get("note"), created_by=actor)
     return {"status": "success", "balance": bal}
+
+
+# =============================================================================
+# Sprint 48 — Agentic store: catalog / installs / per-agent usage
+# =============================================================================
+def _caller_org_any(username, company_name=None):
+    """Resolve the caller's workspace (org) for store views — any membership role.
+    Returns org_id or None (never raises, so read endpoints degrade gracefully)."""
+    try:
+        org_id, (uid, _) = _billing_org_id(username, company_name)
+        if org_id:
+            return org_id
+        if username:
+            u = db.get_user_by_username(username)
+            uid = u.get("users_id") if u else None
+            if uid:
+                mems = db.get_user_memberships(uid) or []
+                if mems:
+                    return mems[0]["org_id"]
+    except Exception as e:
+        print(f"[_caller_org_any] {e}")
+    return None
+
+
+def _serialize_agent(a):
+    """JSON-safe agent row."""
+    return {
+        "slug": a.get("slug"), "name": a.get("name"), "tagline": a.get("tagline"),
+        "description": a.get("description"), "icon": a.get("icon"),
+        "category": a.get("category"), "status": a.get("status"),
+        "publisher": a.get("publisher"), "token_policy": a.get("token_policy"),
+        "manifest": a.get("manifest"),
+        "installed": bool(a.get("installed")) if "installed" in a else None,
+    }
+
+
+@app.get("/api/agents/catalog")
+async def api_agents_catalog(username: str = None, company_name: str = None):
+    """Full agent catalog; if the caller's workspace resolves, each row carries an
+    `installed` flag."""
+    org_id = _caller_org_any(username, company_name)
+    rows = db.list_catalog(org_id)
+    return {"status": "success", "org_id": str(org_id) if org_id else None,
+            "agents": [_serialize_agent(r) for r in rows]}
+
+
+@app.get("/api/agents/installed")
+async def api_agents_installed(username: str = None, company_name: str = None):
+    """Installed (enabled) agents for the caller's workspace, with manifests.
+    Degrades to [ai-accountant] if the org can't be resolved so the UI never blanks."""
+    org_id = _caller_org_any(username, company_name)
+    if not org_id:
+        cat = {a["slug"]: a for a in db.list_catalog()}
+        a = cat.get("ai-accountant")
+        return {"status": "success", "org_id": None,
+                "agents": [_serialize_agent(a)] if a else []}
+    rows = db.list_installed_agents(org_id)
+    if not rows and not db.org_has_install_history(org_id):
+        # Org never had any install (pre-backfill) → show Agent #1 so the UI
+        # never blanks. (If the user deliberately removed everything, respect that.)
+        cat = {a["slug"]: a for a in db.list_catalog()}
+        a = cat.get("ai-accountant")
+        rows = [a] if a else []
+    return {"status": "success", "org_id": str(org_id),
+            "agents": [_serialize_agent(r) for r in rows]}
+
+
+@app.post("/api/agents/install")
+async def api_agents_install(payload: dict):
+    """Install an agent for the caller's workspace (owner/manager only)."""
+    username = payload.get("username")
+    slug = (payload.get("slug") or "").strip()
+    if not slug:
+        raise HTTPException(status_code=400, detail="slug required")
+    uid, _ = _resolve_caller(username)
+    org_id = _owner_org(uid, payload.get("org_id"), allow=("owner", "manager"))
+    cat = {a["slug"]: a for a in db.list_catalog()}
+    ag = cat.get(slug)
+    if not ag:
+        raise HTTPException(status_code=404, detail="Unknown agent.")
+    if ag.get("status") == "coming_soon":
+        raise HTTPException(status_code=400, detail="That agent isn't available yet.")
+    db.install_agent(org_id, slug, uid)
+    return {"status": "success", "slug": slug, "org_id": str(org_id)}
+
+
+@app.post("/api/agents/uninstall")
+async def api_agents_uninstall(payload: dict):
+    """Soft-uninstall (disable) an agent for the caller's workspace (owner/manager)."""
+    username = payload.get("username")
+    slug = (payload.get("slug") or "").strip()
+    if not slug:
+        raise HTTPException(status_code=400, detail="slug required")
+    uid, _ = _resolve_caller(username)
+    org_id = _owner_org(uid, payload.get("org_id"), allow=("owner", "manager"))
+    db.uninstall_agent(org_id, slug)
+    return {"status": "success", "slug": slug, "org_id": str(org_id)}
+
+
+@app.get("/api/wallet/usage-by-agent")
+async def api_wallet_usage_by_agent(username: str = None, company_name: str = None):
+    """Per-agent token usage breakdown for the caller's workspace."""
+    org_id = _caller_org_any(username, company_name)
+    if not org_id:
+        return {"status": "success", "org_id": None, "usage": []}
+    rows = db.usage_by_agent(org_id)
+    cat = {a["slug"]: a for a in db.list_catalog()}
+    usage = []
+    for r in rows:
+        slug = r["slug"]
+        meta = cat.get(slug, {})
+        usage.append({"slug": slug, "name": meta.get("name", slug),
+                      "icon": meta.get("icon", "🤖"),
+                      "tokens": int(r["tokens"] or 0), "calls": int(r["calls"] or 0)})
+    return {"status": "success", "org_id": str(org_id), "usage": usage}
+
 
 # =============================================================================
 # Tally Agent Authentication (Phase B)

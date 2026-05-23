@@ -1241,9 +1241,215 @@ def _ensure_billing_schema():
                 created_by TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 paid_at TIMESTAMP
             );""")
+        # Sprint 48 — agentic store: agent catalog + per-org installs + per-agent metering.
+        # NB: table is `store_agents` (a pre-existing `agents` table holds Tally
+        # desktop device-auth and must not be touched).
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS store_agents (
+                slug TEXT PRIMARY KEY,
+                name TEXT NOT NULL, tagline TEXT, description TEXT,
+                icon TEXT, category TEXT,
+                status TEXT DEFAULT 'published',     -- published | coming_soon | draft
+                publisher TEXT DEFAULT 'first-party',
+                token_policy JSONB DEFAULT '{}'::jsonb,
+                manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+                sort_order INT DEFAULT 100,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );""")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS org_agent_installs (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                org_id UUID NOT NULL,
+                agent_slug TEXT NOT NULL REFERENCES store_agents(slug),
+                installed_by_user_id UUID,
+                installed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                enabled BOOLEAN DEFAULT TRUE,
+                settings JSONB DEFAULT '{}'::jsonb,
+                UNIQUE(org_id, agent_slug)
+            );""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_oai_org ON org_agent_installs(org_id)")
+        cur.execute("ALTER TABLE ai_usage_log ADD COLUMN IF NOT EXISTS agent_slug TEXT")
         conn.commit(); cur.close(); conn.close()
+        _seed_agents()
     except Exception as e:
         print(f"[_ensure_billing_schema] {e}")
+
+
+# ---------------------------------------------------------------------------
+# Sprint 48 — Agentic store: catalog, installs, per-agent metering
+# ---------------------------------------------------------------------------
+
+# The first-party "AI Accountant" agent. Its manifest enumerates the existing
+# views (grouped). Platform-level views (training/Connectors, store, users,
+# whatsapp, settings) are agent-agnostic and always available — NOT listed here.
+AI_ACCOUNTANT_MANIFEST = {
+    "version": 1,
+    "system_prompt_ref": "kb_default",
+    "api_prefixes": ["/chat", "/api/bank", "/api/gstr", "/api/tds", "/api/audit",
+                     "/api/recon", "/api/masters", "/api/vouchers"],
+    "required_connectors": ["tally"],
+    "nav_groups": [
+        {"label": "Core", "items": [
+            {"view": "chat", "label": "Chat", "icon": "💬"},
+            {"view": "vouchers", "label": "Vouchers", "icon": "📑"},
+            {"view": "schema", "label": "Masters", "icon": "📋"},
+        ]},
+        {"label": "Reconciliation", "items": [
+            {"view": "bank", "label": "Bank Reco", "icon": "🏦"},
+            {"view": "gstr-reco", "label": "GSTR Reco", "icon": "📊", "role_gate": "super_admin"},
+            {"view": "recon", "label": "Reconciliation Studio", "icon": "🔄", "role_gate": "super_admin"},
+        ]},
+        {"label": "Filing & Compliance", "items": [
+            {"view": "gstr", "label": "GST Filing", "icon": "🧾", "role_gate": "super_admin"},
+            {"view": "tds", "label": "TDS Filing", "icon": "🧑‍💼", "role_gate": "super_admin"},
+            {"view": "itr", "label": "ITR Filing", "icon": "📋", "role_gate": "super_admin"},
+            {"view": "audit", "label": "Audit & Compliance", "icon": "🛡️", "role_gate": "super_admin"},
+            {"view": "reports", "label": "Financial Reports", "icon": "📈", "role_gate": "super_admin"},
+            {"view": "tasks", "label": "YantrAI Tasks", "icon": "🎯", "role_gate": "super_admin"},
+        ]},
+    ],
+}
+
+AGENT_SEED = [
+    {"slug": "ai-accountant", "name": "AI Accountant",
+     "tagline": "Books, GST, bank reco & filing on Tally — by chat.",
+     "description": "Your full accounting back-office: voucher entry, bank reconciliation, "
+                    "GST/TDS/ITR filing, masters and audit — all powered by AI and synced to Tally.",
+     "icon": "🧮", "category": "accounting", "status": "published", "publisher": "first-party",
+     "token_policy": {"chargeable": True}, "manifest": AI_ACCOUNTANT_MANIFEST, "sort_order": 10},
+    {"slug": "payroll", "name": "Payroll",
+     "tagline": "Salaries, PF/ESI & payslips — coming soon.",
+     "description": "Run payroll: salary structures, statutory deductions (PF/ESI/PT), "
+                    "payslip generation and compliance. Launching soon.",
+     "icon": "💼", "category": "hr", "status": "coming_soon", "publisher": "first-party",
+     "token_policy": {"chargeable": True}, "manifest": {"version": 1, "nav_groups": []},
+     "sort_order": 20},
+]
+
+
+def _seed_agents():
+    """Idempotent upsert of the first-party agent catalog."""
+    import json as _json
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        for a in AGENT_SEED:
+            cur.execute("""
+                INSERT INTO store_agents (slug, name, tagline, description, icon, category,
+                                    status, publisher, token_policy, manifest, sort_order)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (slug) DO UPDATE SET
+                    name=EXCLUDED.name, tagline=EXCLUDED.tagline, description=EXCLUDED.description,
+                    icon=EXCLUDED.icon, category=EXCLUDED.category, status=EXCLUDED.status,
+                    publisher=EXCLUDED.publisher, token_policy=EXCLUDED.token_policy,
+                    manifest=EXCLUDED.manifest, sort_order=EXCLUDED.sort_order
+            """, (a["slug"], a["name"], a["tagline"], a["description"], a["icon"], a["category"],
+                  a["status"], a["publisher"], _json.dumps(a["token_policy"]),
+                  _json.dumps(a["manifest"]), a["sort_order"]))
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f"[_seed_agents] {e}")
+
+
+def list_catalog(org_id=None):
+    """Full agent catalog. If org_id given, each row carries an `installed` flag."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        if org_id:
+            cur.execute("""
+                SELECT a.*, (i.org_id IS NOT NULL AND i.enabled) AS installed
+                FROM store_agents a
+                LEFT JOIN org_agent_installs i ON i.agent_slug = a.slug AND i.org_id = %s
+                ORDER BY a.sort_order, a.name
+            """, (org_id,))
+        else:
+            cur.execute("SELECT a.*, FALSE AS installed FROM store_agents a ORDER BY a.sort_order, a.name")
+        rows = cur.fetchall()
+        return rows
+    finally:
+        cur.close(); conn.close()
+
+
+def org_has_install_history(org_id):
+    """True if the org has EVER had an install row (enabled or disabled). Lets the
+    API distinguish 'pre-backfill, never installed' from 'deliberately removed all'."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT 1 FROM org_agent_installs WHERE org_id=%s LIMIT 1", (org_id,))
+        return cur.fetchone() is not None
+    finally:
+        cur.close(); conn.close()
+
+
+def list_installed_agents(org_id):
+    """Enabled agents installed for an org, with manifests."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT a.slug, a.name, a.icon, a.category, a.status, a.manifest, a.token_policy
+            FROM org_agent_installs i
+            JOIN store_agents a ON a.slug = i.agent_slug
+            WHERE i.org_id = %s AND i.enabled = TRUE
+            ORDER BY a.sort_order, a.name
+        """, (org_id,))
+        return cur.fetchall()
+    finally:
+        cur.close(); conn.close()
+
+
+def install_agent(org_id, slug, by_user_id=None):
+    """Install (or re-enable) an agent for an org. Idempotent; never deletes."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO org_agent_installs (org_id, agent_slug, installed_by_user_id, enabled)
+            VALUES (%s,%s,%s,TRUE)
+            ON CONFLICT (org_id, agent_slug)
+            DO UPDATE SET enabled=TRUE, installed_by_user_id=COALESCE(org_agent_installs.installed_by_user_id, EXCLUDED.installed_by_user_id)
+        """, (org_id, slug, by_user_id))
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback(); print(f"[install_agent] {e}"); return False
+    finally:
+        cur.close(); conn.close()
+
+
+def uninstall_agent(org_id, slug):
+    """Soft-uninstall — disable, never delete (preserves history + settings)."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("UPDATE org_agent_installs SET enabled=FALSE WHERE org_id=%s AND agent_slug=%s",
+                    (org_id, slug))
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback(); print(f"[uninstall_agent] {e}"); return False
+    finally:
+        cur.close(); conn.close()
+
+
+def usage_by_agent(org_id, since=None):
+    """Per-agent token usage breakdown for a workspace (legacy NULL rows fold under
+    'ai-accountant')."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        if since:
+            cur.execute("""
+                SELECT COALESCE(agent_slug,'ai-accountant') AS slug,
+                       SUM(tokens_charged) AS tokens, COUNT(*) AS calls
+                FROM ai_usage_log WHERE org_id=%s AND created_at>=%s
+                GROUP BY 1 ORDER BY tokens DESC NULLS LAST
+            """, (org_id, since))
+        else:
+            cur.execute("""
+                SELECT COALESCE(agent_slug,'ai-accountant') AS slug,
+                       SUM(tokens_charged) AS tokens, COUNT(*) AS calls
+                FROM ai_usage_log WHERE org_id=%s
+                GROUP BY 1 ORDER BY tokens DESC NULLS LAST
+            """, (org_id,))
+        return cur.fetchall()
+    finally:
+        cur.close(); conn.close()
 
 
 def org_balance(org_id):
@@ -1277,7 +1483,8 @@ def credit_tokens(org_id, n, reason="recharge", ref_id=None, note=None, created_
 
 
 def debit_tokens(org_id, n, action=None, model=None, user_id=None, company_name=None,
-                 prompt_tokens=None, output_tokens=None, total_tokens=None):
+                 prompt_tokens=None, output_tokens=None, total_tokens=None,
+                 agent_slug="ai-accountant"):
     """Deduct n tokens for an AI action; logs usage + ledger. Best-effort
     (allows balance to go slightly negative on the charging call — we pre-check
     before the call). Returns new balance."""
@@ -1290,10 +1497,10 @@ def debit_tokens(org_id, n, action=None, model=None, user_id=None, company_name=
         row = cur.fetchone()
         bal = int(row[0]) if row else None
         cur.execute("""INSERT INTO ai_usage_log (org_id, user_id, company_name, action, model,
-                          prompt_tokens, output_tokens, total_tokens, tokens_charged)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                          prompt_tokens, output_tokens, total_tokens, tokens_charged, agent_slug)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (org_id, user_id, company_name, action, model,
-                     prompt_tokens, output_tokens, total_tokens, n))
+                     prompt_tokens, output_tokens, total_tokens, n, agent_slug))
         cur.execute("""INSERT INTO token_ledger (org_id, delta, balance_after, reason, note, created_by)
                        VALUES (%s,%s,%s,'ai_usage',%s,%s)""",
                     (org_id, -n, bal, action, user_id and str(user_id)))
@@ -1441,6 +1648,11 @@ def onboard_user(username, password, name=None, email=None, phone=None,
               user_type, users_id))
 
         conn.commit()
+        # Sprint 48 — every new workspace starts with Agent #1 (AI Accountant) installed.
+        try:
+            install_agent(org_id, "ai-accountant", users_id)
+        except Exception as _e:
+            print(f"[onboard_user] install Agent#1: {_e}")
         return {"ok": True, "user_type": user_type, "org_id": str(org_id),
                 "org_type": org_type, "company_name": legacy_company,
                 "companies": companies_list or [legacy_company], "role": role,

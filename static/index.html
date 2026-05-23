@@ -145,9 +145,12 @@
             }
             
             if (user.company_name !== newCompany) {
+                // Sprint 48c — remember whether we're on the Store home (no active agent)
+                // so we don't yank the user into the agent's Chat on a company switch.
+                const wasOnStore = !window.__activeAgent;
                 user.company_name = newCompany;
                 localStorage.setItem('currentUser', JSON.stringify(user));
-                
+
                 const tokenInput = document.getElementById('activation-token-input');
                 if(tokenInput) {
                     tokenInput.value = user.company_name || 'Acme Corp';
@@ -155,7 +158,7 @@
 
                 // Clear active session explicitly
                 if (typeof currentSessionId !== 'undefined') currentSessionId = null;
-                window.location.hash = 'chat';
+                if (!wasOnStore) window.location.hash = 'chat';
                 
                 // Toggle demo banner
                 const demoBanner = document.getElementById('demo-company-banner');
@@ -168,6 +171,26 @@
                 if (typeof loadTasks === 'function') loadTasks();
                 if (typeof loadPartyMaster === 'function') loadPartyMaster();
                 if (typeof fetchTallySummary === 'function') fetchTallySummary();
+
+                // Sprint 48c — refresh wallet + agents for the NEW company's workspace
+                // (per-workspace scoping: switching to a client's company swaps both).
+                if (typeof refreshWalletPill === 'function') refreshWalletPill();
+                if (typeof _fetchInstalled === 'function') {
+                    _fetchInstalled().then(() => {
+                        if (wasOnStore) {
+                            // Stay on the Store home — just refresh its nav + cards.
+                            if (typeof _renderNav === 'function') _renderNav();
+                            if (typeof loadStore === 'function') loadStore();
+                        } else if (window.__activeAgent && !window.__agentBySlug[window.__activeAgent]) {
+                            // Active agent isn't installed in this workspace → re-land.
+                            const list = window.__installedAgents || [];
+                            if (list.length === 1) enterAgent(list[0].slug);
+                            else exitToStore();
+                        } else if (typeof _renderNav === 'function') {
+                            _renderNav();   // still valid → re-render the refreshed nav
+                        }
+                    });
+                }
             }
         }
 
@@ -235,26 +258,39 @@
     <div class="sidebar">
         <div class="sidebar-logo">YantrAI Accounting</div>
         <nav>
-            <div class="nav-item active" onclick="showView('chat')"><span>💬</span> Chat</div>
+            <!-- Sprint 48b — agent header (shown only when inside an agent) -->
+            <div id="agent-nav-header" style="display:none; padding:8px 12px; margin-bottom:6px; border-bottom:1px solid var(--border);">
+                <div onclick="exitToStore()" style="display:flex; align-items:center; gap:6px; color:#94a3b8; font-size:0.72rem; cursor:pointer; margin-bottom:6px;">
+                    <span>‹</span> <span>Store</span>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span id="agent-nav-icon" style="font-size:1.1rem;">🧮</span>
+                    <span id="agent-nav-name" style="font-weight:600; color:#f4f4f5; font-size:0.92rem;">Agent</span>
+                </div>
+            </div>
+            <!-- Sprint 48 — Agentic store. data-view powers nav-from-installs. -->
+            <div class="nav-item" data-view="store" data-platform="1" onclick="showView('store')"><span>🛍️</span> Store</div>
 
-            <div class="nav-item" onclick="showView('vouchers')"><span>📑</span> Vouchers</div>
+            <div class="nav-item active" data-view="chat" onclick="showView('chat')"><span>💬</span> Chat</div>
+
+            <div class="nav-item" data-view="vouchers" onclick="showView('vouchers')"><span>📑</span> Vouchers</div>
 
             <!-- Reconciliation Group -->
-            <div class="nav-item" onclick="showView('bank')"><span>🏦</span> Bank Reco</div>
-            <div class="nav-item" data-role-gated="super_admin" onclick="showView('gstr-reco')"><span>📊</span> GSTR Reco</div>
-            <div class="nav-item" data-role-gated="super_admin" onclick="showView('gstr')"><span>🧾</span> GST Filing</div>
-            <div class="nav-item" data-role-gated="super_admin" onclick="showView('tds')"><span>🧑‍💼</span> TDS Filing</div>
-            <div class="nav-item" data-role-gated="super_admin" onclick="showView('itr')"><span>📋</span> ITR Filing</div>
-            <div class="nav-item" data-role-gated="super_admin" onclick="showView('audit')"><span>🛡️</span> Audit &amp; Compliance</div>
-            <div class="nav-item" data-role-gated="super_admin" onclick="showView('recon')"><span>🔄</span> Reconciliation Studio</div>
+            <div class="nav-item" data-view="bank" onclick="showView('bank')"><span>🏦</span> Bank Reco</div>
+            <div class="nav-item" data-view="gstr-reco" data-role-gated="super_admin" onclick="showView('gstr-reco')"><span>📊</span> GSTR Reco</div>
+            <div class="nav-item" data-view="gstr" data-role-gated="super_admin" onclick="showView('gstr')"><span>🧾</span> GST Filing</div>
+            <div class="nav-item" data-view="tds" data-role-gated="super_admin" onclick="showView('tds')"><span>🧑‍💼</span> TDS Filing</div>
+            <div class="nav-item" data-view="itr" data-role-gated="super_admin" onclick="showView('itr')"><span>📋</span> ITR Filing</div>
+            <div class="nav-item" data-view="audit" data-role-gated="super_admin" onclick="showView('audit')"><span>🛡️</span> Audit &amp; Compliance</div>
+            <div class="nav-item" data-view="recon" data-role-gated="super_admin" onclick="showView('recon')"><span>🔄</span> Reconciliation Studio</div>
 
-            <div class="nav-item" data-role-gated="super_admin" onclick="showView('reports')"><span>📈</span> Financial Reports</div>
-            <div class="nav-item" onclick="showView('schema')"><span>📋</span> Masters</div>
-            <div class="nav-item" data-role-gated="super_admin" onclick="showView('tasks')"><span>🎯</span> YantrAI Tasks</div>
-            <div class="nav-item" onclick="showView('training')"><span>🧠</span> Connectors</div>
-            <div class="nav-item" id="nav-whatsapp" onclick="showView('whatsapp')"><span>📱</span> WhatsApp Setup</div>
+            <div class="nav-item" data-view="reports" data-role-gated="super_admin" onclick="showView('reports')"><span>📈</span> Financial Reports</div>
+            <div class="nav-item" data-view="schema" onclick="showView('schema')"><span>📋</span> Masters</div>
+            <div class="nav-item" data-view="tasks" data-role-gated="super_admin" onclick="showView('tasks')"><span>🎯</span> YantrAI Tasks</div>
+            <div class="nav-item" data-view="training" data-platform="1" onclick="showView('training')"><span>🧠</span> Connectors</div>
+            <div class="nav-item" data-view="whatsapp" data-platform="1" data-role-gated="super_admin" id="nav-whatsapp" onclick="showView('whatsapp')"><span>📱</span> WhatsApp Setup</div>
             <!-- Sprint 24 — User Manager (super_admin only) -->
-            <div class="nav-item" data-role-gated="super_admin" onclick="showView('users')"><span>👥</span> User Manager</div>
+            <div class="nav-item" data-view="users" data-platform="1" data-role-gated="super_admin" onclick="showView('users')"><span>👥</span> User Manager</div>
         </nav>
         <div style="margin-top: auto; padding-top: 20px; border-top: 1px solid var(--border);">
             <div id="active-user-badge" style="padding: 10px 15px; margin-bottom: 12px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
@@ -335,6 +371,10 @@
                     </div>
                 </div>
             </div>
+            <!-- Sprint 48 — per-agent usage breakdown -->
+            <div style="font-weight:600; color:white; margin-bottom:6px;">Usage by agent</div>
+            <div id="wallet-usage-by-agent" style="font-size:0.82rem; color:#cbd5e1; margin-bottom:14px;">—</div>
+
             <div style="font-weight:600; color:white; margin-bottom:6px;">Recent activity</div>
             <div id="wallet-ledger" style="font-size:0.82rem; color:#cbd5e1;">—</div>
         </div>
@@ -994,6 +1034,24 @@
 
 
         <!-- AI Training View -->
+        <!-- Sprint 48 — Agentic Store -->
+        <div id="store-view" class="dashboard-view" style="display: none;">
+            <header>
+                <h1>🛍️ Store</h1>
+                <p style="color: #94a3b8;">Add AI agents to your workspace. Every agent draws from your shared token wallet — install only what you need.</p>
+            </header>
+
+            <h3 style="margin-top:24px; margin-bottom:12px; font-size:1rem; color:#e2e8f0;">My Agents</h3>
+            <div class="connector-grid" id="store-my-agents">
+                <div style="color:#64748b; font-size:0.85rem;">Loading…</div>
+            </div>
+
+            <h3 style="margin-top:28px; margin-bottom:12px; font-size:1rem; color:#e2e8f0;">Catalog</h3>
+            <div class="connector-grid" id="store-catalog">
+                <div style="color:#64748b; font-size:0.85rem;">Loading…</div>
+            </div>
+        </div>
+
         <div id="training-view" class="dashboard-view" style="display: none;">
             <header>
                 <h1>Connectors</h1>
@@ -1931,24 +1989,35 @@
                     style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer;"></select>
         </div>
         <nav class="mobile-drawer-nav">
-            <div class="mobile-drawer-item active" onclick="mobileNav('chat')"><span>💬</span> Chat</div>
+            <!-- Sprint 48b — agent header (shown only when inside an agent) -->
+            <div id="agent-drawer-header" style="display:none; padding:6px 16px 10px; margin-bottom:6px; border-bottom:1px solid var(--border);">
+                <div onclick="exitToStore()" style="display:flex; align-items:center; gap:6px; color:#94a3b8; font-size:0.74rem; cursor:pointer; margin-bottom:6px;">
+                    <span>‹</span> <span>Store</span>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span id="agent-drawer-icon" style="font-size:1.15rem;">🧮</span>
+                    <span id="agent-drawer-name" style="font-weight:600; color:#f4f4f5; font-size:0.95rem;">Agent</span>
+                </div>
+            </div>
+            <div class="mobile-drawer-item" data-view="store" data-platform="1" onclick="mobileNav('store')"><span>🛍️</span> Store</div>
+            <div class="mobile-drawer-item active" data-view="chat" onclick="mobileNav('chat')"><span>💬</span> Chat</div>
 
-            <div class="mobile-drawer-item" onclick="mobileNav('vouchers')"><span>📑</span> Vouchers</div>
+            <div class="mobile-drawer-item" data-view="vouchers" onclick="mobileNav('vouchers')"><span>📑</span> Vouchers</div>
 
-            <div class="mobile-drawer-item" onclick="mobileNav('bank')"><span>🏦</span> Bank Reco</div>
-            <div class="mobile-drawer-item" data-role-gated="super_admin" onclick="mobileNav('gstr-reco')"><span>📊</span> GSTR Reco</div>
-            <div class="mobile-drawer-item" data-role-gated="super_admin" onclick="mobileNav('gstr')"><span>🧾</span> GST Filing</div>
-            <div class="mobile-drawer-item" data-role-gated="super_admin" onclick="mobileNav('tds')"><span>🧑‍💼</span> TDS Filing</div>
-            <div class="mobile-drawer-item" data-role-gated="super_admin" onclick="mobileNav('itr')"><span>📋</span> ITR Filing</div>
-            <div class="mobile-drawer-item" data-role-gated="super_admin" onclick="mobileNav('audit')"><span>🛡️</span> Audit &amp; Compliance</div>
-            <div class="mobile-drawer-item" data-role-gated="super_admin" onclick="mobileNav('recon')"><span>🔄</span> Reconciliation Studio</div>
+            <div class="mobile-drawer-item" data-view="bank" onclick="mobileNav('bank')"><span>🏦</span> Bank Reco</div>
+            <div class="mobile-drawer-item" data-view="gstr-reco" data-role-gated="super_admin" onclick="mobileNav('gstr-reco')"><span>📊</span> GSTR Reco</div>
+            <div class="mobile-drawer-item" data-view="gstr" data-role-gated="super_admin" onclick="mobileNav('gstr')"><span>🧾</span> GST Filing</div>
+            <div class="mobile-drawer-item" data-view="tds" data-role-gated="super_admin" onclick="mobileNav('tds')"><span>🧑‍💼</span> TDS Filing</div>
+            <div class="mobile-drawer-item" data-view="itr" data-role-gated="super_admin" onclick="mobileNav('itr')"><span>📋</span> ITR Filing</div>
+            <div class="mobile-drawer-item" data-view="audit" data-role-gated="super_admin" onclick="mobileNav('audit')"><span>🛡️</span> Audit &amp; Compliance</div>
+            <div class="mobile-drawer-item" data-view="recon" data-role-gated="super_admin" onclick="mobileNav('recon')"><span>🔄</span> Reconciliation Studio</div>
 
-            <div class="mobile-drawer-item" data-role-gated="super_admin" onclick="mobileNav('reports')"><span>📈</span> Financial Reports</div>
-            <div class="mobile-drawer-item" onclick="mobileNav('schema')"><span>📋</span> Masters</div>
-            <div class="mobile-drawer-item" data-role-gated="super_admin" onclick="mobileNav('tasks')"><span>🎯</span> YantrAI Tasks</div>
-            <div class="mobile-drawer-item" onclick="mobileNav('training')"><span>🧠</span> Connectors</div>
-            <div class="mobile-drawer-item" id="drawer-whatsapp" onclick="mobileNav('whatsapp')"><span>📱</span> WhatsApp Setup</div>
-            <div class="mobile-drawer-item" data-role-gated="super_admin" onclick="mobileNav('users')"><span>👥</span> User Manager</div>
+            <div class="mobile-drawer-item" data-view="reports" data-role-gated="super_admin" onclick="mobileNav('reports')"><span>📈</span> Financial Reports</div>
+            <div class="mobile-drawer-item" data-view="schema" onclick="mobileNav('schema')"><span>📋</span> Masters</div>
+            <div class="mobile-drawer-item" data-view="tasks" data-role-gated="super_admin" onclick="mobileNav('tasks')"><span>🎯</span> YantrAI Tasks</div>
+            <div class="mobile-drawer-item" data-view="training" data-platform="1" onclick="mobileNav('training')"><span>🧠</span> Connectors</div>
+            <div class="mobile-drawer-item" data-view="whatsapp" data-platform="1" data-role-gated="super_admin" id="drawer-whatsapp" onclick="mobileNav('whatsapp')"><span>📱</span> WhatsApp Setup</div>
+            <div class="mobile-drawer-item" data-view="users" data-platform="1" data-role-gated="super_admin" onclick="mobileNav('users')"><span>👥</span> User Manager</div>
         </nav>
         <div class="mobile-drawer-footer">
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
@@ -2360,6 +2429,20 @@
                 return `<div style="display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px solid rgba(255,255,255,0.05);"><span style="color:#94a3b8;">${escapeHtml(l.reason||'')}${l.note?' · '+escapeHtml(l.note):''}</span><span style="color:${col}; font-family:monospace;">${sign}${(l.delta||0).toLocaleString('en-IN')}</span></div>`;
             }).join('') : '<span style="color:#64748b;">No activity yet.</span>';
             document.getElementById('wallet-modal').style.display = 'flex';
+            _loadWalletUsageByAgent();
+        }
+        async function _loadWalletUsageByAgent() {
+            const box = document.getElementById('wallet-usage-by-agent');
+            if (!box) return;
+            const u = _connUser();
+            try {
+                const r = await fetch(`${API}/api/wallet/usage-by-agent?username=${encodeURIComponent(u.username||'')}&company_name=${encodeURIComponent(_walletActiveCompany())}`);
+                const d = await r.json();
+                const rows = (d && d.usage) || [];
+                box.innerHTML = rows.length ? rows.map(a =>
+                    `<div style="display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px solid rgba(255,255,255,0.05);"><span style="color:#cbd5e1;">${escapeHtml(a.icon||'🤖')} ${escapeHtml(a.name||a.slug)}<span style="color:#64748b;"> · ${(a.calls||0).toLocaleString('en-IN')} calls</span></span><span style="color:#38bdf8; font-family:monospace;">${(a.tokens||0).toLocaleString('en-IN')}</span></div>`
+                ).join('') : '<span style="color:#64748b;">No usage yet.</span>';
+            } catch(_) { box.innerHTML = '<span style="color:#64748b;">—</span>'; }
         }
         function _walletQuote() {
             const amt = parseFloat(document.getElementById('wallet-amount').value || 0);
@@ -2399,6 +2482,197 @@
         }
         // initial + periodic pill refresh
         window.addEventListener('load', () => setTimeout(refreshWalletPill, 800));
+
+        // ── Sprint 48b — Agentic store: TWO-LEVEL nav (Store home + agent menus) ──
+        // Platform views are agent-agnostic and visible everywhere. Agent views
+        // (chat, vouchers, …) show ONLY when their agent is the active one.
+        window.__PLATFORM_VIEWS = new Set(['store','training','whatsapp','users','settings']);
+        // Fallback agent (used if the installed-agents fetch fails) = today's full set.
+        const _AGENT1_VIEWS = ['chat','vouchers','schema','bank','gstr-reco','recon',
+                               'gstr','tds','itr','audit','reports','tasks'];
+        const _FALLBACK_AGENT = { slug:'ai-accountant', name:'AI Accountant', icon:'🧮',
+            manifest:{ nav_groups:[{ items:_AGENT1_VIEWS.map(v => ({view:v})) }] } };
+        window.__INSTALLED_VIEWS = new Set(_AGENT1_VIEWS);   // union of all installed agents' views (for showView guard)
+        window.__installedAgents = [];
+        window.__agentBySlug = {};
+        window.__viewToAgent = {};
+        window.__activeAgent = (() => { try { return localStorage.getItem('activeAgent') || null; } catch(_) { return null; } })();
+
+        function _agentViews(agent) {
+            const out = [];
+            const groups = (agent && agent.manifest && agent.manifest.nav_groups) || [];
+            groups.forEach(g => (g.items||[]).forEach(it => { if (it.view) out.push(it.view); }));
+            return out;
+        }
+        function _firstViewOf(slug) {
+            const a = window.__agentBySlug[slug];
+            return (a && a.views && a.views[0]) || 'chat';
+        }
+        function _buildAgentMaps(agents) {
+            window.__agentBySlug = {}; window.__viewToAgent = {};
+            const union = new Set();
+            (agents||[]).forEach(a => {
+                const views = _agentViews(a);
+                window.__agentBySlug[a.slug] = { name:a.name, icon:a.icon, views };
+                views.forEach(v => { window.__viewToAgent[v] = a.slug; union.add(v); });
+            });
+            window.__INSTALLED_VIEWS = union;
+        }
+        async function _fetchInstalled() {
+            const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
+            let agents = null;
+            try {
+                const r = await fetch(`${API}/api/agents/installed?username=${encodeURIComponent(u.username||'')}&company_name=${encodeURIComponent(u.company_name||'')}`);
+                const d = await r.json();
+                if (d && Array.isArray(d.agents)) agents = d.agents;
+            } catch(_) {}
+            if (!agents || !agents.length) agents = [_FALLBACK_AGENT];   // graceful degrade
+            window.__installedAgents = agents;
+            _buildAgentMaps(agents);
+            return agents;
+        }
+        async function bootstrapAgents() {
+            await _fetchInstalled();
+            // Validate any persisted active agent against what's actually installed.
+            if (window.__activeAgent && !window.__agentBySlug[window.__activeAgent]) {
+                window.__activeAgent = null;
+                try { localStorage.removeItem('activeAgent'); } catch(_) {}
+            }
+            // Landing: honor a meaningful deep-link hash; else auto-open the only
+            // installed agent; else (0 or >1) land on the Store.
+            const rawHash = (location.hash || '').replace(/^#/, '');
+            let baseView = (rawHash.split('/')[0] || '');
+            if (baseView === 'masters') baseView = 'schema';   // URL alias
+            if (baseView && baseView !== 'store') {
+                if (window.__viewToAgent[baseView]) {
+                    window.__activeAgent = window.__viewToAgent[baseView];
+                    try { localStorage.setItem('activeAgent', window.__activeAgent); } catch(_) {}
+                }
+                _renderNav();
+            } else if (baseView === 'store') {
+                exitToStore();
+            } else {
+                const list = window.__installedAgents || [];
+                if (list.length === 1) enterAgent(list[0].slug);
+                else exitToStore();
+            }
+        }
+        function enterAgent(slug) {
+            window.__activeAgent = slug;
+            try { localStorage.setItem('activeAgent', slug); } catch(_) {}
+            _renderNav();
+            showView(_firstViewOf(slug));
+        }
+        function exitToStore() {
+            window.__activeAgent = null;
+            try { localStorage.removeItem('activeAgent'); } catch(_) {}
+            _renderNav();
+            showView('store');
+        }
+        function _renderNav() {
+            const active = window.__activeAgent;
+            const meta = active ? window.__agentBySlug[active] : null;
+            const activeViews = meta ? new Set(meta.views) : new Set();
+            document.querySelectorAll('[data-view]').forEach(el => {
+                const v = el.getAttribute('data-view');
+                const isPlatform = el.hasAttribute('data-platform') || window.__PLATFORM_VIEWS.has(v);
+                const roleHidden = el.hasAttribute('data-role-gated') && !window.__isSuperAdmin;
+                let show;
+                if (roleHidden) show = false;
+                else if (isPlatform) show = true;
+                else show = !!(active && activeViews.has(v));   // agent view only inside its agent
+                el.style.display = show ? '' : 'none';
+            });
+            // Agent header (desktop + mobile) — only inside an agent.
+            const inAgent = !!meta;
+            [['agent-nav-header','agent-nav-icon','agent-nav-name'],
+             ['agent-drawer-header','agent-drawer-icon','agent-drawer-name']].forEach(([h,i,n]) => {
+                const he = document.getElementById(h); if (!he) return;
+                he.style.display = inAgent ? 'block' : 'none';
+                if (inAgent) {
+                    const ie = document.getElementById(i), ne = document.getElementById(n);
+                    if (ie) ie.textContent = meta.icon || '🤖';
+                    if (ne) ne.textContent = meta.name || active;
+                }
+            });
+        }
+
+        async function loadStore() {
+            const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
+            const mine = document.getElementById('store-my-agents');
+            const cat = document.getElementById('store-catalog');
+            try {
+                const r = await fetch(`${API}/api/agents/catalog?username=${encodeURIComponent(u.username||'')}&company_name=${encodeURIComponent(u.company_name||'')}`);
+                const d = await r.json();
+                const agents = (d && d.agents) || [];
+                const installed = agents.filter(a => a.installed);
+                const available = agents.filter(a => !a.installed);
+                mine.innerHTML = installed.length ? installed.map(a => _agentCard(a, true)).join('')
+                    : '<div style="color:#64748b; font-size:0.85rem;">No agents installed yet.</div>';
+                cat.innerHTML = available.length ? available.map(a => _agentCard(a, false)).join('')
+                    : '<div style="color:#64748b; font-size:0.85rem;">You\'ve installed everything available. 🎉</div>';
+            } catch(e) {
+                mine.innerHTML = cat.innerHTML = '<div style="color:#f87171; font-size:0.85rem;">Could not load the store.</div>';
+            }
+        }
+        function _agentCard(a, isInstalled) {
+            const soon = a.status === 'coming_soon';
+            let btn;
+            if (soon) {
+                btn = `<button disabled style="width:100%; margin-top:12px; padding:9px; background:rgba(148,163,184,0.12); color:#64748b; border:1px solid var(--border); border-radius:8px; font-weight:600; cursor:not-allowed;">Coming soon</button>`;
+            } else if (isInstalled) {
+                btn = `<div style="display:flex; gap:8px; margin-top:12px;">
+                    <button onclick="event.stopPropagation(); enterAgent('${a.slug}')" style="flex:1; padding:9px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer;">Open</button>
+                    <button onclick="event.stopPropagation(); uninstallAgent('${a.slug}')" title="Remove from workspace" style="padding:9px 12px; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.25); border-radius:8px; cursor:pointer;">Remove</button>
+                </div>`;
+            } else {
+                btn = `<button onclick="event.stopPropagation(); installAgent('${a.slug}')" style="width:100%; margin-top:12px; padding:9px; background:rgba(56,189,248,0.12); color:#38bdf8; border:1px solid rgba(56,189,248,0.3); border-radius:8px; font-weight:600; cursor:pointer;">Install</button>`;
+            }
+            const status = isInstalled ? '<div class="connector-status connected">Installed</div>'
+                          : (soon ? '<div class="connector-status" style="background:rgba(148,163,184,0.12); color:#94a3b8;">Soon</div>'
+                                  : '<div class="connector-status available">Available</div>');
+            return `<div class="connector-card" style="cursor:default;">
+                <div class="connector-card-header">
+                    <div class="connector-icon" style="background:rgba(56,189,248,0.1); color:#38bdf8;">${escapeHtml(a.icon||'🤖')}</div>
+                    ${status}
+                </div>
+                <h4 class="connector-name">${escapeHtml(a.name||a.slug)}</h4>
+                <p class="connector-desc">${escapeHtml(a.tagline||a.description||'')}</p>
+                <div class="connector-meta"><span>${escapeHtml(a.category||'agent')}</span><span>${escapeHtml(a.publisher||'')}</span></div>
+                ${btn}
+            </div>`;
+        }
+        async function installAgent(slug) {
+            const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
+            try {
+                const r = await fetch(`${API}/api/agents/install`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: u.username, slug }) });
+                const d = await r.json();
+                if (!r.ok) throw new Error((d && (d.detail || d.message)) || 'Install failed');
+                try { showChatToast && showChatToast('Agent installed.'); } catch(_) {}
+                await _fetchInstalled();
+                _renderNav();
+                loadStore();
+            } catch(e) { try { showChatToast && showChatToast(e.message, 'warn'); } catch(_) { alert(e.message); } }
+        }
+        async function uninstallAgent(slug) {
+            const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
+            if (!confirm('Remove this agent from your workspace? Its data is preserved and you can reinstall anytime.')) return;
+            try {
+                const r = await fetch(`${API}/api/agents/uninstall`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: u.username, slug }) });
+                const d = await r.json();
+                if (!r.ok) throw new Error((d && (d.detail || d.message)) || 'Uninstall failed');
+                await _fetchInstalled();
+                // If the removed agent was active (or active no longer valid), go home.
+                if (window.__activeAgent === slug || !window.__agentBySlug[window.__activeAgent]) {
+                    exitToStore();
+                } else {
+                    _renderNav();
+                }
+                loadStore();
+            } catch(e) { try { showChatToast && showChatToast(e.message, 'warn'); } catch(_) { alert(e.message); } }
+        }
+        // Build nav from installs once the page is ready.
+        window.addEventListener('load', () => setTimeout(bootstrapAgents, 600));
 
         // ── Mobile viewport height fix ──────────────────────────────────
         // Some mobile browsers/webviews report 100vh as the *tallest* layout
@@ -2731,9 +3005,25 @@
                 console.warn(`[role-gate] '${view}' is super_admin-only; redirecting to chat.`);
                 view = 'chat';
             }
+            // Sprint 48 — agent-install gating. A view belonging to an uninstalled
+            // agent bounces to chat. Platform views (store, training, etc.) are exempt.
+            if (window.__INSTALLED_VIEWS && !window.__PLATFORM_VIEWS.has(view)
+                && !window.__INSTALLED_VIEWS.has(view) && view !== 'chat'
+                && document.getElementById(view + '-view')) {
+                console.warn(`[agent-gate] '${view}' belongs to an uninstalled agent; redirecting to chat.`);
+                view = 'chat';
+            }
             // Legacy GST/Revenue hashes still redirect to recon (Templates flow)
             if (['gst', 'revenue'].includes(view)) {
                 view = 'recon';
+            }
+            // Sprint 48b — entering an agent's view sets the active-agent context so
+            // the sidebar swaps to that agent's menu (handles deep links + refresh).
+            if (window.__viewToAgent && window.__viewToAgent[view]
+                && window.__activeAgent !== window.__viewToAgent[view]) {
+                window.__activeAgent = window.__viewToAgent[view];
+                try { localStorage.setItem('activeAgent', window.__activeAgent); } catch(_) {}
+                if (typeof _renderNav === 'function') _renderNav();
             }
             // Bank Register (deprecated) → redirect to Bank Reco
             if (view === 'bankregister') {
@@ -2772,6 +3062,11 @@
             // Audit & Compliance view
             if (view === 'audit') {
                 setTimeout(() => { if (typeof loadAuditHealth === 'function') loadAuditHealth(); }, 50);
+            }
+
+            // Sprint 48 — Store view
+            if (view === 'store') {
+                setTimeout(() => { if (typeof loadStore === 'function') loadStore(); }, 50);
             }
             
             if (!skipHashUpdate) {
