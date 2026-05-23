@@ -1037,6 +1037,24 @@ def archive_company_file(file_id, company_name):
         cur.close(); conn.close()
 
 
+def rename_company_file(file_id, company_name, new_name):
+    """Sprint 55b — rename a file's display name (original_name); the stored
+    file on disk is untouched, so existing links keep working."""
+    _ensure_company_files()
+    new_name = (new_name or "").strip()
+    if not new_name:
+        return False
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("UPDATE company_files SET original_name=%s WHERE id=%s AND company_name=%s AND archived_at IS NULL",
+                    (new_name, file_id, company_name))
+        ok = cur.rowcount > 0; conn.commit(); return ok
+    except Exception as e:
+        conn.rollback(); print(f"[rename_company_file] {e}"); return False
+    finally:
+        cur.close(); conn.close()
+
+
 def get_user_by_auth_uid(auth_uid):
     """Sprint 51 — map a Supabase auth user (auth.users.id) to our accounting_users row."""
     if not auth_uid:

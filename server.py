@@ -5884,6 +5884,13 @@ async def api_files_delete(payload: dict):
     return {"status": "success" if ok else "error"}
 
 
+@app.post("/api/files/rename")
+async def api_files_rename(payload: dict):
+    ok = db.rename_company_file(payload.get("id"), payload.get("company_name"),
+                                payload.get("name"))
+    return {"status": "success" if ok else "error"}
+
+
 @app.post("/api/wallet/credit")
 async def api_wallet_credit(payload: dict):
     """super_admin manual top-up (until the gateway is live). Credits tokens to an

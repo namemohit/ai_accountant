@@ -384,7 +384,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v62</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v63</div>
         </div>
     </div>
 
@@ -1251,8 +1251,26 @@
                 <input type="file" id="uploads-file-input" multiple style="display:none;" onchange="uploadAnything(this.files); this.value='';">
             </div>
             <div id="uploads-msg" style="font-size:0.82rem; margin-top:10px; color:#94a3b8;"></div>
-            <div id="uploads-grid" class="connector-grid" style="margin-top:18px;">
+            <div style="display:flex; align-items:center; gap:12px; margin-top:18px;">
+                <h3 style="margin:0; font-size:1rem; color:#e2e8f0;">All files <span id="uploads-count" style="color:#64748b; font-weight:500;"></span></h3>
+                <input id="uploads-search" oninput="renderUploads()" placeholder="🔍 Search files…"
+                       style="margin-left:auto; max-width:260px; flex:1; padding:7px 12px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; font-size:0.85rem;">
+            </div>
+            <div id="uploads-grid" class="connector-grid" style="margin-top:12px;">
                 <div style="color:#64748b; font-size:0.85rem;">Loading…</div>
+            </div>
+        </div>
+
+        <!-- Sprint 55b — file preview modal -->
+        <div id="file-preview-modal" onclick="if(event.target===this) closeFilePreview()"
+             style="display:none; position:fixed; inset:0; z-index:200; background:rgba(0,0,0,0.7); align-items:center; justify-content:center; padding:24px;">
+            <div style="background:var(--bg-surface); border:1px solid var(--border); border-radius:14px; width:min(900px,100%); max-height:90vh; display:flex; flex-direction:column; overflow:hidden;">
+                <div style="display:flex; align-items:center; gap:12px; padding:14px 18px; border-bottom:1px solid var(--border);">
+                    <span id="file-preview-title" style="font-weight:600; color:#f4f4f5; word-break:break-word; flex:1;">Preview</span>
+                    <a id="file-preview-open" href="#" target="_blank" rel="noopener" style="color:#94a3b8; text-decoration:none; font-size:0.85rem;">Open ↗</a>
+                    <button onclick="closeFilePreview()" style="background:none; border:none; color:#94a3b8; font-size:1.2rem; cursor:pointer;">✕</button>
+                </div>
+                <div id="file-preview-body" style="padding:16px; overflow:auto;"></div>
             </div>
         </div>
 
@@ -2195,7 +2213,7 @@
         <div class="mobile-drawer-footer">
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
-            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v62</div>
+            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v63</div>
         </div>
     </div>
 
@@ -3000,27 +3018,80 @@
             try {
                 const r = await fetch(`${API}/api/files?company_name=${encodeURIComponent(co)}`);
                 const d = await r.json();
-                const files = (d && d.files) || [];
-                grid.innerHTML = files.length ? files.map(_uploadCard).join('')
-                    : '<div style="color:#64748b; font-size:0.85rem;">No files yet — drop something above.</div>';
+                window.__uploads = (d && d.files) || [];
+                renderUploads();
             } catch(e) { grid.innerHTML = '<div style="color:#f87171; font-size:0.85rem;">Could not load files.</div>'; }
+        }
+        function renderUploads() {
+            const grid = document.getElementById('uploads-grid'); if (!grid) return;
+            const all = window.__uploads || [];
+            const q = (document.getElementById('uploads-search')?.value || '').trim().toLowerCase();
+            const files = q ? all.filter(f => (f.original_name||'').toLowerCase().includes(q)) : all;
+            const cnt = document.getElementById('uploads-count');
+            if (cnt) cnt.textContent = all.length ? `(${q ? files.length + ' of ' : ''}${all.length})` : '';
+            grid.innerHTML = files.length ? files.map(_uploadCard).join('')
+                : (all.length ? '<div style="color:#64748b; font-size:0.85rem;">No files match your search.</div>'
+                              : '<div style="color:#64748b; font-size:0.85rem;">No files yet — drop something above.</div>');
         }
         function _uploadCard(f) {
             const nm = escapeHtml(f.original_name || 'file');
             const when = f.created_at ? new Date(f.created_at).toLocaleDateString('en-IN') : '';
+            const urlJ = JSON.stringify(f.file_url);
+            const nameJ = JSON.stringify(f.original_name || 'file');
+            const typeJ = JSON.stringify(f.file_type || '');
             return `<div class="connector-card" style="cursor:default;">
                 <div class="connector-card-header">
-                    <div class="connector-icon" style="background:rgba(56,189,248,0.1); color:#38bdf8;">${_fileIcon(f.file_type)}</div>
+                    <div class="connector-icon" style="background:rgba(56,189,248,0.1); color:#38bdf8; cursor:pointer;" onclick="previewUpload(${urlJ}, ${nameJ}, ${typeJ})">${_fileIcon(f.file_type)}</div>
                     <div class="connector-status" style="background:rgba(148,163,184,0.12); color:#94a3b8;">${_fmtSize(f.size_bytes)}</div>
                 </div>
-                <h4 class="connector-name" style="word-break:break-word;">${nm}</h4>
+                <h4 class="connector-name" style="word-break:break-word; cursor:pointer;" onclick="previewUpload(${urlJ}, ${nameJ}, ${typeJ})" title="Preview">${nm}</h4>
                 <p class="connector-desc">${when}</p>
-                <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;">
-                    <button onclick="sendUploadToChat('${f.file_url}', ${JSON.stringify(f.original_name||'file')}, ${JSON.stringify(f.file_type||'')})" style="flex:1; padding:7px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer;">Send to chat</button>
-                    <a href="${f.file_url}" target="_blank" rel="noopener" style="padding:7px 12px; background:var(--bg-light); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; text-decoration:none;">Open</a>
-                    <button onclick="deleteUpload('${f.id}')" title="Remove" style="padding:7px 10px; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.25); border-radius:8px; cursor:pointer;">✕</button>
+                <div style="display:flex; gap:6px; margin-top:10px; flex-wrap:wrap;">
+                    <button onclick="previewUpload(${urlJ}, ${nameJ}, ${typeJ})" style="flex:1; min-width:78px; padding:7px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer;">Preview</button>
+                    <button onclick="sendUploadToChat(${urlJ}, ${nameJ}, ${typeJ})" style="flex:1; min-width:78px; padding:7px; background:var(--bg-light); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; cursor:pointer;">Send to chat</button>
+                    <button onclick="renameUpload('${f.id}', ${nameJ})" title="Rename" style="padding:7px 10px; background:var(--bg-light); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; cursor:pointer;">✎</button>
+                    <a href="${f.file_url}" download="${nm}" target="_blank" rel="noopener" title="Download" style="padding:7px 10px; background:var(--bg-light); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; text-decoration:none;">⬇</a>
+                    <button onclick="deleteUpload('${f.id}')" title="Delete" style="padding:7px 10px; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.25); border-radius:8px; cursor:pointer;">✕</button>
                 </div>
             </div>`;
+        }
+        function previewUpload(url, name, type) {
+            const t = (type || '').toLowerCase();
+            const ext = (name || '').split('.').pop().toLowerCase();
+            let body;
+            if (t.startsWith('image/') || ['png','jpg','jpeg','gif','webp','bmp','svg'].includes(ext)) {
+                body = `<img src="${url}" alt="${escapeHtml(name)}" style="max-width:100%; max-height:72vh; border-radius:8px; display:block; margin:0 auto;">`;
+            } else if (t === 'application/pdf' || ext === 'pdf') {
+                body = `<iframe src="${url}" style="width:100%; height:72vh; border:0; border-radius:8px; background:#fff;"></iframe>`;
+            } else {
+                body = `<div style="padding:40px; text-align:center; color:#94a3b8;">
+                    <div style="font-size:2.4rem;">${_fileIcon(type)}</div>
+                    <div style="margin-top:10px;">No inline preview for this file type.</div>
+                    <a href="${url}" download="${escapeHtml(name)}" target="_blank" rel="noopener" style="display:inline-block; margin-top:14px; padding:8px 18px; background:var(--primary); color:#fff; border-radius:8px; text-decoration:none;">Download</a>
+                </div>`;
+            }
+            const modal = document.getElementById('file-preview-modal');
+            document.getElementById('file-preview-title').textContent = name || 'Preview';
+            document.getElementById('file-preview-open').href = url;
+            document.getElementById('file-preview-body').innerHTML = body;
+            modal.style.display = 'flex';
+        }
+        function closeFilePreview() {
+            const m = document.getElementById('file-preview-modal');
+            if (m) { m.style.display = 'none'; document.getElementById('file-preview-body').innerHTML = ''; }
+        }
+        async function renameUpload(id, currentName) {
+            const next = prompt('Rename file', currentName || '');
+            if (next === null) return;
+            const name = next.trim();
+            if (!name || name === currentName) return;
+            const co = _uploadsCo();
+            try {
+                const r = await fetch(`${API}/api/files/rename`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id, company_name: co, name }) });
+                const d = await r.json();
+                if (d && d.status === 'success') loadUploads();
+                else alert('Could not rename the file.');
+            } catch(e) { alert('Could not rename the file.'); }
         }
         async function uploadAnything(fileList) {
             const files = Array.from(fileList || []);
