@@ -1896,6 +1896,41 @@ def onboard_user(username, password, name=None, email=None, phone=None,
         cur.close(); conn.close()
 
 
+def get_user_by_email(email):
+    """Sprint 52 — find an account by email (for Google sign-in linking)."""
+    if not email:
+        return None
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT * FROM accounting_users WHERE LOWER(email)=LOWER(%s) LIMIT 1", (email,))
+        return cur.fetchone()
+    except Exception as e:
+        print(f"[get_user_by_email] {e}"); return None
+    finally:
+        cur.close(); conn.close()
+
+
+def onboard_google_user(auth_uid, email, name=None):
+    """Sprint 52 — provision a workspace for a first-time Google user, then link the
+    Supabase auth uid. Reuses onboard_user. Returns the accounting_users row or None."""
+    import secrets as _secrets, re as _re
+    email = (email or "").strip().lower()
+    base = _re.sub(r'[^a-z0-9]', '', (email.split('@')[0] if email else '') or 'user') or 'user'
+    username = base
+    n = 1
+    while get_user_by_username(username):
+        n += 1; username = f"{base}{n}"
+    display = (name or base).strip()
+    res = onboard_user(username=username, password="goog_" + _secrets.token_hex(16),
+                       name=display, email=email or None,
+                       company_name=f"{display}'s workspace")
+    if not res.get("ok"):
+        print(f"[onboard_google_user] onboard failed: {res.get('error')}")
+        return None
+    link_auth_uid(username, auth_uid)
+    return get_user_by_username(username)
+
+
 # ---- Chat Functions ----
 
 def _ensure_chat_user_column():

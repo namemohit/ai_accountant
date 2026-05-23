@@ -5589,6 +5589,50 @@ async def api_auth_refresh(payload: dict):
             "refresh_token": g.get("refresh_token")}
 
 
+@app.get("/api/auth/config")
+async def api_auth_config():
+    """Public client config so the login page can init supabase-js (anon key is
+    public-safe). Used for the Google sign-in flow."""
+    return {"supabase_url": SUPABASE_URL, "anon_key": SUPABASE_ANON_KEY,
+            "enabled": SUPABASE_AUTH_ENABLED}
+
+
+@app.post("/api/auth/google")
+async def api_auth_google(payload: dict):
+    """Complete a Google OAuth sign-in: verify the Supabase session token, then map
+    it to an app account — by auth_uid, else by email (link), else provision a new
+    workspace."""
+    if not SUPABASE_AUTH_ENABLED:
+        raise HTTPException(status_code=400, detail="Auth not enabled.")
+    access_token = (payload or {}).get("access_token") or ""
+    claims = _verify_token("Bearer " + access_token)
+    if not claims:
+        raise HTTPException(status_code=401, detail="Invalid Google session.")
+    sub = claims.get("sub")
+    email = (claims.get("email") or "").lower()
+    name = (claims.get("user_metadata") or {}).get("full_name") or claims.get("name")
+    user = db.get_user_by_auth_uid(sub)
+    if not user and email:
+        existing = db.get_user_by_email(email)
+        if existing:
+            db.link_auth_uid(existing["username"], sub)
+            user = db.get_user_by_auth_uid(sub)
+    if not user:
+        user = db.onboard_google_user(sub, email, name)
+    if not user:
+        raise HTTPException(status_code=500, detail="Could not provision your account.")
+    memberships = []
+    try:
+        if user.get("users_id"):
+            memberships = db.get_user_memberships(user["users_id"])
+    except Exception as me:
+        print(f"[auth_google] memberships: {me}", flush=True)
+    return {"status": "success",
+            "user": _user_payload(user, {"memberships": memberships}),
+            "access_token": access_token,
+            "refresh_token": (payload or {}).get("refresh_token")}
+
+
 # =============================================================================
 # Sprint 46 — Handshake codes (share workspace access, AnyDesk-style)
 # =============================================================================
