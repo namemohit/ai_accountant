@@ -316,6 +316,7 @@
             <!-- Sprint 48 — Agentic store. data-view powers nav-from-installs. -->
             <div class="nav-item" data-view="store" data-platform="1" onclick="showView('store')"><span>🛍️</span> Store</div>
             <div class="nav-item" data-view="uploads" data-platform="1" onclick="showView('uploads')"><span>📎</span> Upload anything</div>
+            <div class="nav-item" data-view="yantrai-chat" data-platform="1" onclick="showView('yantrai-chat')"><span>🤝</span> Chat with YantrAI</div>
 
             <div class="nav-item active" data-view="chat" onclick="showView('chat')"><span>💬</span> Chat with Tally</div>
 
@@ -384,7 +385,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v63</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v64</div>
         </div>
     </div>
 
@@ -1271,6 +1272,47 @@
                     <button onclick="closeFilePreview()" style="background:none; border:none; color:#94a3b8; font-size:1.2rem; cursor:pointer;">✕</button>
                 </div>
                 <div id="file-preview-body" style="padding:16px; overflow:auto;"></div>
+            </div>
+        </div>
+
+        <!-- Sprint 57 — Chat with YantrAI: task intake that builds a Problem Document -->
+        <div id="yantrai-chat-view" class="dashboard-view" style="display: none;">
+            <header>
+                <h1>🤝 Chat with YantrAI</h1>
+                <p style="color:#94a3b8;">Describe any task you want the YantrAI team to deliver. We'll shape it into a clear brief together, then raise it with a tracking ID.</p>
+            </header>
+            <div style="display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap; margin-top:8px;">
+                <!-- Conversation -->
+                <div style="flex:2; min-width:320px; display:flex; flex-direction:column; height:calc(100vh - 210px); border:1px solid var(--border); border-radius:14px; overflow:hidden; background:var(--card-bg);">
+                    <div id="yt-thread" style="flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:12px;"></div>
+                    <div style="border-top:1px solid var(--border); padding:12px; display:flex; gap:8px;">
+                        <textarea id="yt-input" rows="1" placeholder="Describe your task…  (e.g. 'Reconcile FY25-26 ICICI statement and flag mismatches')"
+                                  onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();yantraiSend();}"
+                                  style="flex:1; resize:none; max-height:120px; padding:10px 12px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:10px; font-size:0.9rem;"></textarea>
+                        <button id="yt-send" onclick="yantraiSend()" style="padding:0 18px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:10px; font-weight:600; cursor:pointer;">Send</button>
+                    </div>
+                </div>
+                <!-- PD panel + tracker -->
+                <div style="flex:1; min-width:280px; display:flex; flex-direction:column; gap:16px;">
+                    <div class="card" style="margin:0;">
+                        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px;">
+                            <h3 style="margin:0; font-size:0.95rem;">📄 Problem Document</h3>
+                            <span id="yt-pd-ready" style="font-size:0.7rem; padding:2px 8px; border-radius:10px; background:rgba(148,163,184,0.15); color:#94a3b8;">Drafting…</span>
+                        </div>
+                        <div id="yt-pd-body" style="font-size:0.84rem; color:#cbd5e1; line-height:1.5;">
+                            <div style="color:#64748b;">Your brief will take shape here as we chat.</div>
+                        </div>
+                        <button id="yt-submit" onclick="yantraiSubmitPD()" disabled
+                                style="margin-top:14px; width:100%; padding:11px; background:#334155; color:#94a3b8; border:none; border-radius:10px; font-weight:600; cursor:not-allowed;">Confirm &amp; raise task</button>
+                    </div>
+                    <div class="card" style="margin:0;">
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+                            <h3 style="margin:0; font-size:0.95rem;">🎫 Your tasks</h3>
+                            <button onclick="loadMyYantraiTasks()" style="background:none; border:1px solid var(--border); color:#94a3b8; border-radius:8px; padding:4px 10px; font-size:0.75rem; cursor:pointer;">Refresh</button>
+                        </div>
+                        <div id="yt-my-tasks" style="font-size:0.82rem; color:#94a3b8;">Loading…</div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -2191,6 +2233,7 @@
             <div class="mobile-drawer-item" data-view="home" data-platform="1" onclick="mobileNav('home')"><span>🏠</span> Home</div>
             <div class="mobile-drawer-item" data-view="store" data-platform="1" onclick="mobileNav('store')"><span>🛍️</span> Store</div>
             <div class="mobile-drawer-item" data-view="uploads" data-platform="1" onclick="mobileNav('uploads')"><span>📎</span> Upload anything</div>
+            <div class="mobile-drawer-item" data-view="yantrai-chat" data-platform="1" onclick="mobileNav('yantrai-chat')"><span>🤝</span> Chat with YantrAI</div>
             <div class="mobile-drawer-item active" data-view="chat" onclick="mobileNav('chat')"><span>💬</span> Chat with Tally</div>
 
             <div class="mobile-drawer-item" data-view="vouchers" onclick="mobileNav('vouchers')"><span>📑</span> Vouchers</div>
@@ -2213,7 +2256,7 @@
         <div class="mobile-drawer-footer">
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
-            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v63</div>
+            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v64</div>
         </div>
     </div>
 
@@ -2717,7 +2760,7 @@
         // ── Sprint 48b — Agentic store: TWO-LEVEL nav (Store home + agent menus) ──
         // Platform views are agent-agnostic and visible everywhere. Agent views
         // (chat, vouchers, …) show ONLY when their agent is the active one.
-        window.__PLATFORM_VIEWS = new Set(['home','store','uploads','training','whatsapp','users','settings']);
+        window.__PLATFORM_VIEWS = new Set(['home','store','uploads','yantrai-chat','training','whatsapp','users','settings']);
         // Fallback agent (used if the installed-agents fetch fails) = today's full set.
         const _AGENT1_VIEWS = ['chat','vouchers','schema','bank','gstr-reco','recon',
                                'gstr','tds','itr','audit','reports','tasks'];
@@ -2918,6 +2961,136 @@
         function homeNewChat() {
             if (typeof enterAgent === 'function') enterAgent('ai-accountant');
             setTimeout(() => { if (typeof startNewChat === 'function') startNewChat(); }, 60);
+        }
+
+        // ── Sprint 57 — Chat with YantrAI (task intake → Problem Document → SA inbox) ──
+        window.__ytMessages = [];
+        window.__ytPD = null;
+        function _ytUser() { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } }
+        function loadYantraiChat() {
+            if (!window.__ytMessages.length) {
+                window.__ytMessages = [{ role:'assistant', content:"Hi! I'm YantrAI. Tell me what you'd like us to do — a task, a problem, anything. I'll ask a couple of questions and shape it into a clear brief you can raise with one click." }];
+                window.__ytPD = null;
+                _renderYantraiThread();
+                _renderPD(null, false);
+            }
+            loadMyYantraiTasks();
+        }
+        function _ytBubble(role, content) {
+            const me = role === 'user';
+            return `<div style="align-self:${me?'flex-end':'flex-start'}; max-width:82%; padding:10px 14px; border-radius:14px; ${me?'background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border-bottom-right-radius:4px;':'background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-bottom-left-radius:4px;'} font-size:0.9rem; line-height:1.5; white-space:pre-wrap;">${escapeHtml(content)}</div>`;
+        }
+        function _renderYantraiThread() {
+            const t = document.getElementById('yt-thread'); if (!t) return;
+            t.innerHTML = window.__ytMessages.map(m => _ytBubble(m.role, m.content)).join('');
+            t.scrollTop = t.scrollHeight;
+        }
+        async function yantraiSend() {
+            const input = document.getElementById('yt-input');
+            const txt = (input.value || '').trim();
+            if (!txt) return;
+            input.value = '';
+            window.__ytMessages.push({ role:'user', content: txt });
+            _renderYantraiThread();
+            const t = document.getElementById('yt-thread');
+            const typing = document.createElement('div');
+            typing.id = 'yt-typing'; typing.style.cssText = 'align-self:flex-start; color:#64748b; font-size:0.85rem; padding:4px 6px;';
+            typing.textContent = 'YantrAI is thinking…'; t.appendChild(typing); t.scrollTop = t.scrollHeight;
+            const u = _ytUser();
+            try {
+                const r = await fetch(`${API}/api/yantrai/pd/chat`, {
+                    method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({ messages: window.__ytMessages, company_name: u.company_name||'', username: u.username||'' })
+                });
+                const d = await r.json();
+                window.__ytMessages.push({ role:'assistant', content: d.reply });
+                if (d.pd) window.__ytPD = d.pd;
+                _renderYantraiThread();
+                _renderPD(window.__ytPD, !!d.ready);
+            } catch(e) {
+                window.__ytMessages.push({ role:'assistant', content: "Sorry — I couldn't process that. Please try again." });
+                _renderYantraiThread();
+            } finally {
+                const ty = document.getElementById('yt-typing'); if (ty) ty.remove();
+            }
+        }
+        function _renderPD(pd, ready) {
+            const body = document.getElementById('yt-pd-body');
+            const badge = document.getElementById('yt-pd-ready');
+            const btn = document.getElementById('yt-submit');
+            if (!pd) {
+                if (body) body.innerHTML = '<div style="color:#64748b;">Your brief will take shape here as we chat.</div>';
+                if (badge) { badge.textContent = 'Drafting…'; badge.style.background='rgba(148,163,184,0.15)'; badge.style.color='#94a3b8'; }
+                _ytSetBtn(false); return;
+            }
+            const row = (label, val) => {
+                if (!val || (Array.isArray(val) && !val.length)) return '';
+                const v = Array.isArray(val) ? '<ul style="margin:4px 0 0 16px; padding:0;">'+val.map(x=>`<li>${escapeHtml(String(x))}</li>`).join('')+'</ul>' : escapeHtml(String(val));
+                return `<div style="margin-bottom:8px;"><span style="color:#94a3b8; font-size:0.75rem; text-transform:uppercase; letter-spacing:0.03em;">${label}</span><div style="color:#e2e8f0;">${v}</div></div>`;
+            };
+            body.innerHTML =
+                `<div style="margin-bottom:10px;"><span style="font-weight:700; color:#f4f4f5; font-size:0.95rem;">${escapeHtml(pd.title||'Untitled task')}</span>
+                 <span style="margin-left:6px; font-size:0.68rem; padding:2px 7px; border-radius:8px; background:rgba(99,102,241,0.15); color:#818cf8;">${escapeHtml(pd.category||'Other')}</span>
+                 <span style="font-size:0.68rem; padding:2px 7px; border-radius:8px; background:rgba(59,130,246,0.15); color:#60a5fa;">${escapeHtml(pd.priority||'Normal')}</span></div>`
+                + row('Objective', pd.objective) + row('Scope', pd.scope)
+                + row('Deliverables', pd.deliverables) + row('Data required', pd.data_required)
+                + row('Constraints', pd.constraints) + row('Success criteria', pd.success_criteria);
+            if (badge) {
+                badge.textContent = ready ? 'Ready to raise' : 'Drafting…';
+                badge.style.background = ready ? 'rgba(16,185,129,0.15)' : 'rgba(148,163,184,0.15)';
+                badge.style.color = ready ? '#10b981' : '#94a3b8';
+            }
+            _ytSetBtn(!!ready);
+        }
+        function _ytSetBtn(enabled) {
+            const btn = document.getElementById('yt-submit'); if (!btn) return;
+            btn.disabled = !enabled;
+            btn.style.cursor = enabled ? 'pointer' : 'not-allowed';
+            btn.style.background = enabled ? 'linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%)' : '#334155';
+            btn.style.color = enabled ? '#fff' : '#94a3b8';
+        }
+        async function yantraiSubmitPD() {
+            if (!window.__ytPD) return;
+            const btn = document.getElementById('yt-submit');
+            btn.disabled = true; btn.textContent = 'Raising…';
+            const u = _ytUser();
+            try {
+                const r = await fetch(`${API}/api/yantrai/pd/submit`, {
+                    method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({ pd: window.__ytPD, company_name: u.company_name||'', username: u.username||'' })
+                });
+                const d = await r.json();
+                if (d.status === 'success') {
+                    window.__ytMessages.push({ role:'assistant', content: `✅ Raised! Your task is ${d.task_code}. Track it under "Your tasks" — the YantrAI team will pick it up.` });
+                    _renderYantraiThread();
+                    // reset for a fresh request
+                    window.__ytPD = null; _renderPD(null, false);
+                    btn.textContent = 'Confirm & raise task';
+                    loadMyYantraiTasks();
+                } else { throw new Error('failed'); }
+            } catch(e) {
+                btn.disabled = false; btn.textContent = 'Confirm & raise task';
+                alert('Could not raise the task. Please try again.');
+            }
+        }
+        async function loadMyYantraiTasks() {
+            const el = document.getElementById('yt-my-tasks'); if (!el) return;
+            const u = _ytUser();
+            try {
+                const r = await fetch(`${API}/api/yantrai/my-tasks?company_name=${encodeURIComponent(u.company_name||'')}`);
+                const d = await r.json();
+                const tasks = (d && d.tasks) || [];
+                if (!tasks.length) { el.innerHTML = '<div style="color:#64748b;">No tasks raised yet.</div>'; return; }
+                const stColor = s => ({ 'Requested':'#fbbf24','Acknowledged':'#8b5cf6','In Progress':'#3b82f6','Delivered':'#06b6d4','Completed':'#10b981' }[s]||'#94a3b8');
+                el.innerHTML = tasks.map(t => `
+                    <div style="padding:9px 0; border-bottom:1px solid var(--border);">
+                        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                            <span style="font-weight:600; color:#e2e8f0; font-family:monospace;">${escapeHtml(t.task_code||'—')}</span>
+                            <span style="font-size:0.7rem; padding:2px 8px; border-radius:10px; background:${stColor(t.status)}22; color:${stColor(t.status)};">${escapeHtml(t.status||'')}</span>
+                        </div>
+                        <div style="color:#cbd5e1; font-size:0.8rem; margin-top:3px;">${escapeHtml(t.title || (t.description||'').split('\n')[2] || 'Task')}</div>
+                    </div>`).join('');
+            } catch(e) { el.innerHTML = '<div style="color:#f87171;">Could not load your tasks.</div>'; }
         }
 
         async function loadStore() {
@@ -3645,6 +3818,11 @@
             // Sprint 56 — Home dashboard
             if (view === 'home') {
                 setTimeout(() => { if (typeof loadHome === 'function') loadHome(); }, 50);
+            }
+
+            // Sprint 57 — Chat with YantrAI
+            if (view === 'yantrai-chat') {
+                setTimeout(() => { if (typeof loadYantraiChat === 'function') loadYantraiChat(); }, 50);
             }
 
             // Sprint 48 — Store view

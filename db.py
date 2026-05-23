@@ -664,6 +664,18 @@ def init_db():
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """)
+    # Sprint 57 — "Chat with YantrAI": trackable task code + structured Problem Doc.
+    for _col, _type in (("task_code", "TEXT"), ("title", "TEXT"), ("category", "TEXT"),
+                        ("priority", "TEXT"), ("created_by", "TEXT"),
+                        ("source", "TEXT"), ("pd", "JSONB")):
+        try:
+            cursor.execute(f"ALTER TABLE tasks ADD COLUMN IF NOT EXISTS {_col} {_type}")
+        except Exception as _e:
+            print(f"[tasks col {_col}] {_e}")
+    try:
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_task_code ON tasks(task_code)")
+    except Exception as _e:
+        print(f"[tasks task_code idx] {_e}")
 
     # ═══════════════════════════════════════════════════════════════
     # UNIVERSAL RECONCILIATION ENGINE — 5 tables that handle any industry
@@ -6366,22 +6378,60 @@ def mark_invoice_synced(invoice_id):
 
 # ---- Task Functions ----
 
-def create_task(session_id, company_name, description, assigned_to='sadmin'):
+def _next_task_code(cursor):
+    """Human-friendly, trackable task code: YT-00001, YT-00002, …"""
+    cursor.execute("SELECT COALESCE(MAX(CAST(SUBSTRING(task_code FROM 4) AS INTEGER)), 0) "
+                   "FROM tasks WHERE task_code ~ '^YT-[0-9]+$'")
+    n = (cursor.fetchone()[0] or 0) + 1
+    return f"YT-{n:05d}"
+
+def create_task(session_id, company_name, description, assigned_to='sadmin',
+                title=None, category=None, priority=None, created_by=None,
+                source=None, pd=None):
     conn = get_conn()
     cursor = conn.cursor()
     task_id = str(uuid.uuid4())
+    task_code = None
     try:
-        cursor.execute("""
-        INSERT INTO tasks (id, session_id, company_name, assigned_to, description, status)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        """, (task_id, session_id, company_name, assigned_to, description, 'Requested'))
-        conn.commit()
+        # Retry a couple of times in case two submissions race on the same code.
+        for _ in range(3):
+            task_code = _next_task_code(cursor)
+            try:
+                cursor.execute("""
+                INSERT INTO tasks (id, session_id, company_name, assigned_to, description,
+                                   status, task_code, title, category, priority, created_by,
+                                   source, pd)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (task_id, session_id, company_name, assigned_to, description, 'Requested',
+                      task_code, title, category, priority, created_by, source,
+                      json.dumps(pd) if pd is not None else None))
+                conn.commit()
+                break
+            except Exception as ie:
+                conn.rollback()
+                if 'task_code' in str(ie).lower():
+                    continue
+                raise
     except Exception as e:
         print(f"Error creating task: {e}")
     finally:
         cursor.close()
         conn.close()
-    return task_id
+    return {"task_id": task_id, "task_code": task_code}
+
+def get_tasks_for_company(company_name):
+    """Tasks raised by a given workspace — lets the requester track their own."""
+    conn = get_conn()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute("SELECT * FROM tasks WHERE company_name = %s ORDER BY created_at DESC",
+                       (company_name,))
+        return cursor.fetchall()
+    except Exception as e:
+        print(f"Error fetching company tasks: {e}")
+        return []
+    finally:
+        cursor.close(); conn.close()
 
 def get_tasks(company_name=None, role='admin'):
     conn = get_conn()

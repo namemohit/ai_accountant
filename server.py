@@ -6294,7 +6294,10 @@ async def confirm_service_request(request: Request):
     original_message = data.get("original_message", "")
 
     full_desc = f"[{category}] [{priority}]\n\n{title}\n\n{description}\n\n---\nOriginal user message: {original_message}"
-    task_id = db.create_task(session_id, company_name, full_desc, 'sadmin')
+    _created = db.create_task(session_id, company_name, full_desc, 'sadmin',
+                              title=title, category=category, priority=priority,
+                              source='chat_service_request')
+    task_id = _created["task_id"] if isinstance(_created, dict) else _created
 
     # Save confirmation message to chat
     confirm_text = f"✅ Your service request has been raised successfully!\n\n**{title}**\nCategory: {category} | Priority: {priority}\n\nThe YantrAI team will review this and get back to you."
@@ -6323,6 +6326,106 @@ async def get_tasks(company_name: str = "", role: str = "admin"):
 async def update_task_status(task_id: str, status: str = Form(...)):
     db.update_task_status(task_id, status)
     return {"status": "success"}
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Sprint 57 — "Chat with YantrAI": conversational intake that builds a
+# Problem Document (PD), then drops a trackable task into the SA inbox.
+# ─────────────────────────────────────────────────────────────────────────
+_PD_SYSTEM_PROMPT = """You are YantrAI's task-intake assistant. A user describes a task,
+problem, or request they want the YantrAI team to deliver. Your job over a short
+conversation is to build a clear, complete PROBLEM DOCUMENT (PD) the team can act on.
+
+Behave like a sharp delivery manager:
+- Ask ONE or TWO crisp clarifying questions at a time when something material is missing
+  (objective, scope, deliverables, deadline, data/access needed, success criteria).
+- Be concise and friendly. Never invent facts; if the user already gave it, don't re-ask.
+- Continuously maintain the PD as structured data, refining it every turn.
+- Set "ready": true ONLY when the PD has enough to start work (clear title, objective,
+  at least one concrete deliverable, and a sense of scope). Otherwise "ready": false.
+
+Reply STRICTLY as minified JSON, no markdown, no code fences:
+{
+ "reply": "your next message to the user (a question, or a 'looks good, confirm?' nudge)",
+ "pd": {
+   "title": "short imperative title",
+   "objective": "what outcome the user wants",
+   "context": "relevant background",
+   "scope": "what's included / excluded",
+   "deliverables": ["concrete output 1", "..."],
+   "data_required": ["inputs/access the team needs"],
+   "constraints": "deadlines, budget, tools, etc.",
+   "success_criteria": "how we know it's done",
+   "category": "Accounting | Compliance | Data | Integration | Reporting | Other",
+   "priority": "Low | Normal | High | Urgent"
+ },
+ "ready": false
+}
+Always include the FULL pd object every turn (carry forward everything known so far)."""
+
+def _pd_chat_llm(messages):
+    convo = "\n".join(
+        f"{'USER' if m.get('role')=='user' else 'ASSISTANT'}: {m.get('content','')}"
+        for m in messages if m.get('content'))
+    prompt = f"{_PD_SYSTEM_PROMPT}\n\n--- CONVERSATION SO FAR ---\n{convo}\n\n--- YOUR JSON REPLY ---"
+    model = genai.GenerativeModel('gemini-flash-latest')
+    resp = model.generate_content(prompt)
+    return _parse_ai_json(getattr(resp, "text", "") or "")
+
+@app.post("/api/yantrai/pd/chat")
+async def yantrai_pd_chat(payload: dict):
+    """One conversational turn — returns the assistant reply + the refined PD draft."""
+    messages = payload.get("messages") or []
+    if not isinstance(messages, list) or not messages:
+        raise HTTPException(status_code=400, detail="messages required")
+    try:
+        out = _pd_chat_llm(messages)
+    except Exception as e:
+        print(f"[yantrai pd chat] {e}", flush=True)
+        raise HTTPException(status_code=500, detail="AI intake failed")
+    reply = out.get("reply") or out.get("text") or "Could you tell me a bit more about what you need?"
+    pd = out.get("pd") if isinstance(out.get("pd"), dict) else None
+    ready = bool(out.get("ready"))
+    return {"status": "success", "reply": reply, "pd": pd, "ready": ready}
+
+@app.post("/api/yantrai/pd/submit")
+async def yantrai_pd_submit(payload: dict):
+    """User confirmed the PD → create a trackable task in the SA inbox."""
+    pd = payload.get("pd") or {}
+    company_name = payload.get("company_name", "")
+    username = payload.get("username")
+    session_id = payload.get("session_id")
+    title = (pd.get("title") or "Task request").strip()
+    category = pd.get("category") or "Other"
+    priority = pd.get("priority") or "Normal"
+    # Render the PD into the human-readable description the inbox already shows.
+    lines = [f"[{category}] [{priority}]", "", title, ""]
+    def _add(label, val):
+        if not val:
+            return
+        if isinstance(val, list):
+            val = "\n  - " + "\n  - ".join(str(v) for v in val if v)
+        lines.append(f"{label}: {val}")
+    _add("Objective", pd.get("objective"))
+    _add("Context", pd.get("context"))
+    _add("Scope", pd.get("scope"))
+    _add("Deliverables", pd.get("deliverables"))
+    _add("Data required", pd.get("data_required"))
+    _add("Constraints", pd.get("constraints"))
+    _add("Success criteria", pd.get("success_criteria"))
+    full_desc = "\n".join(lines)
+    created = db.create_task(session_id, company_name, full_desc, 'sadmin',
+                             title=title, category=category, priority=priority,
+                             created_by=username, source='yantrai_chat', pd=pd)
+    return {"status": "success", "task_code": created.get("task_code"),
+            "task_id": created.get("task_id"), "title": title,
+            "category": category, "priority": priority}
+
+@app.get("/api/yantrai/my-tasks")
+async def yantrai_my_tasks(company_name: str = ""):
+    """Tasks raised by this workspace, so the requester can track them by code."""
+    rows = db.get_tasks_for_company(company_name) if company_name else []
+    return {"status": "success", "tasks": rows}
 
 # ---- Parties (Party Master) Endpoints ----
 
