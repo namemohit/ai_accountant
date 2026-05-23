@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remote Demo Agent</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #1a1714; color: #f5f1ec; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+  }
+  .card {
+    max-width: 560px; width: 100%; background: #221f1c; border: 1px solid #3a3530;
+    border-radius: 16px; padding: 28px;
+  }
+  .badge {
+    display: inline-block; font-size: 0.7rem; letter-spacing: 0.06em; text-transform: uppercase;
+    color: #38bdf8; background: rgba(56,189,248,0.12); border: 1px solid rgba(56,189,248,0.3);
+    border-radius: 999px; padding: 3px 10px; margin-bottom: 14px;
+  }
+  h1 { font-size: 1.35rem; margin: 0 0 6px; }
+  p.sub { color: #a8a199; margin: 0 0 20px; font-size: 0.9rem; line-height: 1.5; }
+  .kv { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
+  .kv .k { color: #a8a199; width: 130px; font-size: 0.85rem; }
+  .kv .v { color: #f5f1ec; font-weight: 600; }
+  .ok { color: #4ade80; } .err { color: #f87171; }
+  .note { margin-top: 18px; font-size: 0.78rem; color: #8a8178; line-height: 1.5; }
+  code { background: rgba(255,255,255,0.06); padding: 1px 6px; border-radius: 5px; font-size: 0.8rem; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <span class="badge">🧩 Remote agent</span>
+    <h1>👋 Hello from an external app</h1>
+    <p class="sub">
+      This page is <strong>not part of the YantrAI SPA</strong> — it's a standalone web app
+      (<code>/static/demo_agent.html</code>, could live on any server in any language) loaded
+      inside YantrAI as a <em>remote agent</em> via an iframe. It learned who you are from a
+      <strong>signed SSO token</strong>, verified back with the platform.
+    </p>
+    <div class="kv"><span class="k">SSO status</span><span class="v" id="status">Verifying…</span></div>
+    <div class="kv"><span class="k">User</span><span class="v" id="user">—</span></div>
+    <div class="kv"><span class="k">Workspace</span><span class="v" id="company">—</span></div>
+    <p class="note" id="note">
+      The token came from <code>/api/agents/sso-token</code> and was validated via
+      <code>/api/agents/verify-sso</code> — the host never exposed your password or session,
+      only a short-lived, scoped token. This is the seam every future marketplace app will use.
+    </p>
+  </div>
+<script>
+  (function () {
+    function qp(name) {
+      return new URLSearchParams(window.location.search).get(name) || '';
+    }
+    var token = qp('token');
+    var statusEl = document.getElementById('status');
+    var userEl = document.getElementById('user');
+    var companyEl = document.getElementById('company');
+    if (!token) {
+      statusEl.textContent = 'No token supplied';
+      statusEl.className = 'v err';
+      return;
+    }
+    // Verify with the platform (same origin here; would be the platform's URL in prod).
+    fetch('/api/agents/verify-sso?token=' + encodeURIComponent(token))
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.ok) {
+          statusEl.textContent = '✓ Verified';
+          statusEl.className = 'v ok';
+          userEl.textContent = d.username || '(unknown)';
+          companyEl.textContent = d.company_name || '(none)';
+        } else {
+          statusEl.textContent = '✗ Invalid / expired token';
+          statusEl.className = 'v err';
+        }
+      })
+      .catch(function () {
+        statusEl.textContent = '✗ Verification failed';
+        statusEl.className = 'v err';
+      });
+  })();
+</script>
+</body>
+</html>

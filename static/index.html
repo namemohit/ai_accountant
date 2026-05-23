@@ -158,7 +158,8 @@
 
                 // Clear active session explicitly
                 if (typeof currentSessionId !== 'undefined') currentSessionId = null;
-                if (!wasOnStore) window.location.hash = 'chat';
+                // (Don't hard-jump to 'chat' here — we re-land within the CURRENT agent
+                //  after the installed-agents refresh below, so remote agents stay put.)
                 
                 // Toggle demo banner
                 const demoBanner = document.getElementById('demo-company-banner');
@@ -186,8 +187,12 @@
                             const list = window.__installedAgents || [];
                             if (list.length === 1) enterAgent(list[0].slug);
                             else exitToStore();
+                        } else if (window.__activeAgent && typeof enterAgent === 'function') {
+                            // Stay in the SAME agent; re-open it for the new company
+                            // (reloads a remote agent's iframe with fresh SSO context).
+                            enterAgent(window.__activeAgent);
                         } else if (typeof _renderNav === 'function') {
-                            _renderNav();   // still valid → re-render the refreshed nav
+                            _renderNav();
                         }
                     });
                 }
@@ -1050,6 +1055,49 @@
             <div class="connector-grid" id="store-catalog">
                 <div style="color:#64748b; font-size:0.85rem;">Loading…</div>
             </div>
+        </div>
+
+        <!-- Sprint 50 — Developer Portal: register + manage your own remote agents -->
+        <div id="dev-portal-view" class="dashboard-view" style="display: none;">
+            <header>
+                <h1>🛠️ Developer Portal</h1>
+                <p style="color:#94a3b8;">Plug your own app into YantrAI. Host a web app anywhere, register it here, and run it in your workspace — the same way first-party agents work. (Private to your workspace.)</p>
+            </header>
+
+            <div class="card" style="margin-top:20px; max-width:680px;">
+                <h3 style="margin:0 0 12px; font-size:1rem; color:#e2e8f0;">Register an app</h3>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                    <label style="font-size:0.78rem; color:#94a3b8;">Name
+                        <input id="dev-name" placeholder="My Inventory App" style="width:100%; margin-top:4px; padding:8px 10px; background:var(--bg-light); color:#fff; border:1px solid var(--border); border-radius:8px;">
+                    </label>
+                    <label style="font-size:0.78rem; color:#94a3b8;">Icon (emoji)
+                        <input id="dev-icon" placeholder="🧩" maxlength="4" style="width:100%; margin-top:4px; padding:8px 10px; background:var(--bg-light); color:#fff; border:1px solid var(--border); border-radius:8px;">
+                    </label>
+                    <label style="font-size:0.78rem; color:#94a3b8; grid-column:1 / -1;">Remote URL (where your app is hosted)
+                        <input id="dev-url" placeholder="https://your-app.example.com  (or /static/demo_agent.html to test)" style="width:100%; margin-top:4px; padding:8px 10px; background:var(--bg-light); color:#fff; border:1px solid var(--border); border-radius:8px;">
+                    </label>
+                    <label style="font-size:0.78rem; color:#94a3b8; grid-column:1 / -1;">Tagline
+                        <input id="dev-tagline" placeholder="One line about what it does" style="width:100%; margin-top:4px; padding:8px 10px; background:var(--bg-light); color:#fff; border:1px solid var(--border); border-radius:8px;">
+                    </label>
+                </div>
+                <button onclick="devRegisterApp()" style="margin-top:14px; padding:9px 18px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer;">Register app</button>
+                <div id="dev-register-msg" style="font-size:0.82rem; margin-top:8px;"></div>
+            </div>
+
+            <h3 style="margin-top:26px; margin-bottom:12px; font-size:1rem; color:#e2e8f0;">My apps</h3>
+            <div id="dev-apps-list"><div style="color:#64748b; font-size:0.85rem;">Loading…</div></div>
+        </div>
+
+        <!-- Sprint 49 — host for remote (embedded) agents loaded from outside the SPA -->
+        <div id="agent-remote-view" class="dashboard-view" style="display: none; height: calc(var(--app-height, 100vh) - 40px); padding: 0; flex-direction: column;">
+            <div style="display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid var(--border); background:var(--bg-surface,#1e1b18);">
+                <span id="agent-remote-icon" style="font-size:1.1rem;">🧩</span>
+                <span id="agent-remote-name" style="font-weight:600; color:#f4f4f5;">Remote app</span>
+                <span style="font-size:0.66rem; text-transform:uppercase; letter-spacing:0.05em; color:#38bdf8; background:rgba(56,189,248,0.12); border:1px solid rgba(56,189,248,0.3); border-radius:999px; padding:2px 8px;">Remote</span>
+            </div>
+            <iframe id="agent-remote-frame" title="Remote agent"
+                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                    style="flex:1; width:100%; border:0; background:#1a1714;"></iframe>
         </div>
 
         <div id="training-view" class="dashboard-view" style="display: none;">
@@ -2513,7 +2561,9 @@
             const union = new Set();
             (agents||[]).forEach(a => {
                 const views = _agentViews(a);
-                window.__agentBySlug[a.slug] = { name:a.name, icon:a.icon, views };
+                const m = a.manifest || {};
+                window.__agentBySlug[a.slug] = { name:a.name, icon:a.icon, views,
+                    remote_url: m.remote_url || null, kind: m.agent_kind || 'inapp' };
                 views.forEach(v => { window.__viewToAgent[v] = a.slug; union.add(v); });
             });
             window.__INSTALLED_VIEWS = union;
@@ -2569,6 +2619,29 @@
             _renderNav();
             showView('store');
         }
+        // Sprint 49 — load a remote (embedded) agent into the iframe host with SSO context.
+        let _remoteLoadedKey = null;
+        async function loadRemoteAgent(slug) {
+            const meta = window.__agentBySlug[slug];
+            if (!meta || !meta.remote_url) return;
+            const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
+            const icon = document.getElementById('agent-remote-icon');
+            const name = document.getElementById('agent-remote-name');
+            if (icon) icon.textContent = meta.icon || '🧩';
+            if (name) name.textContent = meta.name || slug;
+            const frame = document.getElementById('agent-remote-frame');
+            if (!frame) return;
+            const key = slug + '|' + (u.company_name || '');
+            if (_remoteLoadedKey === key && frame.src) return;   // avoid reloading on every nav
+            _remoteLoadedKey = key;
+            let token = '';
+            try {
+                const r = await fetch(`${API}/api/agents/sso-token?username=${encodeURIComponent(u.username||'')}&company_name=${encodeURIComponent(u.company_name||'')}&slug=${encodeURIComponent(slug)}`);
+                const d = await r.json(); token = d.token || '';
+            } catch(_) {}
+            const sep = meta.remote_url.includes('?') ? '&' : '?';
+            frame.src = meta.remote_url + sep + 'token=' + encodeURIComponent(token);
+        }
         function _renderNav() {
             const active = window.__activeAgent;
             const meta = active ? window.__agentBySlug[active] : null;
@@ -2581,6 +2654,9 @@
                 if (roleHidden) show = false;
                 else if (isPlatform) show = true;
                 else show = !!(active && activeViews.has(v));   // agent view only inside its agent
+                // Store nav item is redundant inside an agent (the agent header's
+                // "‹ Store" link already goes back) — show it only on the home shell.
+                if (v === 'store' && active) show = false;
                 el.style.display = show ? '' : 'none';
             });
             // Agent header (desktop + mobile) — only inside an agent.
@@ -2673,6 +2749,113 @@
         }
         // Build nav from installs once the page is ready.
         window.addEventListener('load', () => setTimeout(bootstrapAgents, 600));
+
+        // ── Sprint 50 — Developer Portal: register + manage your own remote apps ──
+        function _devUser() { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } }
+        async function loadDevPortal() {
+            const u = _devUser();
+            const box = document.getElementById('dev-apps-list');
+            if (!box) return;
+            try {
+                const r = await fetch(`${API}/api/dev/apps?username=${encodeURIComponent(u.username||'')}`);
+                const d = await r.json();
+                const apps = (d && d.apps) || [];
+                box.innerHTML = apps.length ? apps.map(_devAppCard).join('')
+                    : '<div style="color:#64748b; font-size:0.85rem;">No apps yet — register one above.</div>';
+            } catch(e) { box.innerHTML = '<div style="color:#f87171; font-size:0.85rem;">Could not load your apps.</div>'; }
+        }
+        function _devAppCard(a) {
+            return `<div class="card" style="max-width:680px; margin-bottom:10px;">
+                <div style="display:flex; align-items:center; gap:10px;">
+                    <span style="font-size:1.2rem;">${escapeHtml(a.icon||'🧩')}</span>
+                    <div style="flex:1;">
+                        <div style="font-weight:600; color:#f4f4f5;">${escapeHtml(a.name||a.slug)}</div>
+                        <div style="font-size:0.76rem; color:#94a3b8;">${escapeHtml(a.tagline||'')}</div>
+                    </div>
+                    <span class="connector-status connected">${escapeHtml(a.status||'')}</span>
+                </div>
+                <div style="font-size:0.74rem; color:#8a8178; margin-top:8px; word-break:break-all;">
+                    <div>🔗 ${escapeHtml(a.remote_url||'')}</div>
+                    <div style="margin-top:3px;">client_id: <code style="color:#cbd5e1;">${escapeHtml(a.client_id||'')}</code></div>
+                </div>
+                <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap;">
+                    <button onclick="devOpenApp('${a.slug}')" style="padding:7px 14px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer;">Open</button>
+                    <button onclick="devEditUrl('${a.slug}')" style="padding:7px 12px; background:var(--bg-light); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; cursor:pointer;">Edit URL</button>
+                    <button onclick="devRotateKey('${a.slug}')" style="padding:7px 12px; background:rgba(168,85,247,0.12); color:#a855f7; border:1px solid rgba(168,85,247,0.3); border-radius:8px; cursor:pointer;">Rotate key</button>
+                    <button onclick="devArchiveApp('${a.slug}')" style="padding:7px 12px; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.25); border-radius:8px; cursor:pointer;">Archive</button>
+                </div>
+            </div>`;
+        }
+        async function devRegisterApp() {
+            const u = _devUser();
+            const msg = document.getElementById('dev-register-msg');
+            const body = {
+                username: u.username,
+                name: (document.getElementById('dev-name').value || '').trim(),
+                icon: (document.getElementById('dev-icon').value || '').trim() || '🧩',
+                remote_url: (document.getElementById('dev-url').value || '').trim(),
+                tagline: (document.getElementById('dev-tagline').value || '').trim(),
+            };
+            if (!body.name || !body.remote_url) { msg.style.color = '#f87171'; msg.textContent = 'Name and Remote URL are required.'; return; }
+            try {
+                const r = await fetch(`${API}/api/dev/apps`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+                const d = await r.json();
+                if (!r.ok) throw new Error((d && (d.detail||d.message)) || 'Register failed');
+                msg.style.color = '#4ade80';
+                msg.innerHTML = `✓ Registered. <strong>Save your secret now — shown once:</strong><br>`
+                    + `client_id: <code>${escapeHtml(d.client_id)}</code><br>`
+                    + `client_secret: <code>${escapeHtml(d.client_secret)}</code>`;
+                ['dev-name','dev-icon','dev-url','dev-tagline'].forEach(id => { const el=document.getElementById(id); if(el) el.value=''; });
+                await _fetchInstalled();   // make it appear in this workspace's Store
+                loadDevPortal();
+            } catch(e) { msg.style.color = '#f87171'; msg.textContent = e.message; }
+        }
+        async function devOpenApp(slug) {
+            const u = _devUser();
+            try {
+                // ensure installed in this workspace, then enter it
+                await fetch(`${API}/api/agents/install`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: u.username, slug }) });
+                await _fetchInstalled();
+                enterAgent(slug);
+            } catch(e) { try { showChatToast && showChatToast(e.message, 'warn'); } catch(_) { alert(e.message); } }
+        }
+        async function devEditUrl(slug) {
+            const u = _devUser();
+            const url = prompt('New remote URL for this app:');
+            if (!url) return;
+            try {
+                const r = await fetch(`${API}/api/dev/apps/update`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: u.username, slug, remote_url: url.trim() }) });
+                if (!r.ok) { const d=await r.json(); throw new Error(d.detail||'Update failed'); }
+                await _fetchInstalled();
+                _remoteLoadedKey = null;   // force iframe reload next open
+                loadDevPortal();
+                try { showChatToast && showChatToast('URL updated.'); } catch(_) {}
+            } catch(e) { alert(e.message); }
+        }
+        async function devRotateKey(slug) {
+            const u = _devUser();
+            if (!confirm('Rotate this app\'s key? Tokens signed with the old key stop working.')) return;
+            try {
+                const r = await fetch(`${API}/api/dev/apps/rotate-key`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: u.username, slug }) });
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail||'Rotate failed');
+                alert('New client_secret (save it now):\n\n' + (d.client_secret||''));
+            } catch(e) { alert(e.message); }
+        }
+        async function devArchiveApp(slug) {
+            const u = _devUser();
+            if (!confirm('Archive this app? It is removed from your Store and uninstalled (data preserved).')) return;
+            try {
+                const r = await fetch(`${API}/api/dev/apps/archive`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: u.username, slug }) });
+                if (!r.ok) { const d=await r.json(); throw new Error(d.detail||'Archive failed'); }
+                await _fetchInstalled();
+                if (window.__activeAgent === slug || !window.__agentBySlug[window.__activeAgent]) {
+                    // we're not necessarily in it; just refresh nav
+                    _renderNav();
+                }
+                loadDevPortal();
+            } catch(e) { alert(e.message); }
+        }
 
         // ── Mobile viewport height fix ──────────────────────────────────
         // Some mobile browsers/webviews report 100vh as the *tallest* layout
@@ -3030,6 +3213,17 @@
                 view = 'bank';
             }
             document.querySelectorAll('.dashboard-view').forEach(el => el.style.display = 'none');
+            // Sprint 49 — remote (embedded) agent view → render the iframe host instead
+            // of a local #<view>-view div.
+            const _rOwner = window.__viewToAgent && window.__viewToAgent[view];
+            const _rMeta = _rOwner && window.__agentBySlug && window.__agentBySlug[_rOwner];
+            if (_rMeta && _rMeta.remote_url) {
+                const host = document.getElementById('agent-remote-view');
+                if (host) host.style.display = 'flex';
+                if (typeof loadRemoteAgent === 'function') loadRemoteAgent(_rOwner);
+                if (!skipHashUpdate) window.location.hash = view;
+                return;   // remote agents have no local view hooks
+            }
             const targetView = document.getElementById(view + '-view');
             if (targetView) targetView.style.display = 'block';
 
@@ -3067,6 +3261,11 @@
             // Sprint 48 — Store view
             if (view === 'store') {
                 setTimeout(() => { if (typeof loadStore === 'function') loadStore(); }, 50);
+            }
+
+            // Sprint 50 — Developer Portal view
+            if (view === 'dev-portal') {
+                setTimeout(() => { if (typeof loadDevPortal === 'function') loadDevPortal(); }, 50);
             }
             
             if (!skipHashUpdate) {

@@ -5658,6 +5658,144 @@ async def api_wallet_usage_by_agent(username: str = None, company_name: str = No
     return {"status": "success", "org_id": str(org_id), "usage": usage}
 
 
+# --- Sprint 49 — marketplace SSO seam for remote (embedded) agents ----------
+import hmac as _hmac, hashlib as _hashlib, base64 as _b64, json as _ssojson, time as _ssotime
+
+_SSO_SECRET = os.getenv("SSO_SECRET", "yantrai-dev-sso-secret-change-me").encode()
+_SSO_TTL = 300  # seconds
+
+def _b64u(b: bytes) -> str:
+    return _b64.urlsafe_b64encode(b).decode().rstrip("=")
+
+def _b64u_dec(s: str) -> bytes:
+    return _b64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+def _sso_key_for(kid):
+    """Per-app signing key (Sprint 50) by client_id/slug, else the global secret."""
+    if kid:
+        try:
+            k = db.get_app_signing_key(kid)
+            if k:
+                return k.encode()
+        except Exception as e:
+            print(f"[_sso_key_for] {e}")
+    return _SSO_SECRET
+
+def _sso_sign(payload: dict, key: bytes) -> str:
+    body = _b64u(_ssojson.dumps(payload, separators=(",", ":")).encode())
+    sig = _b64u(_hmac.new(key, body.encode(), _hashlib.sha256).digest())
+    return f"{body}.{sig}"
+
+def _sso_verify(token: str):
+    try:
+        body, sig = token.split(".", 1)
+        payload = _ssojson.loads(_b64u_dec(body))
+        key = _sso_key_for(payload.get("kid"))   # pick the right key from the token's kid
+        expected = _b64u(_hmac.new(key, body.encode(), _hashlib.sha256).digest())
+        if not _hmac.compare_digest(sig, expected):
+            return None
+        if int(payload.get("exp", 0)) < int(_ssotime.time()):
+            return None
+        return payload
+    except Exception:
+        return None
+
+
+@app.get("/api/agents/sso-token")
+async def api_agents_sso_token(username: str = None, company_name: str = None, slug: str = None):
+    """Mint a short-lived signed token a remote (embedded) agent uses to learn the
+    current user + workspace, verified back against /api/agents/verify-sso. If `slug`
+    is a registered app with its own signing key, the token is scoped to that app."""
+    payload = {"u": username or "", "c": company_name or "",
+               "exp": int(_ssotime.time()) + _SSO_TTL}
+    key = _SSO_SECRET
+    if slug:
+        try:
+            auth = db.get_agent_auth(slug)   # works for private dev apps too
+            if auth:
+                payload["kid"] = auth["client_id"]
+                key = auth["signing_key"].encode()
+        except Exception as e:
+            print(f"[sso-token] {e}")
+    return {"status": "success", "token": _sso_sign(payload, key)}
+
+
+@app.get("/api/agents/verify-sso")
+async def api_agents_verify_sso(token: str = None):
+    """Validate a remote-agent SSO token. The embedded app calls this rather than
+    trusting the query string. Key is auto-selected from the token's `kid`."""
+    p = _sso_verify(token or "")
+    if not p:
+        return {"ok": False}
+    return {"ok": True, "username": p.get("u"), "company_name": p.get("c")}
+
+
+# --- Sprint 50 — Developer Portal: register/manage your own remote agent --------
+def _dev_org(username):
+    """Resolve the caller's owned workspace for dev-app ownership (owner/manager)."""
+    uid, _ = _resolve_caller(username)
+    org_id = _owner_org(uid, None, allow=("owner", "manager"))
+    return org_id, uid
+
+
+@app.get("/api/dev/apps")
+async def api_dev_apps_list(username: str = None):
+    org_id, _ = _dev_org(username)
+    rows = db.list_dev_apps(org_id)
+    return {"status": "success", "org_id": str(org_id), "apps": [{
+        "slug": r["slug"], "name": r["name"], "tagline": r.get("tagline"),
+        "description": r.get("description"), "icon": r.get("icon"),
+        "category": r.get("category"), "status": r.get("status"),
+        "visibility": r.get("visibility"), "client_id": r.get("client_id"),
+        "remote_url": (r.get("manifest") or {}).get("remote_url"),
+    } for r in rows]}
+
+
+@app.post("/api/dev/apps")
+async def api_dev_apps_create(payload: dict):
+    org_id, uid = _dev_org(payload.get("username"))
+    res = db.create_dev_app(org_id, uid,
+                            name=payload.get("name"),
+                            remote_url=payload.get("remote_url"),
+                            tagline=payload.get("tagline"),
+                            description=payload.get("description"),
+                            icon=payload.get("icon") or "🧩",
+                            category=payload.get("category") or "custom")
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "Could not create app.")
+    return {"status": "success", **res}
+
+
+@app.post("/api/dev/apps/update")
+async def api_dev_apps_update(payload: dict):
+    org_id, _ = _dev_org(payload.get("username"))
+    res = db.update_dev_app(payload.get("slug"), org_id,
+                            name=payload.get("name"), remote_url=payload.get("remote_url"),
+                            tagline=payload.get("tagline"), description=payload.get("description"),
+                            icon=payload.get("icon"), category=payload.get("category"))
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "Update failed.")
+    return {"status": "success"}
+
+
+@app.post("/api/dev/apps/archive")
+async def api_dev_apps_archive(payload: dict):
+    org_id, _ = _dev_org(payload.get("username"))
+    res = db.archive_dev_app(payload.get("slug"), org_id)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "Archive failed.")
+    return {"status": "success"}
+
+
+@app.post("/api/dev/apps/rotate-key")
+async def api_dev_apps_rotate_key(payload: dict):
+    org_id, _ = _dev_org(payload.get("username"))
+    res = db.rotate_dev_app_key(payload.get("slug"), org_id)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "Rotate failed.")
+    return {"status": "success", "client_secret": res.get("client_secret")}
+
+
 # =============================================================================
 # Tally Agent Authentication (Phase B)
 # =============================================================================

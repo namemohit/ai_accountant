@@ -1269,6 +1269,13 @@ def _ensure_billing_schema():
             );""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_oai_org ON org_agent_installs(org_id)")
         cur.execute("ALTER TABLE ai_usage_log ADD COLUMN IF NOT EXISTS agent_slug TEXT")
+        # Sprint 50 — developer portal: ownership + per-app auth on store_agents.
+        cur.execute("ALTER TABLE store_agents ADD COLUMN IF NOT EXISTS owner_org_id  UUID")
+        cur.execute("ALTER TABLE store_agents ADD COLUMN IF NOT EXISTS owner_user_id UUID")
+        cur.execute("ALTER TABLE store_agents ADD COLUMN IF NOT EXISTS visibility    TEXT DEFAULT 'public'")
+        cur.execute("ALTER TABLE store_agents ADD COLUMN IF NOT EXISTS client_id     TEXT")
+        cur.execute("ALTER TABLE store_agents ADD COLUMN IF NOT EXISTS signing_key   TEXT")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_store_agents_owner ON store_agents(owner_org_id)")
         conn.commit(); cur.close(); conn.close()
         _seed_agents()
     except Exception as e:
@@ -1324,6 +1331,30 @@ AGENT_SEED = [
      "icon": "💼", "category": "hr", "status": "coming_soon", "publisher": "first-party",
      "token_policy": {"chargeable": True}, "manifest": {"version": 1, "nav_groups": []},
      "sort_order": 20},
+    # Sprint 49 — marketplace spike: an app that lives OUTSIDE the YantrAI SPA,
+    # loaded as a remote agent via manifest.remote_url (rendered in an iframe with SSO).
+    {"slug": "demo-remote", "name": "Remote Demo",
+     "tagline": "Proof: an app loaded from outside the YantrAI codebase.",
+     "description": "A tiny external web app embedded as a remote agent — demonstrates the "
+                    "marketplace seam (manifest remote_url + signed SSO context).",
+     "icon": "🧩", "category": "developer", "status": "published", "publisher": "first-party",
+     "token_policy": {"chargeable": False},
+     "manifest": {"version": 1, "agent_kind": "remote", "remote_url": "/static/demo_agent.html",
+                  "nav_groups": [{"label": "App", "items": [
+                      {"view": "remote-demo-remote", "label": "Open App", "icon": "🧩"}]}]},
+     "sort_order": 30},
+    # Sprint 50 — Developer Portal: an in-app first-party agent any user opens to
+    # register + run their own remote agentic apps (self-integration).
+    {"slug": "developer-portal", "name": "Developer Portal",
+     "tagline": "Build & plug in your own agent.",
+     "description": "Register your own remote app, get credentials, and run it in your "
+                    "workspace — the same way first-party agents work.",
+     "icon": "🛠️", "category": "developer", "status": "published", "publisher": "first-party",
+     "token_policy": {"chargeable": False},
+     "manifest": {"version": 1, "agent_kind": "inapp",
+                  "nav_groups": [{"label": "Developer", "items": [
+                      {"view": "dev-portal", "label": "My Apps", "icon": "🛠️"}]}]},
+     "sort_order": 40},
 ]
 
 
@@ -1355,14 +1386,20 @@ def list_catalog(org_id=None):
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         if org_id:
+            # public catalog + this org's own private apps; never archived.
             cur.execute("""
                 SELECT a.*, (i.org_id IS NOT NULL AND i.enabled) AS installed
                 FROM store_agents a
                 LEFT JOIN org_agent_installs i ON i.agent_slug = a.slug AND i.org_id = %s
+                WHERE COALESCE(a.status,'') <> 'archived'
+                  AND (COALESCE(a.visibility,'public') = 'public' OR a.owner_org_id = %s)
                 ORDER BY a.sort_order, a.name
-            """, (org_id,))
+            """, (org_id, org_id))
         else:
-            cur.execute("SELECT a.*, FALSE AS installed FROM store_agents a ORDER BY a.sort_order, a.name")
+            cur.execute("""SELECT a.*, FALSE AS installed FROM store_agents a
+                           WHERE COALESCE(a.status,'') <> 'archived'
+                             AND COALESCE(a.visibility,'public') = 'public'
+                           ORDER BY a.sort_order, a.name""")
         rows = cur.fetchall()
         return rows
     finally:
@@ -1450,6 +1487,164 @@ def usage_by_agent(org_id, since=None):
         return cur.fetchall()
     finally:
         cur.close(); conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Sprint 50 — Developer Portal: a dev app is a store_agents row owned by an org
+# (visibility='private'), with per-app client_id + signing_key for scoped SSO.
+# ---------------------------------------------------------------------------
+def create_dev_app(org_id, user_id, name, remote_url, tagline=None, description=None,
+                   icon="🧩", category="custom"):
+    import secrets as _secrets, json as _json
+    name = (name or "").strip() or "My App"
+    remote_url = (remote_url or "").strip()
+    if not remote_url:
+        return {"ok": False, "error": "A remote URL is required."}
+    slug = "app-" + _secrets.token_hex(6)
+    client_id = "cid_" + _secrets.token_hex(8)
+    signing_key = "sk_" + _secrets.token_hex(24)
+    view = "remote-" + slug
+    manifest = {"version": 1, "agent_kind": "remote", "remote_url": remote_url,
+                "client_id": client_id,
+                "nav_groups": [{"label": "App", "items": [
+                    {"view": view, "label": name, "icon": icon}]}]}
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO store_agents (slug, name, tagline, description, icon, category,
+                status, publisher, token_policy, manifest, sort_order,
+                owner_org_id, owner_user_id, visibility, client_id, signing_key)
+            VALUES (%s,%s,%s,%s,%s,%s,'published','developer','{}'::jsonb,%s,500,
+                    %s,%s,'private',%s,%s)
+        """, (slug, name, tagline, description, icon, category, _json.dumps(manifest),
+              org_id, user_id, client_id, signing_key))
+        conn.commit()
+        return {"ok": True, "slug": slug, "client_id": client_id,
+                "client_secret": signing_key, "remote_url": remote_url, "name": name}
+    except Exception as e:
+        conn.rollback(); print(f"[create_dev_app] {e}"); return {"ok": False, "error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+
+def list_dev_apps(org_id):
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""SELECT slug, name, tagline, description, icon, category, status,
+                              visibility, client_id, manifest, created_at
+                       FROM store_agents
+                       WHERE owner_org_id=%s AND COALESCE(status,'')<>'archived'
+                       ORDER BY created_at DESC""", (org_id,))
+        return cur.fetchall()
+    finally:
+        cur.close(); conn.close()
+
+
+def update_dev_app(slug, org_id, name=None, remote_url=None, tagline=None,
+                   description=None, icon=None, category=None):
+    import json as _json
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT manifest, name, icon FROM store_agents WHERE slug=%s AND owner_org_id=%s",
+                    (slug, org_id))
+        row = cur.fetchone()
+        if not row:
+            return {"ok": False, "error": "App not found."}
+        manifest = row["manifest"] or {}
+        if remote_url: manifest["remote_url"] = remote_url.strip()
+        new_name = (name or row["name"]); new_icon = (icon or row["icon"])
+        # keep the single nav item label/icon in sync
+        try:
+            manifest["nav_groups"][0]["items"][0]["label"] = new_name
+            manifest["nav_groups"][0]["items"][0]["icon"] = new_icon
+        except Exception:
+            pass
+        cur.execute("""UPDATE store_agents SET
+                          name=COALESCE(%s,name), tagline=COALESCE(%s,tagline),
+                          description=COALESCE(%s,description), icon=COALESCE(%s,icon),
+                          category=COALESCE(%s,category), manifest=%s
+                       WHERE slug=%s AND owner_org_id=%s""",
+                    (name, tagline, description, icon, category, _json.dumps(manifest),
+                     slug, org_id))
+        conn.commit()
+        return {"ok": cur.rowcount > 0}
+    except Exception as e:
+        conn.rollback(); print(f"[update_dev_app] {e}"); return {"ok": False, "error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+
+def archive_dev_app(slug, org_id):
+    """Soft delete — mark archived + uninstall everywhere. Never hard-deletes."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("UPDATE store_agents SET status='archived' WHERE slug=%s AND owner_org_id=%s",
+                    (slug, org_id))
+        ok = cur.rowcount > 0
+        if ok:
+            cur.execute("UPDATE org_agent_installs SET enabled=FALSE WHERE agent_slug=%s", (slug,))
+        conn.commit()
+        return {"ok": ok}
+    except Exception as e:
+        conn.rollback(); print(f"[archive_dev_app] {e}"); return {"ok": False, "error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+
+def rotate_dev_app_key(slug, org_id):
+    import secrets as _secrets
+    new_key = "sk_" + _secrets.token_hex(24)
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("UPDATE store_agents SET signing_key=%s WHERE slug=%s AND owner_org_id=%s",
+                    (new_key, slug, org_id))
+        ok = cur.rowcount > 0
+        conn.commit()
+        return {"ok": ok, "client_secret": new_key if ok else None}
+    except Exception as e:
+        conn.rollback(); print(f"[rotate_dev_app_key] {e}"); return {"ok": False, "error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+
+def get_app_signing_key(kid):
+    """Look up an app's signing key by client_id or slug (for SSO verification)."""
+    if not kid:
+        return None
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT signing_key FROM store_agents WHERE client_id=%s OR slug=%s LIMIT 1",
+                    (kid, kid))
+        r = cur.fetchone()
+        return r[0] if r and r[0] else None
+    finally:
+        cur.close(); conn.close()
+
+
+def get_agent_auth(slug):
+    """(client_id, signing_key) for an agent by slug — works for private apps too."""
+    if not slug:
+        return None
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT client_id, signing_key FROM store_agents WHERE slug=%s LIMIT 1", (slug,))
+        r = cur.fetchone()
+        if r and r[0] and r[1]:
+            return {"client_id": r[0], "signing_key": r[1]}
+        return None
+    finally:
+        cur.close(); conn.close()
+
+
+def org_id_for_username(username):
+    """Resolve the caller's home/owned org id from a username (for dev-app ownership)."""
+    u = get_user_by_username(username) if username else None
+    uid = u.get("users_id") if u else None
+    if not uid:
+        return None, None
+    mems = get_user_memberships(uid) or []
+    m = next((x for x in mems if x.get("role") in ("owner", "manager")), None) or (mems[0] if mems else None)
+    return (m["org_id"] if m else None), uid
 
 
 def org_balance(org_id):
