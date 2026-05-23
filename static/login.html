@@ -62,7 +62,7 @@
         <!-- Tabs -->
         <div style="display: flex; gap: 12px; margin-bottom: 28px; border-bottom: 1px solid var(--border); padding-bottom: 4px;">
             <button id="tab-login" onclick="switchTab('login')" style="flex: 1; background: none; border: none; color: var(--accent); font-weight: 700; font-size: 1rem; padding: 8px 12px; border-bottom: 2px solid var(--accent); cursor: pointer;">Sign In</button>
-            <button id="tab-register" onclick="switchTab('register')" style="flex: 1; background: none; border: none; color: #94a3b8; font-weight: 600; font-size: 1rem; padding: 8px 12px; cursor: pointer;">Register Tenant</button>
+            <button id="tab-register" onclick="switchTab('register')" style="flex: 1; background: none; border: none; color: #94a3b8; font-weight: 600; font-size: 1rem; padding: 8px 12px; cursor: pointer;">Create account</button>
         </div>
 
         <!-- Login Form -->
@@ -78,35 +78,42 @@
             <button class="btn confirm-btn" onclick="handleLogin()" id="login-btn" style="width: 100%; margin-top: 12px; padding: 12px; font-weight: bold; font-size: 1rem;">Sign In</button>
         </div>
 
-        <!-- Register Form -->
+        <!-- Create-account Form (uniform signup — your own workspace) -->
         <div id="form-register" style="display: none;">
-            <div class="form-group" style="text-align: left;">
-                <label>New Username *</label>
-                <input type="text" id="reg-username" placeholder="e.g. rohit">
-            </div>
-            <div class="form-group" style="text-align: left;">
-                <label>Password *</label>
-                <input type="password" id="reg-password" placeholder="••••••••">
-            </div>
-            <div class="form-group" style="text-align: left;">
-                <label>Company / Tenant Name *</label>
-                <input type="text" id="reg-company" placeholder="e.g. Rohit Enterprises">
-            </div>
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+            <p style="text-align:left; color:#94a3b8; font-size:0.82rem; margin:0 0 14px;">Create your workspace. You can invite your CA, clients, or team later with a share code.</p>
+            <div id="reg-fields">
                 <div class="form-group" style="text-align: left;">
-                    <label>Full Name</label>
-                    <input type="text" id="reg-name" placeholder="Rohit Sharma">
+                    <label>Company / workspace name *</label>
+                    <input type="text" id="reg-company" placeholder="e.g. Rohit Enterprises">
                 </div>
                 <div class="form-group" style="text-align: left;">
-                    <label>Phone</label>
-                    <input type="text" id="reg-phone" placeholder="+91 9876543210">
+                    <label>GSTIN <span style="color:#64748b;">(optional)</span></label>
+                    <input type="text" id="reg-gstin" placeholder="e.g. 27AAACB0036Q1ZP">
                 </div>
+                <div class="form-group" style="text-align: left;">
+                    <label>New Username *</label>
+                    <input type="text" id="reg-username" placeholder="e.g. rohit">
+                </div>
+                <div class="form-group" style="text-align: left;">
+                    <label>Password *</label>
+                    <input type="password" id="reg-password" placeholder="••••••••">
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                    <div class="form-group" style="text-align: left;">
+                        <label>Full Name</label>
+                        <input type="text" id="reg-name" placeholder="Rohit Sharma">
+                    </div>
+                    <div class="form-group" style="text-align: left;">
+                        <label>Phone</label>
+                        <input type="text" id="reg-phone" placeholder="+91 9876543210">
+                    </div>
+                </div>
+                <div class="form-group" style="text-align: left;">
+                    <label>Email Address</label>
+                    <input type="email" id="reg-email" placeholder="rohit@enterprises.com">
+                </div>
+                <button class="btn confirm-btn" onclick="handleRegister()" id="register-btn" style="width: 100%; margin-top: 12px; padding: 12px; font-weight: bold; font-size: 1rem; background: #10b981;">Create account</button>
             </div>
-            <div class="form-group" style="text-align: left;">
-                <label>Email Address</label>
-                <input type="email" id="reg-email" placeholder="rohit@enterprises.com">
-            </div>
-            <button class="btn confirm-btn" onclick="handleRegister()" id="register-btn" style="width: 100%; margin-top: 12px; padding: 12px; font-weight: bold; font-size: 1rem; background: #10b981;">Create Tenant Account</button>
         </div>
 
         <p id="error-msg" style="color: #f87171; margin-top: 20px; font-size: 0.875rem; display: none;"></p>
@@ -172,6 +179,7 @@
 
                 const data = await res.json();
                 localStorage.setItem('currentUser', JSON.stringify(data.user));
+                sessionStorage.setItem('yantrai_just_logged_in', '1');  // triggers the install popup once after login
                 window.location.href = '/';
             } catch (error) {
                 errorEl.innerText = error.message;
@@ -180,53 +188,53 @@
             }
         }
 
+        // ── Sprint 46 — uniform signup (own workspace) ─────────────────
         async function handleRegister() {
+            const company_name = document.getElementById('reg-company').value.trim();
+            const gstin = document.getElementById('reg-gstin').value.trim();
             const username = document.getElementById('reg-username').value.trim();
             const password = document.getElementById('reg-password').value;
-            const company_name = document.getElementById('reg-company').value.trim();
             const name = document.getElementById('reg-name').value.trim();
             const phone = document.getElementById('reg-phone').value.trim();
             const email = document.getElementById('reg-email').value.trim();
-            
+
             const btn = document.getElementById('register-btn');
             const errorEl = document.getElementById('error-msg');
             const successEl = document.getElementById('success-msg');
 
             if (!username || !password || !company_name) {
-                errorEl.innerText = 'Username, password, and company name are required.';
+                errorEl.innerText = 'Username, password, and company / workspace name are required.';
                 errorEl.style.display = 'block';
                 return;
             }
 
-            btn.innerText = 'Creating Tenant...';
+            btn.innerText = 'Creating account...';
             errorEl.style.display = 'none';
             successEl.style.display = 'none';
 
+            const body = { username, password, name, phone, email, gstin, company_name };
+
             try {
-                const res = await fetch('/api/register', {
+                const res = await fetch('/api/onboard', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password, company_name, name, phone, email })
+                    body: JSON.stringify(body)
                 });
-
                 if (!res.ok) {
                     const errObj = await res.json();
                     throw new Error(errObj.detail || 'Registration failed');
                 }
-
                 const data = await res.json();
                 localStorage.setItem('currentUser', JSON.stringify(data.user));
-                
-                successEl.innerText = 'Tenant account created successfully! Redirecting to dashboard...';
+                sessionStorage.setItem('yantrai_just_logged_in', '1');  // triggers the install popup once after login
+
+                successEl.innerText = 'Account created! Redirecting…';
                 successEl.style.display = 'block';
-                
-                setTimeout(() => {
-                    window.location.href = '/';
-                }, 1500);
+                setTimeout(() => { window.location.href = '/'; }, 1200);
             } catch (error) {
                 errorEl.innerText = error.message;
                 errorEl.style.display = 'block';
-                btn.innerText = 'Create Tenant Account';
+                btn.innerText = 'Create account';
             }
         }
     </script>

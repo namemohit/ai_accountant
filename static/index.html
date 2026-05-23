@@ -274,6 +274,11 @@
                     <select id="active-company-select" onchange="switchCompany(this.value)" style="width: 100%; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; font-size: 0.8rem; outline: none; cursor: pointer;">
                     </select>
                 </div>
+                <!-- Sprint 47 — token wallet balance pill -->
+                <div id="wallet-pill" onclick="openWalletModal()" title="AI tokens — click to view & recharge" style="margin-top:8px; display:flex; align-items:center; justify-content:space-between; gap:6px; padding:7px 10px; background:rgba(56,189,248,0.08); border:1px solid rgba(56,189,248,0.25); border-radius:8px; cursor:pointer; font-size:0.78rem;">
+                    <span style="color:#cbd5e1;">⚡ <strong id="wallet-balance" style="color:#38bdf8;">—</strong> tokens</span>
+                    <span style="color:#38bdf8; font-size:0.7rem;">Recharge</span>
+                </div>
                 <!-- Sprint 28 — Tally Bridge Agent live status -->
                 <div id="tally-bridge-status" style="margin-top:8px; font-size:0.7rem; color:#94a3b8; display:flex; align-items:center; gap:6px;">
                     <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#64748b;"></span>
@@ -282,6 +287,114 @@
             </div>
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
+        </div>
+    </div>
+
+    <!-- Sprint 44 — Install-app prompt (shown once after login to browser users) -->
+    <div id="install-app-modal" style="display:none; position:fixed; inset:0; z-index:100001; background:rgba(15,23,42,0.85); backdrop-filter:blur(8px); align-items:center; justify-content:center; padding:20px;">
+        <div style="background:var(--bg-surface,#1e1b18); border:1px solid var(--border); border-radius:18px; width:100%; max-width:380px; padding:26px 24px; text-align:center; box-shadow:0 25px 60px -12px rgba(0,0,0,0.6);">
+            <img src="https://img.icons8.com/color/96/000000/accounting.png" alt="" style="width:64px; height:64px; border-radius:16px; margin-bottom:12px;">
+            <h3 style="margin:0 0 6px; color:white; font-size:1.25rem;">Install YantrAI</h3>
+            <p style="margin:0 0 4px; color:#cbd5e1; font-size:0.9rem;">Get the app on this device — opens full-screen, works offline, and launches from your home screen in one tap.</p>
+            <div id="install-modal-ios" style="display:none; text-align:left; background:rgba(255,255,255,0.04); border:1px solid var(--border); border-radius:10px; padding:12px 14px; margin:14px 0; color:#cbd5e1; font-size:0.85rem; line-height:1.6;">
+                On iPhone/iPad (Safari):<br>1. Tap the <strong>Share</strong> button (□↑)<br>2. Choose <strong>“Add to Home Screen”</strong><br>3. Tap <strong>Add</strong>
+            </div>
+            <div id="install-modal-actions" style="margin-top:18px; display:flex; flex-direction:column; gap:8px;">
+                <button onclick="_installFromModal()" style="padding:12px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:10px; font-weight:700; font-size:0.95rem; cursor:pointer;"><i class="fas fa-download"></i> Install app</button>
+                <button onclick="_closeInstallModal()" style="padding:10px; background:transparent; color:#cbd5e1; border:1px solid var(--border); border-radius:10px; font-size:0.88rem; cursor:pointer;">Maybe later</button>
+                <button onclick="_dismissInstallForever()" style="padding:6px; background:none; color:#64748b; border:none; font-size:0.78rem; cursor:pointer; text-decoration:underline;">Don’t show again</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Sprint 47 — Wallet (tokens) modal -->
+    <div id="wallet-modal" style="display:none; position:fixed; inset:0; z-index:100001; background:rgba(15,23,42,0.85); backdrop-filter:blur(8px); align-items:center; justify-content:center; padding:20px;">
+        <div style="background:var(--bg-surface,#1e1b18); border:1px solid var(--border); border-radius:16px; width:100%; max-width:460px; max-height:90vh; overflow-y:auto; padding:24px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <h3 style="margin:0; color:white;">⚡ AI Tokens</h3>
+                <button onclick="document.getElementById('wallet-modal').style.display='none'" style="background:none; border:none; color:#94a3b8; font-size:1.2rem; cursor:pointer;"><i class="fas fa-times"></i></button>
+            </div>
+            <div style="text-align:center; margin:10px 0 16px;">
+                <div style="font-size:2.2rem; font-weight:800; color:#38bdf8;" id="wallet-modal-balance">—</div>
+                <div style="color:#94a3b8; font-size:0.8rem;">tokens left in this workspace</div>
+            </div>
+            <div style="background:var(--card,#221f1c); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:14px;">
+                <div style="font-weight:600; color:white; margin-bottom:8px;">Recharge</div>
+                <div style="display:flex; gap:10px; align-items:center;">
+                    <span style="color:#94a3b8;">₹</span>
+                    <input id="wallet-amount" type="number" min="1" placeholder="amount" oninput="_walletQuote()" style="flex:1; padding:9px 10px; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; font-size:0.95rem;">
+                    <button onclick="walletRecharge()" style="padding:9px 16px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer;">Recharge</button>
+                </div>
+                <div id="wallet-quote" style="color:#94a3b8; font-size:0.78rem; margin-top:6px;"></div>
+                <div id="wallet-recharge-msg" style="font-size:0.82rem; margin-top:6px;"></div>
+                <div id="wallet-admin-credit" style="display:none; margin-top:10px; border-top:1px solid var(--border); padding-top:10px;">
+                    <div style="color:#a855f7; font-size:0.72rem; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:4px;">Super-admin · manual credit</div>
+                    <div style="display:flex; gap:8px;">
+                        <input id="wallet-credit-tokens" type="number" placeholder="tokens" style="flex:1; padding:7px 9px; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:6px; font-size:0.85rem;">
+                        <button onclick="walletAdminCredit()" style="padding:7px 12px; background:rgba(168,85,247,0.15); color:#a855f7; border:1px solid rgba(168,85,247,0.3); border-radius:6px; font-size:0.82rem; cursor:pointer;">Credit</button>
+                    </div>
+                </div>
+            </div>
+            <div style="font-weight:600; color:white; margin-bottom:6px;">Recent activity</div>
+            <div id="wallet-ledger" style="font-size:0.82rem; color:#cbd5e1;">—</div>
+        </div>
+    </div>
+
+    <!-- Sprint 46 — Team & access (handshake codes) modal -->
+    <div id="connections-modal" style="display:none; position:fixed; inset:0; z-index:100001; background:rgba(15,23,42,0.85); backdrop-filter:blur(8px); align-items:center; justify-content:center; padding:20px;">
+        <div style="background:var(--bg-surface,#1e1b18); border:1px solid var(--border); border-radius:16px; width:100%; max-width:560px; max-height:90vh; overflow-y:auto; padding:24px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                <h3 style="margin:0; color:white;">🔑 Team &amp; access</h3>
+                <button onclick="document.getElementById('connections-modal').style.display='none'" style="background:none; border:none; color:#94a3b8; font-size:1.2rem; cursor:pointer;"><i class="fas fa-times"></i></button>
+            </div>
+            <p style="color:#94a3b8; font-size:0.82rem; margin:0 0 16px;">Share access to your workspace with a one-time code (you choose their role), or enter a code to join someone else's.</p>
+
+            <!-- Share -->
+            <div style="background:var(--card,#221f1c); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:14px;">
+                <div style="font-weight:600; color:white; margin-bottom:10px;">Share my workspace</div>
+                <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">
+                    <div style="flex:1; min-width:140px;">
+                        <label style="display:block; font-size:0.72rem; color:#94a3b8; margin-bottom:4px;">Their role</label>
+                        <select id="conn-role" style="width:100%; padding:8px 10px; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; font-size:0.85rem;">
+                            <option value="viewer">Viewer (read-only)</option>
+                            <option value="junior">Junior (entry, no delete)</option>
+                            <option value="accountant" selected>Accountant (full books)</option>
+                            <option value="manager">Manager (+ invite others)</option>
+                        </select>
+                    </div>
+                    <div style="flex:1; min-width:160px; position:relative;">
+                        <label style="display:block; font-size:0.72rem; color:#94a3b8; margin-bottom:4px;">Companies</label>
+                        <button type="button" id="conn-scope-btn" onclick="toggleConnScope(event)" style="width:100%; padding:9px 10px; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; font-size:0.82rem; text-align:left; cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:6px;">
+                            <span id="conn-scope-label">All companies</span><span style="color:#64748b;">▾</span>
+                        </button>
+                        <div id="conn-scope-panel" style="display:none; position:absolute; left:0; right:0; top:100%; margin-top:4px; z-index:20; background:var(--bg-surface,#1e1b18); border:1px solid var(--border); border-radius:8px; max-height:200px; overflow-y:auto; padding:6px; box-shadow:0 10px 30px rgba(0,0,0,0.45);"></div>
+                    </div>
+                    <button onclick="genConnectionCode()" style="padding:9px 16px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer;">Generate code</button>
+                </div>
+                <div id="conn-code-out" style="display:none; margin-top:14px; text-align:center;">
+                    <div style="font-size:2rem; font-weight:800; letter-spacing:3px; color:#38bdf8; font-family:monospace;" id="conn-code-text">—</div>
+                    <div style="color:#94a3b8; font-size:0.78rem; margin-top:4px;">Single-use · expires in 24h. Share it with the person you're inviting.</div>
+                    <button onclick="_copyConnCode()" style="margin-top:8px; padding:6px 14px; background:rgba(56,189,248,0.12); color:#38bdf8; border:1px solid rgba(56,189,248,0.3); border-radius:6px; font-size:0.8rem; cursor:pointer;"><i class="fas fa-copy"></i> Copy</button>
+                </div>
+            </div>
+
+            <!-- Join -->
+            <div style="background:var(--card,#221f1c); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:14px;">
+                <div style="font-weight:600; color:white; margin-bottom:10px;">Join a workspace</div>
+                <div style="display:flex; gap:10px;">
+                    <input id="conn-accept-code" placeholder="Enter 9-digit code" style="flex:1; padding:9px 12px; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; font-size:0.95rem; font-family:monospace; letter-spacing:2px;">
+                    <button onclick="acceptConnectionCode()" style="padding:9px 16px; background:#10b981; color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer;">Join</button>
+                </div>
+                <div id="conn-accept-msg" style="margin-top:8px; font-size:0.82rem;"></div>
+            </div>
+
+            <!-- Members + active codes -->
+            <div style="background:var(--card,#221f1c); border:1px solid var(--border); border-radius:12px; padding:16px;">
+                <div style="font-weight:600; color:white; margin-bottom:8px;">People in my workspace</div>
+                <div id="conn-members" style="font-size:0.85rem; color:#cbd5e1;">Loading…</div>
+                <div style="font-weight:600; color:white; margin:14px 0 8px;">My active codes</div>
+                <div id="conn-codes" style="font-size:0.82rem; color:#cbd5e1;">—</div>
+            </div>
         </div>
     </div>
 
@@ -921,6 +1034,17 @@
                     <h4 class="connector-name">Connect your devices</h4>
                     <p class="connector-desc">Install YantrAI as an app on your phone or desktop — opens full-screen, works offline, launches from your home screen.</p>
                     <div class="connector-meta"><span>Devices</span><span id="install-app-hint">Add to device</span></div>
+                </div>
+
+                <!-- Team & access — share workspace via a handshake code -->
+                <div class="connector-card" data-category="team" onclick="openConnectionsModal()">
+                    <div class="connector-card-header">
+                        <div class="connector-icon" style="background: rgba(168,85,247,0.12); color: #a855f7;">🔑</div>
+                        <div class="connector-status available">Share</div>
+                    </div>
+                    <h4 class="connector-name">Team &amp; access</h4>
+                    <p class="connector-desc">Invite your CA, a client, or a teammate with a one-time share code — you pick their role. Or enter a code to join someone's workspace.</p>
+                    <div class="connector-meta"><span>People</span><span>Share / Join</span></div>
                 </div>
 
                 <!-- GST Portal -->
@@ -2014,7 +2138,41 @@
         window.addEventListener('appinstalled', () => {
             _deferredInstallPrompt = null;
             _refreshInstallButtons();
+            _closeInstallModal();
         });
+
+        // ── Sprint 44 — login-time install popup (browser users only) ────
+        function _closeInstallModal() {
+            const m = document.getElementById('install-app-modal');
+            if (m) m.style.display = 'none';
+        }
+        function _dismissInstallForever() {
+            try { localStorage.setItem('yantrai_install_dismissed', '1'); } catch (_) {}
+            _closeInstallModal();
+        }
+        async function _installFromModal() {
+            await installApp();
+            // installApp resolves after the native dialog; if they installed,
+            // the appinstalled handler closes us. Otherwise close on iOS/fallback.
+            if (_isIOS() || !_deferredInstallPrompt) _closeInstallModal();
+        }
+        function _maybeShowInstallModal() {
+            if (_isStandalone()) return;                                   // already installed
+            if (localStorage.getItem('yantrai_install_dismissed') === '1') return;
+            if (sessionStorage.getItem('yantrai_just_logged_in') !== '1') return;  // only right after login
+            sessionStorage.removeItem('yantrai_just_logged_in');
+            const m = document.getElementById('install-app-modal');
+            if (!m) return;
+            if (_isIOS()) {
+                // No beforeinstallprompt on iOS — show manual steps, hide the Install button.
+                document.getElementById('install-modal-ios').style.display = 'block';
+                const actions = document.getElementById('install-modal-actions');
+                actions.querySelector('button').style.display = 'none';  // hide "Install app"
+            }
+            m.style.display = 'flex';
+        }
+        // Delay so beforeinstallprompt has likely fired (Install button uses native dialog).
+        window.addEventListener('load', () => setTimeout(_maybeShowInstallModal, 1200));
         async function installApp() {
             if (_deferredInstallPrompt) {
                 _deferredInstallPrompt.prompt();
@@ -2030,6 +2188,217 @@
             alert('Your browser will offer "Install app" from its menu (⋮) once the page is fully loaded. If you already installed it, it\'s on your home screen.');
         }
         document.addEventListener('DOMContentLoaded', _refreshInstallButtons);
+
+        // ── Sprint 46 — Team & access (handshake codes) ─────────────────
+        function _connUser() {
+            try { return JSON.parse(localStorage.getItem('currentUser') || '{}'); } catch (_) { return {}; }
+        }
+        function openConnectionsModal() {
+            const u = _connUser();
+            // Populate company-scope dropdown (checkboxes) from owned org companies.
+            const panel = document.getElementById('conn-scope-panel');
+            panel.innerHTML = '';
+            panel.style.display = 'none';
+            const owned = (u.memberships || []).find(m => ['owner', 'manager'].includes(m.role));
+            const comps = (owned && owned.companies) || [];
+            if (comps.length) {
+                comps.forEach(c => {
+                    const row = document.createElement('label');
+                    row.style.cssText = 'display:flex; align-items:center; gap:8px; padding:6px 8px; cursor:pointer; font-size:0.84rem; color:#e2e8f0; border-radius:6px;';
+                    row.onmouseover = () => row.style.background = 'rgba(255,255,255,0.05)';
+                    row.onmouseout = () => row.style.background = '';
+                    row.innerHTML = `<input type="checkbox" class="conn-scope-cb" value="${c.id}" checked onchange="_connScopeUpdateLabel()" style="accent-color:var(--primary);"> <span>${escapeHtml(c.name)}</span>`;
+                    panel.appendChild(row);
+                });
+            } else {
+                panel.innerHTML = '<div style="padding:6px 8px; color:#64748b; font-size:0.8rem;">All companies in your workspace.</div>';
+            }
+            _connScopeUpdateLabel();
+            document.getElementById('conn-code-out').style.display = 'none';
+            document.getElementById('conn-accept-msg').textContent = '';
+            document.getElementById('connections-modal').style.display = 'flex';
+            loadConnMembers(); loadConnCodes();
+        }
+        function toggleConnScope(e) {
+            if (e) e.stopPropagation();
+            const p = document.getElementById('conn-scope-panel');
+            p.style.display = (p.style.display === 'none' || !p.style.display) ? 'block' : 'none';
+        }
+        function _connScopeCbs() { return [...document.querySelectorAll('.conn-scope-cb')]; }
+        function _connScopeSelectedIds() {
+            const cbs = _connScopeCbs();
+            const checked = cbs.filter(c => c.checked);
+            // all (or none available) → null means "all companies"
+            if (!cbs.length || checked.length === cbs.length) return null;
+            return checked.map(c => c.value);
+        }
+        function _connScopeUpdateLabel() {
+            const cbs = _connScopeCbs();
+            const checked = cbs.filter(c => c.checked);
+            const lbl = document.getElementById('conn-scope-label');
+            if (!cbs.length || checked.length === cbs.length) lbl.textContent = 'All companies';
+            else if (checked.length === 0) lbl.textContent = 'Select companies…';
+            else if (checked.length === 1) lbl.textContent = checked[0].nextElementSibling.textContent;
+            else lbl.textContent = checked.length + ' selected';
+        }
+        // close the scope panel when clicking elsewhere in the modal
+        document.addEventListener('click', (e) => {
+            const wrap = document.getElementById('conn-scope-panel');
+            const btn = document.getElementById('conn-scope-btn');
+            if (wrap && wrap.style.display === 'block' && !wrap.contains(e.target) && e.target !== btn && !btn.contains(e.target)) {
+                wrap.style.display = 'none';
+            }
+        });
+        async function genConnectionCode() {
+            const u = _connUser();
+            const role = document.getElementById('conn-role').value;
+            const scope = _connScopeSelectedIds();   // null = all companies
+            try {
+                const r = await fetch(`${API}/api/connect/generate`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: u.username, role, scope_company_ids: scope })
+                });
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || 'Failed');
+                const c = d.code;
+                document.getElementById('conn-code-text').textContent = c.slice(0,3) + '-' + c.slice(3,6) + '-' + c.slice(6);
+                document.getElementById('conn-code-out').style.display = 'block';
+                loadConnCodes();
+            } catch (e) { alert('Could not generate code: ' + e.message); }
+        }
+        function _copyConnCode() {
+            const t = document.getElementById('conn-code-text').textContent.replace(/-/g, '');
+            navigator.clipboard?.writeText(t);
+        }
+        async function acceptConnectionCode() {
+            const u = _connUser();
+            const code = document.getElementById('conn-accept-code').value;
+            const msg = document.getElementById('conn-accept-msg');
+            try {
+                const r = await fetch(`${API}/api/connect/accept`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: u.username, code })
+                });
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || 'Failed');
+                msg.style.color = '#4ade80';
+                msg.textContent = `✓ You now have ${d.role} access to ${d.org_name}. Refreshing…`;
+                // Merge the newly-granted companies into the stored session so the
+                // company switcher shows them after reload.
+                try {
+                    const cur = JSON.parse(localStorage.getItem('currentUser') || '{}');
+                    const set = new Set(cur.companies || []);
+                    (d.companies || []).forEach(c => set.add(c));
+                    cur.companies = [...set];
+                    localStorage.setItem('currentUser', JSON.stringify(cur));
+                } catch (_) {}
+                setTimeout(() => window.location.reload(), 1200);
+            } catch (e) { msg.style.color = '#f87171'; msg.textContent = e.message; }
+        }
+        async function loadConnMembers() {
+            const u = _connUser(); const el = document.getElementById('conn-members');
+            try {
+                const r = await fetch(`${API}/api/org/members?username=${encodeURIComponent(u.username)}`);
+                const d = await r.json();
+                const list = d.members || [];
+                el.innerHTML = list.length ? list.map(m =>
+                    `<div style="display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.05);"><span>${escapeHtml(m.name||m.username)}</span><span style="color:#94a3b8;">${m.role}</span></div>`).join('') : '<span style="color:#64748b;">Just you so far.</span>';
+            } catch (e) { el.textContent = '—'; }
+        }
+        async function loadConnCodes() {
+            const u = _connUser(); const el = document.getElementById('conn-codes');
+            try {
+                const r = await fetch(`${API}/api/connect/codes?username=${encodeURIComponent(u.username)}`);
+                const d = await r.json();
+                const codes = (d.codes || []).filter(c => c.active);
+                el.innerHTML = codes.length ? codes.map(c => {
+                    const cc = c.code.slice(0,3)+'-'+c.code.slice(3,6)+'-'+c.code.slice(6);
+                    return `<div style="display:flex; justify-content:space-between; align-items:center; padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.05);"><span style="font-family:monospace;">${cc} · ${c.role}</span><button onclick="revokeConnCode('${c.id}')" style="background:none; border:none; color:#f87171; cursor:pointer; font-size:0.8rem;">Revoke</button></div>`;
+                }).join('') : '<span style="color:#64748b;">No active codes.</span>';
+            } catch (e) { el.textContent = '—'; }
+        }
+        async function revokeConnCode(id) {
+            const u = _connUser();
+            await fetch(`${API}/api/connect/revoke`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: u.username, code_id: id }) });
+            loadConnCodes();
+        }
+
+        // ── Sprint 47 — token wallet ────────────────────────────────────
+        let _walletTokensPerInr = 1000, _walletOrgId = null;
+        function _walletActiveCompany() {
+            try { return JSON.parse(localStorage.getItem('currentUser')||'{}').company_name || ''; } catch(_) { return ''; }
+        }
+        async function _fetchWallet() {
+            const u = _connUser();
+            if (!u.username) return null;
+            try {
+                const r = await fetch(`${API}/api/wallet?username=${encodeURIComponent(u.username)}&company_name=${encodeURIComponent(_walletActiveCompany())}`);
+                return await r.json();
+            } catch(_) { return null; }
+        }
+        async function refreshWalletPill() {
+            const d = await _fetchWallet();
+            const el = document.getElementById('wallet-balance');
+            if (el && d && typeof d.balance === 'number') el.textContent = d.balance.toLocaleString('en-IN');
+            if (d) { _walletTokensPerInr = d.tokens_per_inr || 1000; _walletOrgId = d.org_id; }
+        }
+        async function openWalletModal() {
+            const d = await _fetchWallet();
+            if (d) { _walletTokensPerInr = d.tokens_per_inr || 1000; _walletOrgId = d.org_id; }
+            document.getElementById('wallet-modal-balance').textContent = d ? (d.balance||0).toLocaleString('en-IN') : '—';
+            document.getElementById('wallet-recharge-msg').textContent = '';
+            document.getElementById('wallet-amount').value = '';
+            _walletQuote();
+            // super-admin manual credit control
+            const isSA = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}').role === 'super_admin'; } catch(_) { return false; } })();
+            document.getElementById('wallet-admin-credit').style.display = isSA ? 'block' : 'none';
+            const led = document.getElementById('wallet-ledger');
+            const rows = (d && d.ledger) || [];
+            led.innerHTML = rows.length ? rows.map(l => {
+                const sign = l.delta >= 0 ? '+' : '';
+                const col = l.delta >= 0 ? '#4ade80' : '#f87171';
+                return `<div style="display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px solid rgba(255,255,255,0.05);"><span style="color:#94a3b8;">${escapeHtml(l.reason||'')}${l.note?' · '+escapeHtml(l.note):''}</span><span style="color:${col}; font-family:monospace;">${sign}${(l.delta||0).toLocaleString('en-IN')}</span></div>`;
+            }).join('') : '<span style="color:#64748b;">No activity yet.</span>';
+            document.getElementById('wallet-modal').style.display = 'flex';
+        }
+        function _walletQuote() {
+            const amt = parseFloat(document.getElementById('wallet-amount').value || 0);
+            const q = document.getElementById('wallet-quote');
+            q.textContent = amt > 0 ? `You'll get ${Math.round(amt * _walletTokensPerInr).toLocaleString('en-IN')} tokens.` : '';
+        }
+        async function walletRecharge() {
+            const u = _connUser();
+            const amt = parseFloat(document.getElementById('wallet-amount').value || 0);
+            const msg = document.getElementById('wallet-recharge-msg');
+            if (!(amt > 0)) { msg.style.color = '#f87171'; msg.textContent = 'Enter an amount.'; return; }
+            try {
+                const r = await fetch(`${API}/api/wallet/recharge`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: u.username, amount_inr: amt }) });
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || 'Failed');
+                msg.style.color = '#4ade80';
+                msg.textContent = d.message || 'Recharge requested.';
+            } catch(e) { msg.style.color = '#f87171'; msg.textContent = e.message; }
+        }
+        async function walletAdminCredit() {
+            const u = _connUser();
+            const tokens = parseInt(document.getElementById('wallet-credit-tokens').value || 0, 10);
+            const msg = document.getElementById('wallet-recharge-msg');
+            if (!(tokens > 0) || !_walletOrgId) { msg.style.color = '#f87171'; msg.textContent = 'Enter tokens.'; return; }
+            try {
+                const r = await fetch(`${API}/api/wallet/credit`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: u.username, org_id: _walletOrgId, tokens, note: 'manual top-up' }) });
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || 'Failed');
+                msg.style.color = '#4ade80'; msg.textContent = 'Credited. New balance: ' + (d.balance||0).toLocaleString('en-IN');
+                document.getElementById('wallet-modal-balance').textContent = (d.balance||0).toLocaleString('en-IN');
+                refreshWalletPill();
+            } catch(e) { msg.style.color = '#f87171'; msg.textContent = e.message; }
+        }
+        function _handleOutOfTokens() {
+            try { showChatToast && showChatToast('You\'re out of tokens — recharge to continue.', 'warn'); } catch(_) {}
+            openWalletModal();
+        }
+        // initial + periodic pill refresh
+        window.addEventListener('load', () => setTimeout(refreshWalletPill, 800));
 
         // ── Mobile viewport height fix ──────────────────────────────────
         // Some mobile browsers/webviews report 100vh as the *tallest* layout
@@ -5099,13 +5468,17 @@
                     _voiceRecog.interimResults = true;
                     _voiceRecog.lang = 'en-IN';
                     _voiceRecog.onresult = (ev) => {
-                        let interim = '';
-                        for (let i = ev.resultIndex; i < ev.results.length; i++) {
+                        // Rebuild the full transcript from ALL results each event.
+                        // (With continuous=true, finalized results are re-reported across
+                        // events, so `+=` from resultIndex double-counts → duplicated words.)
+                        let finalT = '', interim = '';
+                        for (let i = 0; i < ev.results.length; i++) {
                             const r = ev.results[i];
-                            if (r.isFinal) _voiceFinal += r[0].transcript;
+                            if (r.isFinal) finalT += r[0].transcript;
                             else interim += r[0].transcript;
                         }
-                        if (!_voiceCancelled) _renderVoicePill((_voiceFinal + ' ' + interim).trim(), false);
+                        _voiceFinal = finalT;
+                        if (!_voiceCancelled) _renderVoicePill((finalT + ' ' + interim).trim(), false);
                     };
                     _voiceRecog.onerror = (e) => { console.warn('speech error', e.error); };
                     _voiceRecog.onend = () => {
@@ -5165,8 +5538,10 @@
             const formData = new FormData();
             formData.append('file', blob, 'voice.webm');
             formData.append('company_name', companyName);
+            if (user && user.username) formData.append('username', user.username);
             try {
                 const res = await fetch(`${API}/api/voice-transcribe`, { method: 'POST', body: formData });
+                if (res.status === 402) { _handleOutOfTokens(); return; }
                 if (!res.ok) throw new Error('Transcription server error');
                 const data = await res.json();
                 if (data.status === 'success' && (data.text || '').trim()) _fillVoiceResult(data.text);
@@ -5740,6 +6115,7 @@
                 }
 
                 const res = await fetch(`${API}/chat`, { method: 'POST', body: formData });
+                if (res.status === 402) { thinking.remove(); _handleOutOfTokens(); return; }
                 const data = await res.json();
 
                 thinking.remove();
@@ -5747,6 +6123,7 @@
                 appendAIMessage(data);
                 if (data.suggested_questions) showSuggestions(data.suggested_questions);
                 loadChatSessions();
+                refreshWalletPill();
             } catch (err) {
                 thinking.remove();
                 appendAIMessage({ text: 'Error: ' + err.message });

@@ -1188,6 +1188,271 @@ def create_user(username: str, password: str, role: str = "admin", name: str = N
         cursor.close()
         conn.close()
 
+
+def _ensure_onboarding_columns():
+    """Idempotent — add user_type + users_id link columns to accounting_users."""
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("ALTER TABLE accounting_users ADD COLUMN IF NOT EXISTS user_type TEXT")
+        cur.execute("ALTER TABLE accounting_users ADD COLUMN IF NOT EXISTS users_id UUID")
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f"[_ensure_onboarding_columns] {e}")
+
+
+# ============================================================
+# Sprint 47 — Token wallet + metered AI billing (per-workspace/org)
+# ============================================================
+SIGNUP_FREE_TOKENS = 50000   # free grant for a new workspace
+
+def _ensure_billing_schema():
+    """Idempotent — org token_balance + usage/ledger/purchases tables."""
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS token_balance BIGINT DEFAULT 0")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ai_usage_log (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                org_id UUID, user_id UUID, company_name TEXT,
+                action TEXT, model TEXT,
+                prompt_tokens INT, output_tokens INT, total_tokens INT,
+                tokens_charged BIGINT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_usage_org ON ai_usage_log(org_id, created_at DESC)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS token_ledger (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                org_id UUID NOT NULL,
+                delta BIGINT NOT NULL,
+                balance_after BIGINT,
+                reason TEXT,            -- ai_usage | recharge | grant | admin_adjust
+                ref_id TEXT, note TEXT, created_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_token_ledger_org ON token_ledger(org_id, created_at DESC)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS token_purchases (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                org_id UUID NOT NULL,
+                amount_inr NUMERIC(12,2), tokens BIGINT,
+                status TEXT DEFAULT 'pending',   -- pending | paid | cancelled
+                provider TEXT, provider_ref TEXT,
+                created_by TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                paid_at TIMESTAMP
+            );""")
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f"[_ensure_billing_schema] {e}")
+
+
+def org_balance(org_id):
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT COALESCE(token_balance,0) FROM organizations WHERE id=%s", (org_id,))
+        r = cur.fetchone()
+        return int(r[0]) if r else 0
+    finally:
+        cur.close(); conn.close()
+
+
+def credit_tokens(org_id, n, reason="recharge", ref_id=None, note=None, created_by=None):
+    """Add tokens to a workspace; writes a ledger row. Returns new balance."""
+    _ensure_billing_schema()
+    n = int(n)
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("UPDATE organizations SET token_balance = COALESCE(token_balance,0) + %s WHERE id=%s RETURNING token_balance",
+                    (n, org_id))
+        row = cur.fetchone()
+        bal = int(row[0]) if row else None
+        cur.execute("""INSERT INTO token_ledger (org_id, delta, balance_after, reason, ref_id, note, created_by)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s)""", (org_id, n, bal, reason, ref_id, note, created_by))
+        conn.commit()
+        return bal
+    except Exception as e:
+        conn.rollback(); print(f"[credit_tokens] {e}"); return None
+    finally:
+        cur.close(); conn.close()
+
+
+def debit_tokens(org_id, n, action=None, model=None, user_id=None, company_name=None,
+                 prompt_tokens=None, output_tokens=None, total_tokens=None):
+    """Deduct n tokens for an AI action; logs usage + ledger. Best-effort
+    (allows balance to go slightly negative on the charging call — we pre-check
+    before the call). Returns new balance."""
+    _ensure_billing_schema()
+    n = int(max(0, n))
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("UPDATE organizations SET token_balance = COALESCE(token_balance,0) - %s WHERE id=%s RETURNING token_balance",
+                    (n, org_id))
+        row = cur.fetchone()
+        bal = int(row[0]) if row else None
+        cur.execute("""INSERT INTO ai_usage_log (org_id, user_id, company_name, action, model,
+                          prompt_tokens, output_tokens, total_tokens, tokens_charged)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (org_id, user_id, company_name, action, model,
+                     prompt_tokens, output_tokens, total_tokens, n))
+        cur.execute("""INSERT INTO token_ledger (org_id, delta, balance_after, reason, note, created_by)
+                       VALUES (%s,%s,%s,'ai_usage',%s,%s)""",
+                    (org_id, -n, bal, action, user_id and str(user_id)))
+        conn.commit()
+        return bal
+    except Exception as e:
+        conn.rollback(); print(f"[debit_tokens] {e}"); return None
+    finally:
+        cur.close(); conn.close()
+
+
+def org_id_for_company(company_name, caller_users_id=None):
+    """Resolve which workspace (org) owns `company_name` for billing. Prefer an org
+    the caller is a member of; else any org that has this company; else the caller's
+    own owned org."""
+    if not company_name:
+        return None
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        if caller_users_id:
+            cur.execute("""
+                SELECT c.org_id FROM companies c
+                JOIN memberships m ON m.org_id = c.org_id
+                WHERE c.name=%s AND m.user_id=%s AND c.archived_at IS NULL
+                ORDER BY c.is_primary DESC LIMIT 1
+            """, (company_name, caller_users_id))
+            r = cur.fetchone()
+            if r: return r[0]
+        cur.execute("SELECT org_id FROM companies WHERE name=%s AND archived_at IS NULL ORDER BY is_primary DESC LIMIT 1",
+                    (company_name,))
+        r = cur.fetchone()
+        if r: return r[0]
+        if caller_users_id:
+            cur.execute("""SELECT org_id FROM memberships WHERE user_id=%s AND role IN ('owner','manager')
+                           ORDER BY joined_at ASC LIMIT 1""", (caller_users_id,))
+            r = cur.fetchone()
+            if r: return r[0]
+        return None
+    finally:
+        cur.close(); conn.close()
+
+
+def recent_ledger(org_id, limit=20):
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""SELECT delta, balance_after, reason, note, created_at
+                   FROM token_ledger WHERE org_id=%s ORDER BY created_at DESC LIMIT %s""",
+                (org_id, limit))
+    rows = cur.fetchall(); cur.close(); conn.close()
+    return rows
+
+
+def create_purchase(org_id, amount_inr, tokens, created_by=None, provider=None):
+    _ensure_billing_schema()
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""INSERT INTO token_purchases (org_id, amount_inr, tokens, created_by, provider)
+                   VALUES (%s,%s,%s,%s,%s) RETURNING id, status""",
+                (org_id, amount_inr, tokens, created_by, provider))
+    row = cur.fetchone(); conn.commit(); cur.close(); conn.close()
+    return row
+
+
+def mark_purchase_paid(purchase_id, provider_ref=None):
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""UPDATE token_purchases SET status='paid', paid_at=CURRENT_TIMESTAMP,
+                   provider_ref=COALESCE(%s, provider_ref) WHERE id=%s AND status<>'paid'
+                   RETURNING org_id, tokens""", (provider_ref, purchase_id))
+    row = cur.fetchone(); conn.commit(); cur.close(); conn.close()
+    return row
+
+
+def onboard_user(username, password, name=None, email=None, phone=None,
+                 user_type=None, org_name=None, company_name=None,
+                 gstin=None, state_code=None):
+    """Sprint 46 — DEMOCRATIZED uniform self-onboarding. Everyone gets their own
+    workspace (org) + first company + owner membership. No 'type' is required;
+    relationships/roles are formed later via handshake codes. The legacy
+    accounting_users row (login + company_name access) is kept in sync so the
+    company_name-keyed data layer is untouched.
+
+    Returns {ok, error?, org_id, company_name, companies, role, users_id}.
+    """
+    _ensure_onboarding_columns()
+    _ensure_billing_schema()
+    import json as _json
+    username = (username or "").strip()
+    if not username or not password:
+        return {"ok": False, "error": "Username and password are required."}
+    if get_user_by_username(username):
+        return {"ok": False, "error": "That username is already taken."}
+
+    # Every workspace is an org that can hold many companies + members.
+    org_type = "firm" if user_type == "firm" else "company"
+    primary_company = (company_name or "").strip() or None
+    org_label = (org_name or "").strip() or primary_company or f"{username}'s workspace"
+    # The app always needs a company_name to scope by → fall back to the org label.
+    legacy_company = primary_company or org_label
+
+    role = "admin"  # coarse app gate (unchanged); membership role is the real role
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        # 1) Phase-B identity row
+        cur.execute("""
+            INSERT INTO users (username, password, name, email, phone)
+            VALUES (%s, %s, %s, %s, %s) RETURNING id
+        """, (username, password, name or username,
+              email or f"{username}@yantrai.com", phone or ""))
+        users_id = cur.fetchone()["id"]
+
+        # 2) Organization (owner = this user)
+        cur.execute("""
+            INSERT INTO organizations (name, type, gstin, plan, created_by_user_id, token_balance)
+            VALUES (%s, %s, %s, 'free', %s, %s) RETURNING id
+        """, (org_label, org_type, gstin, users_id, SIGNUP_FREE_TOKENS))
+        org_id = cur.fetchone()["id"]
+
+        # 3) Primary company (business/client only; firm adds clients later in-app)
+        companies_list = []
+        if primary_company:
+            cur.execute("""
+                INSERT INTO companies (org_id, name, gstin, state_code, is_primary)
+                VALUES (%s, %s, %s, %s, TRUE)
+                ON CONFLICT (org_id, name) DO UPDATE SET is_primary = TRUE
+                RETURNING id
+            """, (org_id, primary_company, gstin, state_code))
+            companies_list = [primary_company]
+
+        # 4) Owner membership
+        cur.execute("""
+            INSERT INTO memberships (user_id, org_id, role)
+            VALUES (%s, %s, 'owner')
+            ON CONFLICT (user_id, org_id) DO UPDATE SET role = 'owner'
+            RETURNING id
+        """, (users_id, org_id))
+        membership_id = cur.fetchone()["id"]
+        cur.execute("UPDATE users SET default_membership_id = %s WHERE id = %s", (membership_id, users_id))
+
+        # 5) Legacy accounting_users row — login + company_name access projection
+        cur.execute("""
+            INSERT INTO accounting_users
+              (username, password, role, name, email, phone, company_name, companies, user_type, users_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (username, password, role, name or username,
+              email or f"{username}@yantrai.com", phone or "+919999999999",
+              legacy_company, _json.dumps(companies_list or [legacy_company]),
+              user_type, users_id))
+
+        conn.commit()
+        return {"ok": True, "user_type": user_type, "org_id": str(org_id),
+                "org_type": org_type, "company_name": legacy_company,
+                "companies": companies_list or [legacy_company], "role": role,
+                "users_id": str(users_id)}
+    except Exception as e:
+        conn.rollback()
+        print(f"[onboard_user] {e}")
+        return {"ok": False, "error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+
 # ---- Chat Functions ----
 
 def _ensure_chat_user_column():
@@ -6181,6 +6446,181 @@ def get_company_by_name_and_org(org_id, name):
     cur.close()
     conn.close()
     return row
+
+
+# ============================================================
+# Sprint 46 — AnyDesk-style handshake codes (share workspace access)
+# ============================================================
+def _ensure_connection_codes_table():
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS connection_codes (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                code TEXT UNIQUE NOT NULL,
+                org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                role TEXT NOT NULL CHECK (role IN ('manager','accountant','junior','viewer','owner')),
+                scope_company_ids JSONB,
+                created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+                expires_at TIMESTAMP NOT NULL,
+                used_at TIMESTAMP,
+                used_by_user_id UUID,
+                revoked_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_conn_codes_org ON connection_codes(org_id, created_at DESC)")
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f"[_ensure_connection_codes_table] {e}")
+
+
+def _gen_handshake_code():
+    """9-digit numeric, shown grouped as XXX-XXX-XXX (AnyDesk-style)."""
+    import secrets
+    return "".join(secrets.choice("0123456789") for _ in range(9))
+
+
+def create_connection_code(org_id, role, scope_company_ids=None,
+                           created_by_user_id=None, ttl_hours=24):
+    """Issue a single-use, time-limited code granting `role` into `org_id`."""
+    _ensure_connection_codes_table()
+    if role not in ('manager', 'accountant', 'junior', 'viewer', 'owner'):
+        return {"ok": False, "error": "Invalid role."}
+    import json as _json
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        scope_json = _json.dumps([str(s) for s in scope_company_ids]) if scope_company_ids else None
+        code = None
+        for _ in range(6):  # retry on the rare unique collision
+            cand = _gen_handshake_code()
+            cur.execute("SELECT 1 FROM connection_codes WHERE code=%s", (cand,))
+            if not cur.fetchone():
+                code = cand
+                break
+        if not code:
+            return {"ok": False, "error": "Could not allocate a code, try again."}
+        cur.execute("""
+            INSERT INTO connection_codes (code, org_id, role, scope_company_ids,
+                                          created_by_user_id, expires_at)
+            VALUES (%s, %s, %s, %s::jsonb, %s, CURRENT_TIMESTAMP + (%s || ' hours')::interval)
+            RETURNING code, expires_at
+        """, (code, org_id, role, scope_json, created_by_user_id, str(int(ttl_hours))))
+        row = cur.fetchone()
+        conn.commit()
+        return {"ok": True, "code": row["code"], "expires_at": str(row["expires_at"]),
+                "role": role}
+    except Exception as e:
+        conn.rollback(); print(f"[create_connection_code] {e}")
+        return {"ok": False, "error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+
+def accept_connection_code(code, accepter_users_id, accepter_username):
+    """Validate a code (exists, not revoked/used/expired), create the membership,
+    and project the granted companies' NAMES into the accepter's
+    accounting_users.companies so the company_name-keyed data layer grants access."""
+    _ensure_connection_codes_table()
+    import json as _json
+    code = (code or "").replace("-", "").replace(" ", "").strip()
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""SELECT * FROM connection_codes WHERE code=%s""", (code,))
+        c = cur.fetchone()
+        if not c:
+            return {"ok": False, "error": "Invalid code."}
+        if c["revoked_at"]:
+            return {"ok": False, "error": "This code was revoked."}
+        if c["used_at"]:
+            return {"ok": False, "error": "This code has already been used."}
+        cur.execute("SELECT CURRENT_TIMESTAMP > %s AS expired", (c["expires_at"],))
+        if cur.fetchone()["expired"]:
+            return {"ok": False, "error": "This code has expired."}
+
+        org_id = c["org_id"]
+        # Don't let someone accept into a workspace they already belong to as owner.
+        cur.execute("SELECT name FROM organizations WHERE id=%s", (org_id,))
+        org = cur.fetchone()
+        org_name = org["name"] if org else "workspace"
+
+        scope = c["scope_company_ids"]
+        if isinstance(scope, str):
+            try: scope = _json.loads(scope)
+            except Exception: scope = None
+        if scope:
+            cur.execute("SELECT name FROM companies WHERE org_id=%s AND id::text = ANY(%s)",
+                        (org_id, [str(s) for s in scope]))
+        else:
+            cur.execute("SELECT name FROM companies WHERE org_id=%s AND archived_at IS NULL", (org_id,))
+        company_names = [r["name"] for r in cur.fetchall()]
+
+        # membership (issuer-chosen role)
+        scope_json = _json.dumps([str(s) for s in scope]) if scope else None
+        cur.execute("""
+            INSERT INTO memberships (user_id, org_id, role, scope_company_ids, invited_by)
+            VALUES (%s, %s, %s, %s::jsonb, %s)
+            ON CONFLICT (user_id, org_id) DO UPDATE SET role = EXCLUDED.role,
+                                                        scope_company_ids = EXCLUDED.scope_company_ids
+        """, (accepter_users_id, org_id, c["role"], scope_json, c["created_by_user_id"]))
+
+        # mark used
+        cur.execute("""UPDATE connection_codes SET used_at=CURRENT_TIMESTAMP, used_by_user_id=%s
+                       WHERE id=%s""", (accepter_users_id, c["id"]))
+        conn.commit()
+        cur.close(); conn.close()
+
+        # project company access into legacy accounting_users.companies (separate conns)
+        for cname in company_names:
+            try: add_company_to_user(accepter_username, cname)
+            except Exception as pe: print(f"[accept_connection_code project] {pe}")
+
+        return {"ok": True, "org_name": org_name, "role": c["role"],
+                "companies": company_names}
+    except Exception as e:
+        conn.rollback(); print(f"[accept_connection_code] {e}")
+        try: cur.close(); conn.close()
+        except Exception: pass
+        return {"ok": False, "error": str(e)}
+
+
+def list_connection_codes(org_id):
+    """All codes issued for an org (active first)."""
+    _ensure_connection_codes_table()
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT id, code, role, scope_company_ids, expires_at, used_at, used_by_user_id,
+               revoked_at, created_at,
+               (revoked_at IS NULL AND used_at IS NULL AND CURRENT_TIMESTAMP <= expires_at) AS active
+        FROM connection_codes WHERE org_id=%s ORDER BY created_at DESC LIMIT 50
+    """, (org_id,))
+    rows = cur.fetchall(); cur.close(); conn.close()
+    return rows
+
+
+def revoke_connection_code(code_id, org_id=None):
+    _ensure_connection_codes_table()
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        if org_id:
+            cur.execute("UPDATE connection_codes SET revoked_at=CURRENT_TIMESTAMP WHERE id=%s AND org_id=%s", (code_id, org_id))
+        else:
+            cur.execute("UPDATE connection_codes SET revoked_at=CURRENT_TIMESTAMP WHERE id=%s", (code_id,))
+        conn.commit(); return cur.rowcount > 0
+    finally:
+        cur.close(); conn.close()
+
+
+def list_org_members(org_id):
+    """People in an org with their roles."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT m.id AS membership_id, m.role, m.scope_company_ids, m.joined_at,
+               u.id AS user_id, u.username, u.name, u.email
+        FROM memberships m JOIN users u ON m.user_id = u.id
+        WHERE m.org_id = %s ORDER BY m.joined_at ASC
+    """, (org_id,))
+    rows = cur.fetchall(); cur.close(); conn.close()
+    return rows
 
 
 def embed_tally_master(company_id, company_name, embed_fn, batch_log=None):

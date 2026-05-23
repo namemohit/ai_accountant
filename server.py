@@ -662,6 +662,142 @@ def get_embedding(text: str):
         print(f"Error generating embedding: {e}")
         return None
 
+# ─────────────────────────────────────────────────────────────
+# Sprint 47 — Token wallet metering (per-workspace/org).
+# Tune these business constants as needed.
+TOKEN_MARKUP = 1.0          # YantrAI tokens charged per Gemini token
+TOKENS_PER_INR = 1000       # recharge: ₹1 -> 1000 tokens (placeholder pricing)
+BILLING_ENFORCE = True      # block AI actions when balance <= 0
+
+def _billing_org_id(username, company_name):
+    """Resolve the workspace (org) wallet to charge for this caller+company."""
+    try:
+        u = db.get_user_by_username(username) if username else None
+        uid = u.get("users_id") if u else None
+        return db.org_id_for_company(company_name, uid), (uid, u)
+    except Exception as e:
+        print(f"[_billing_org_id] {e}")
+        return None, (None, None)
+
+def _ensure_tokens(username, company_name):
+    """Pre-check before an AI call. Raise 402 when the workspace is out of tokens."""
+    if not BILLING_ENFORCE:
+        return None
+    org_id, _ = _billing_org_id(username, company_name)
+    if org_id is None:
+        return None  # can't resolve a wallet → don't block (legacy/edge)
+    if db.org_balance(org_id) <= 0:
+        raise HTTPException(status_code=402, detail={
+            "error": "out_of_tokens",
+            "message": "You're out of tokens — recharge to continue using AI features."})
+    return org_id
+
+def _parse_ai_json(raw):
+    """Tolerantly parse the AI's JSON reply.
+
+    Gemini occasionally returns slightly malformed JSON (code fences, trailing
+    commas, smart quotes, an unterminated tail). Rather than 500-ing the whole
+    chat, try a few light repairs and fall back to a plain-text bubble.
+    """
+    import re as _re
+    fallback = {"text": raw, "ui_type": "text", "ui_data": None, "suggested_questions": []}
+    if not raw:
+        return fallback
+
+    # Strip ```json ... ``` / ``` ... ``` fences if present.
+    s = raw.strip()
+    if s.startswith("```"):
+        s = _re.sub(r'^```[a-zA-Z]*\s*', '', s)
+        s = _re.sub(r'\s*```$', '', s).strip()
+
+    # Isolate the outermost {...} block.
+    m = _re.search(r'\{.*\}', s, _re.DOTALL)
+    candidate = m.group(0) if m else s
+
+    def _try(text):
+        try:
+            return json.loads(text)
+        except Exception:
+            return None
+
+    # 1) straight parse
+    out = _try(candidate)
+    if out is not None:
+        return out
+
+    # 2) light repairs: smart quotes, trailing commas
+    repaired = (candidate
+                .replace('“', '"').replace('”', '"')
+                .replace('‘', "'").replace('’', "'"))
+    repaired = _re.sub(r',\s*([}\]])', r'\1', repaired)
+    out = _try(repaired)
+    if out is not None:
+        return out
+
+    # 3) progressively trim from the end to recover a valid prefix object
+    #    (handles an unterminated/garbled tail by closing braces we've seen).
+    depth = 0
+    in_str = False
+    esc = False
+    last_good = None
+    for i, ch in enumerate(repaired):
+        if esc:
+            esc = False
+            continue
+        if ch == '\\':
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                last_good = i + 1
+    if last_good:
+        out = _try(repaired[:last_good])
+        if out is not None:
+            return out
+
+    print(f"[_parse_ai_json] could not parse AI JSON; falling back to text. head={raw[:120]!r}")
+    return fallback
+
+
+def _usage_from_response(resp):
+    """Pull (prompt, output, total) token counts from a Gemini response, or (0,0,0)."""
+    try:
+        um = getattr(resp, "usage_metadata", None)
+        if um:
+            p = getattr(um, "prompt_token_count", 0) or 0
+            o = getattr(um, "candidates_token_count", 0) or 0
+            t = getattr(um, "total_token_count", 0) or (p + o)
+            return int(p), int(o), int(t)
+    except Exception:
+        pass
+    return 0, 0, 0
+
+def _charge_ai(username, company_name, action, response=None, est_text=None, model="gemini-flash-latest"):
+    """Deduct tokens for one AI call. Best-effort — never breaks the AI flow."""
+    try:
+        org_id, (uid, _) = _billing_org_id(username, company_name)
+        if org_id is None:
+            return
+        p, o, t = _usage_from_response(response)
+        if t <= 0 and est_text:
+            t = max(1, len(est_text) // 4)   # embeddings / no-metadata fallback
+        charged = int(round(t * TOKEN_MARKUP))
+        if charged <= 0:
+            return
+        db.debit_tokens(org_id, charged, action=action, model=model, user_id=uid,
+                        company_name=company_name, prompt_tokens=p, output_tokens=o, total_tokens=t)
+    except Exception as e:
+        print(f"[_charge_ai] {e}")
+
+
 @app.post("/chat")
 async def chat_with_tally(
     message: str = Form(None),
@@ -671,6 +807,7 @@ async def chat_with_tally(
     txn_type: str = Form(None),
     username: str = Form(None)
 ):
+    _ensure_tokens(username, company_name)   # Sprint 47 — block if workspace out of tokens (raises 402)
     try:
         kb = load_kb()
         user_msg = message or ""
@@ -786,6 +923,7 @@ If on second thought this is actually just a regular accounting question (NOT a 
             try:
                 sr_response = parser.model.generate_content(sr_prompt)
                 sr_raw = sr_response.text.strip()
+                _charge_ai(username, company_name, "chat_intent", response=sr_response)
                 import re as re_mod
                 sr_match = re_mod.search(r'(\{.*\})', sr_raw, re_mod.DOTALL)
                 if sr_match:
@@ -1023,13 +1161,9 @@ If on second thought this is actually just a regular accounting question (NOT a 
         
         response = parser.model.generate_content(prompt)
         raw = response.text.strip()
-        
-        import re
-        json_match = re.search(r'(\{.*\})', raw, re.DOTALL)
-        if json_match:
-            ai_response = json.loads(json_match.group(1))
-        else:
-            ai_response = {"text": raw, "ui_type": "text", "ui_data": None, "suggested_questions": []}
+        _charge_ai(username, company_name, "chat", response=response)   # Sprint 47 — meter tokens
+
+        ai_response = _parse_ai_json(raw)
         
         # If this is a bank statement reconciliation response, process it with our matchmaker engine
         if ai_response.get("ui_type") == "reconciliation":
@@ -4350,28 +4484,31 @@ Return ONLY the JSON array, no explanation."""
 @app.post("/api/voice-transcribe")
 async def voice_transcribe(
     file: UploadFile = File(...),
-    company_name: str = Form("Acme Corp")
+    company_name: str = Form("Acme Corp"),
+    username: str = Form(None)
 ):
     """Transcribe and translate real-time voice messages into English using Gemini."""
+    _ensure_tokens(username, company_name)   # Sprint 47 — block if out of tokens
     try:
         content = await file.read()
         if not content:
             return {"status": "success", "text": ""}
-            
+
         mime_type = file.content_type or "audio/webm"
-        
+
         # Use gemini-flash-latest which has native speech-to-text & translation capabilities
         model = genai.GenerativeModel('gemini-flash-latest')
-        
-        prompt = """Transcribe the following audio. If the speech is in Hindi, Gujarati, or any other language, 
-translate it directly into grammatically correct English text. Return only the final transcribed/translated text. 
+
+        prompt = """Transcribe the following audio. If the speech is in Hindi, Gujarati, or any other language,
+translate it directly into grammatically correct English text. Return only the final transcribed/translated text.
 If there is no clear speech or it is just background noise, return an empty string. Do not include any notes, explanations, or packaging."""
 
         response = model.generate_content([
             prompt,
             {"mime_type": mime_type, "data": content}
         ])
-        
+        _charge_ai(username, company_name, "voice", response=response)   # Sprint 47 — meter tokens
+
         transcribed_text = response.text.strip() if response.text else ""
         return {"status": "success", "text": transcribed_text}
     except Exception as e:
@@ -5189,48 +5326,58 @@ async def sync_approved_invoices_batch(payload: dict):
         print(f"Error syncing batch to Tally: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+def _user_payload(user, extra=None):
+    """Shape the user object the frontend expects, optionally with memberships."""
+    companies = user.get("companies") or [user.get("company_name", "Acme Corp")]
+    if isinstance(companies, str):
+        try: companies = json.loads(companies)
+        except Exception: companies = [user.get("company_name", "Acme Corp")]
+    out = {
+        "username": user["username"], "role": user["role"], "name": user.get("name"),
+        "email": user.get("email"), "phone": user.get("phone"),
+        "company_name": user.get("company_name", "Acme Corp"),
+        "companies": companies,
+        "user_type": user.get("user_type"),
+    }
+    if extra:
+        out.update(extra)
+    return out
+
+
+@app.post("/api/onboard")
+async def api_onboard(payload: dict):
+    """Sprint 46 — uniform self-onboarding. Creates the user's own workspace
+    (org + first company + owner membership). No type picker; relationships are
+    formed later via handshake codes (/api/connect/*)."""
+    res = db.onboard_user(
+        username=payload.get("username"), password=payload.get("password"),
+        name=payload.get("name"), email=payload.get("email"), phone=payload.get("phone"),
+        company_name=payload.get("company_name"), gstin=payload.get("gstin"),
+        state_code=payload.get("state_code"),
+    )
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Onboarding failed"))
+    user = db.get_user_by_username(payload.get("username"))
+    return {"status": "success", "user": _user_payload(user)}
+
+
 @app.post("/api/register")
 async def api_register(payload: dict):
+    """Back-compat: old clients post here → treated as a Business owner onboarding."""
     username = payload.get("username")
     password = payload.get("password")
-    company_name = payload.get("company_name", "Acme Corp")
-    name = payload.get("name")
-    email = payload.get("email")
-    phone = payload.get("phone")
-    
     if not username or not password:
         raise HTTPException(status_code=400, detail="Username and password are required")
-        
-    existing = db.get_user_by_username(username)
-    if existing:
-        raise HTTPException(status_code=400, detail=f"User '{username}' already exists")
-        
-    success = db.create_user(username, password, role="admin", name=name, email=email, phone=phone, company_name=company_name)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to create user account")
-
-    # Auto-add per-user demo company (NOT shared) so no tenant data leaks across users
-    demo_name = f"Sample Co — {username}"
-    db.add_company_to_user(username, demo_name)
-
+    res = db.onboard_user(
+        username=username, password=password,
+        name=payload.get("name"), email=payload.get("email"), phone=payload.get("phone"),
+        user_type="business",
+        company_name=payload.get("company_name", "Acme Corp"),
+    )
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Failed to create user account"))
     user = db.get_user_by_username(username)
-    companies = user.get("companies") or [company_name]
-    # Ensure user's own demo is first in list
-    if demo_name in companies and companies[0] != demo_name:
-        companies.remove(demo_name)
-        companies.insert(0, demo_name)
-    return {
-        "status": "success",
-        "user": {
-            "username": user["username"],
-            "role": user["role"],
-            "name": user["name"],
-            "email": user["email"],
-            "phone": user["phone"],
-            "company_name": user.get("company_name", company_name),
-            "companies": companies
-        }
-    }
+    return {"status": "success", "user": _user_payload(user)}
 
 @app.post("/api/login")
 async def api_login(credentials: dict):
@@ -5244,27 +5391,153 @@ async def api_login(credentials: dict):
     if not user or user["password"] != password:
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    # Ensure user's own private demo company is available (per-user, NOT shared)
-    companies = user.get("companies") or [user.get("company_name", "Acme Corp")]
-    if isinstance(companies, str):
-        companies = json.loads(companies)
-    demo_name = f"Sample Co — {username}"
-    if demo_name not in companies:
-        db.add_company_to_user(username, demo_name)
-        companies.append(demo_name)
+    # Memberships (Phase-B org model) — present once the user is onboarded/backfilled.
+    memberships = []
+    try:
+        if user.get("users_id"):
+            memberships = db.get_user_memberships(user["users_id"])
+    except Exception as me:
+        print(f"[login] memberships fetch failed: {me}", flush=True)
 
     return {
         "status": "success",
-        "user": {
-            "username": user["username"],
-            "role": user["role"],
-            "name": user["name"],
-            "email": user["email"],
-            "phone": user["phone"],
-            "company_name": user.get("company_name", "Acme Corp"),
-            "companies": companies
-        }
+        "user": _user_payload(user, {"memberships": memberships}),
     }
+
+
+# =============================================================================
+# Sprint 46 — Handshake codes (share workspace access, AnyDesk-style)
+# =============================================================================
+def _resolve_caller(username):
+    """username -> (users_id, accounting_user row). Raises 401 if unknown."""
+    if not username:
+        raise HTTPException(status_code=401, detail="Sign in required.")
+    u = db.get_user_by_username(username)
+    if not u or not u.get("users_id"):
+        raise HTTPException(status_code=401, detail="User not found or not migrated.")
+    return u["users_id"], u
+
+
+def _owner_org(users_id, org_id=None, allow=("owner", "manager")):
+    """Pick the caller's org (the given org_id, or their first owned org) and
+    verify their membership role is allowed. Returns org_id."""
+    mems = db.get_user_memberships(users_id) or []
+    if org_id:
+        m = next((x for x in mems if str(x["org_id"]) == str(org_id)), None)
+        if not m:
+            raise HTTPException(status_code=403, detail="You are not a member of that workspace.")
+        if m["role"] not in allow:
+            raise HTTPException(status_code=403, detail="You don't have permission to do that here.")
+        return org_id
+    # default: first org where the caller is owner/manager
+    m = next((x for x in mems if x["role"] in allow), None)
+    if not m:
+        raise HTTPException(status_code=403, detail="You don't own a workspace to share.")
+    return m["org_id"]
+
+
+@app.post("/api/connect/generate")
+async def api_connect_generate(payload: dict):
+    users_id, _ = _resolve_caller(payload.get("username"))
+    org_id = _owner_org(users_id, payload.get("org_id"))
+    res = db.create_connection_code(
+        org_id=org_id, role=(payload.get("role") or "viewer"),
+        scope_company_ids=payload.get("scope_company_ids"),
+        created_by_user_id=users_id, ttl_hours=int(payload.get("ttl_hours") or 24),
+    )
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Could not generate code"))
+    return {"status": "success", **res}
+
+
+@app.post("/api/connect/accept")
+async def api_connect_accept(payload: dict):
+    username = payload.get("username")
+    users_id, _ = _resolve_caller(username)
+    res = db.accept_connection_code(payload.get("code"), users_id, username)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Could not accept code"))
+    return {"status": "success", **res}
+
+
+@app.get("/api/connect/codes")
+async def api_connect_codes(username: str, org_id: str = None):
+    users_id, _ = _resolve_caller(username)
+    org_id = _owner_org(users_id, org_id)
+    return {"status": "success", "codes": db.list_connection_codes(org_id)}
+
+
+@app.post("/api/connect/revoke")
+async def api_connect_revoke(payload: dict):
+    users_id, _ = _resolve_caller(payload.get("username"))
+    org_id = _owner_org(users_id, payload.get("org_id"))
+    ok = db.revoke_connection_code(payload.get("code_id"), org_id)
+    return {"status": "success" if ok else "noop"}
+
+
+@app.get("/api/org/members")
+async def api_org_members(username: str, org_id: str = None):
+    users_id, _ = _resolve_caller(username)
+    org_id = _owner_org(users_id, org_id, allow=("owner", "manager", "accountant", "junior", "viewer"))
+    return {"status": "success", "members": db.list_org_members(org_id)}
+
+
+# =============================================================================
+# Sprint 47 — Wallet (tokens) endpoints
+# =============================================================================
+@app.get("/api/wallet")
+async def api_wallet(username: str, company_name: str = None):
+    """Balance + recent ledger for the workspace tied to the caller (optionally the
+    workspace that owns `company_name`, i.e. the active company)."""
+    org_id, (uid, _) = _billing_org_id(username, company_name)
+    if org_id is None and username:
+        uid2, _ = _resolve_caller(username)
+        org_id = _owner_org(uid2, None, allow=("owner", "manager", "accountant", "junior", "viewer"))
+    if org_id is None:
+        return {"status": "success", "balance": 0, "org_id": None, "ledger": []}
+    return {"status": "success", "org_id": str(org_id), "balance": db.org_balance(org_id),
+            "tokens_per_inr": TOKENS_PER_INR, "ledger": db.recent_ledger(org_id, 20)}
+
+
+@app.post("/api/wallet/recharge")
+async def api_wallet_recharge(payload: dict):
+    """Record a recharge request. Real payment gateway lands later; for now this
+    creates a 'pending' purchase that a super_admin credits (manual top-up)."""
+    username = payload.get("username")
+    uid, _ = _resolve_caller(username)
+    org_id = payload.get("org_id") or _owner_org(uid, None)
+    amount = float(payload.get("amount_inr") or 0)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Enter an amount.")
+    tokens = int(round(amount * TOKENS_PER_INR))
+    p = db.create_purchase(org_id, amount, tokens, created_by=username, provider="manual")
+    return {"status": "pending", "purchase_id": str(p["id"]), "amount_inr": amount,
+            "tokens": tokens, "message": "Recharge requested — tokens will be credited shortly."}
+
+
+@app.post("/api/wallet/credit")
+async def api_wallet_credit(payload: dict):
+    """super_admin manual top-up (until the gateway is live). Credits tokens to an
+    org, and marks a pending purchase paid if purchase_id is given."""
+    actor = payload.get("username")
+    a = db.get_user_by_username(actor) if actor else None
+    if not a or a.get("role") != "super_admin":
+        raise HTTPException(status_code=403, detail="Only a super admin can credit tokens.")
+    org_id = payload.get("org_id")
+    purchase_id = payload.get("purchase_id")
+    tokens = payload.get("tokens")
+    if purchase_id and not tokens:
+        row = db.mark_purchase_paid(purchase_id)
+        if not row:
+            raise HTTPException(status_code=400, detail="Purchase not found or already paid.")
+        org_id, tokens = row["org_id"], row["tokens"]
+        bal = db.credit_tokens(org_id, tokens, reason="recharge", ref_id=str(purchase_id), created_by=actor)
+    else:
+        if not org_id or not tokens:
+            raise HTTPException(status_code=400, detail="org_id and tokens required.")
+        bal = db.credit_tokens(org_id, int(tokens), reason="admin_adjust",
+                               note=payload.get("note"), created_by=actor)
+    return {"status": "success", "balance": bal}
 
 # =============================================================================
 # Tally Agent Authentication (Phase B)
