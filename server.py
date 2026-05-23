@@ -793,7 +793,7 @@ def _verify_token(authz):
 # Paths that never require a session (login, onboard, public, desktop agent, static).
 _AUTH_WHITELIST_PREFIXES = ("/api/login", "/api/auth/", "/api/onboard", "/api/register",
                             "/api/agent/", "/tally/", "/api/agents/verify-sso",
-                            "/static/", "/tally_bridge_agent")
+                            "/api/webhooks/", "/static/", "/tally_bridge_agent")
 _AUTH_WHITELIST_EXACT = ("/", "/login", "/sw.js", "/manifest.json", "/favicon.ico")
 def _is_auth_whitelisted(path):
     return path in _AUTH_WHITELIST_EXACT or any(path.startswith(p) for p in _AUTH_WHITELIST_PREFIXES)
@@ -805,6 +805,31 @@ def _is_auth_whitelisted(path):
 TOKEN_MARKUP = 1.0          # YantrAI tokens charged per Gemini token
 TOKENS_PER_INR = 1000       # recharge: ₹1 -> 1000 tokens (placeholder pricing)
 BILLING_ENFORCE = True      # block AI actions when balance <= 0
+
+# Sprint 53 — Razorpay (test mode first). Keys from env; if absent, recharge falls
+# back to the manual-pending flow so nothing breaks.
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "")
+RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
+RAZORPAY_ENABLED = bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
+
+def _razorpay_create_order(amount_inr, receipt, notes=None):
+    """Create a Razorpay order (amount in paise). Returns the order dict or raises."""
+    import requests as _rq
+    r = _rq.post("https://api.razorpay.com/v1/orders",
+                 auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET),
+                 json={"amount": int(round(float(amount_inr) * 100)), "currency": "INR",
+                       "receipt": receipt, "notes": notes or {}}, timeout=20)
+    if r.status_code not in (200, 201):
+        raise ValueError(f"order {r.status_code}: {r.text[:200]}")
+    return r.json()
+
+def _razorpay_verify_signature(order_id, payment_id, signature):
+    """Verify Checkout's payment signature = HMAC_SHA256(order_id|payment_id, key_secret)."""
+    import hmac as _h, hashlib as _hl
+    expected = _h.new(RAZORPAY_KEY_SECRET.encode(), f"{order_id}|{payment_id}".encode(),
+                      _hl.sha256).hexdigest()
+    return _h.compare_digest(expected, signature or "")
 
 def _billing_org_id(username, company_name):
     """Resolve the workspace (org) wallet to charge for this caller+company."""
@@ -5729,8 +5754,9 @@ async def api_wallet(username: str, company_name: str = None):
 
 @app.post("/api/wallet/recharge")
 async def api_wallet_recharge(payload: dict):
-    """Record a recharge request. Real payment gateway lands later; for now this
-    creates a 'pending' purchase that a super_admin credits (manual top-up)."""
+    """Start a recharge. With Razorpay configured, create a gateway order and return
+    the Checkout params; otherwise fall back to a manual 'pending' purchase that a
+    super_admin credits."""
     username = payload.get("username")
     uid, _ = _resolve_caller(username)
     org_id = payload.get("org_id") or _owner_org(uid, None)
@@ -5738,9 +5764,79 @@ async def api_wallet_recharge(payload: dict):
     if amount <= 0:
         raise HTTPException(status_code=400, detail="Enter an amount.")
     tokens = int(round(amount * TOKENS_PER_INR))
+    if RAZORPAY_ENABLED:
+        try:
+            p = db.create_purchase(org_id, amount, tokens, created_by=username, provider="razorpay")
+            order = _razorpay_create_order(amount, receipt=f"wallet_{p['id']}",
+                                           notes={"purchase_id": str(p["id"]), "org_id": str(org_id)})
+            # store the order id on the purchase so verify/webhook can match it
+            db.mark_purchase_order(str(p["id"]), order["id"])
+            return {"status": "order", "provider": "razorpay", "key_id": RAZORPAY_KEY_ID,
+                    "order_id": order["id"], "amount": order["amount"], "currency": order["currency"],
+                    "tokens": tokens, "purchase_id": str(p["id"])}
+        except Exception as e:
+            print(f"[recharge] razorpay order failed: {e}", flush=True)
+            raise HTTPException(status_code=502, detail="Payment gateway error — try again.")
+    # manual fallback (no gateway configured)
     p = db.create_purchase(org_id, amount, tokens, created_by=username, provider="manual")
     return {"status": "pending", "purchase_id": str(p["id"]), "amount_inr": amount,
             "tokens": tokens, "message": "Recharge requested — tokens will be credited shortly."}
+
+
+@app.post("/api/wallet/verify")
+async def api_wallet_verify(payload: dict):
+    """Verify a Razorpay Checkout result and credit tokens (idempotent)."""
+    if not RAZORPAY_ENABLED:
+        raise HTTPException(status_code=400, detail="Payments not enabled.")
+    order_id = (payload or {}).get("razorpay_order_id")
+    payment_id = (payload or {}).get("razorpay_payment_id")
+    signature = (payload or {}).get("razorpay_signature")
+    if not _razorpay_verify_signature(order_id, payment_id, signature):
+        raise HTTPException(status_code=400, detail="Payment verification failed.")
+    row = db.mark_purchase_paid_by_order(order_id, provider_ref=payment_id)
+    bal = None
+    if row:   # first time this order is marked paid → credit once
+        bal = db.credit_tokens(row["org_id"], row["tokens"], reason="recharge",
+                               ref_id=payment_id, created_by="razorpay")
+    else:
+        # already credited (e.g. webhook beat us) → just report balance
+        try:
+            u = db.get_user_by_username(payload.get("username")) if payload.get("username") else None
+            oid = db.org_id_for_company(payload.get("company_name"), u and u.get("users_id"))
+            bal = db.org_balance(oid) if oid else None
+        except Exception:
+            pass
+    return {"status": "success", "balance": bal}
+
+
+@app.post("/api/webhooks/razorpay")
+async def api_webhook_razorpay(request: Request):
+    """Reliable backstop: Razorpay calls this on payment.captured / order.paid.
+    Verifies the webhook signature and credits tokens (idempotent)."""
+    raw = await request.body()
+    sig = request.headers.get("x-razorpay-signature", "")
+    if RAZORPAY_WEBHOOK_SECRET:
+        import hmac as _h, hashlib as _hl
+        expected = _h.new(RAZORPAY_WEBHOOK_SECRET.encode(), raw, _hl.sha256).hexdigest()
+        if not _h.compare_digest(expected, sig):
+            raise HTTPException(status_code=400, detail="bad signature")
+    try:
+        body = json.loads(raw.decode() or "{}")
+        ent = (body.get("payload") or {})
+        order_id = None; payment_id = None
+        pay = ((ent.get("payment") or {}).get("entity") or {})
+        if pay:
+            order_id = pay.get("order_id"); payment_id = pay.get("id")
+        if not order_id:
+            order_id = ((ent.get("order") or {}).get("entity") or {}).get("id")
+        if order_id:
+            row = db.mark_purchase_paid_by_order(order_id, provider_ref=payment_id)
+            if row:
+                db.credit_tokens(row["org_id"], row["tokens"], reason="recharge",
+                                 ref_id=payment_id, created_by="razorpay_webhook")
+    except Exception as e:
+        print(f"[razorpay webhook] {e}", flush=True)
+    return {"status": "ok"}
 
 
 @app.post("/api/wallet/credit")

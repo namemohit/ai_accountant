@@ -366,7 +366,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v57</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v58</div>
         </div>
     </div>
 
@@ -2109,7 +2109,7 @@
         <div class="mobile-drawer-footer">
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
-            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v57</div>
+            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v58</div>
         </div>
     </div>
 
@@ -2537,17 +2537,56 @@
             const q = document.getElementById('wallet-quote');
             q.textContent = amt > 0 ? `You'll get ${Math.round(amt * _walletTokensPerInr).toLocaleString('en-IN')} tokens.` : '';
         }
+        function _loadRazorpayJs() {
+            return new Promise((resolve) => {
+                if (window.Razorpay) return resolve(true);
+                const s = document.createElement('script');
+                s.src = 'https://checkout.razorpay.com/v1/checkout.js';
+                s.onload = () => resolve(true); s.onerror = () => resolve(false);
+                document.head.appendChild(s);
+            });
+        }
         async function walletRecharge() {
             const u = _connUser();
             const amt = parseFloat(document.getElementById('wallet-amount').value || 0);
             const msg = document.getElementById('wallet-recharge-msg');
             if (!(amt > 0)) { msg.style.color = '#f87171'; msg.textContent = 'Enter an amount.'; return; }
+            msg.style.color = '#94a3b8'; msg.textContent = 'Starting…';
             try {
-                const r = await fetch(`${API}/api/wallet/recharge`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: u.username, amount_inr: amt }) });
+                const r = await fetch(`${API}/api/wallet/recharge`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: u.username, company_name: _walletActiveCompany(), amount_inr: amt }) });
                 const d = await r.json();
                 if (!r.ok) throw new Error(d.detail || 'Failed');
-                msg.style.color = '#4ade80';
-                msg.textContent = d.message || 'Recharge requested.';
+                if (d.status === 'order' && d.provider === 'razorpay') {
+                    const ok = await _loadRazorpayJs();
+                    if (!ok) throw new Error('Could not load the payment window.');
+                    msg.textContent = '';
+                    const rzp = new Razorpay({
+                        key: d.key_id, order_id: d.order_id, amount: d.amount, currency: d.currency,
+                        name: 'YantrAI Cloud', description: `${(d.tokens||0).toLocaleString('en-IN')} tokens`,
+                        prefill: { name: u.name || u.username || '', email: u.email || '' },
+                        theme: { color: '#da7756' },
+                        handler: async function (resp) {
+                            msg.style.color = '#94a3b8'; msg.textContent = 'Verifying payment…';
+                            try {
+                                const v = await fetch(`${API}/api/wallet/verify`, { method:'POST', headers:{'Content-Type':'application/json'},
+                                    body: JSON.stringify({ username: u.username, company_name: _walletActiveCompany(),
+                                        razorpay_order_id: resp.razorpay_order_id, razorpay_payment_id: resp.razorpay_payment_id,
+                                        razorpay_signature: resp.razorpay_signature }) });
+                                const vd = await v.json();
+                                if (!v.ok) throw new Error(vd.detail || 'Verification failed');
+                                msg.style.color = '#4ade80'; msg.textContent = 'Payment successful — tokens added!';
+                                if (typeof vd.balance === 'number') document.getElementById('wallet-modal-balance').textContent = vd.balance.toLocaleString('en-IN');
+                                refreshWalletPill(); _loadWalletUsageByAgent && _loadWalletUsageByAgent();
+                            } catch (e) { msg.style.color = '#f87171'; msg.textContent = e.message + ' (if money was deducted it will reflect shortly).'; refreshWalletPill(); }
+                        },
+                        modal: { ondismiss: function () { msg.style.color = '#94a3b8'; msg.textContent = 'Payment cancelled.'; } }
+                    });
+                    rzp.on('payment.failed', function (r) { msg.style.color = '#f87171'; msg.textContent = (r.error && r.error.description) || 'Payment failed.'; });
+                    rzp.open();
+                } else {
+                    msg.style.color = '#4ade80';
+                    msg.textContent = d.message || 'Recharge requested.';
+                }
             } catch(e) { msg.style.color = '#f87171'; msg.textContent = e.message; }
         }
         async function walletAdminCredit() {

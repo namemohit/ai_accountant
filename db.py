@@ -1312,6 +1312,9 @@ def _ensure_billing_schema():
         cur.execute("ALTER TABLE accounting_users ADD COLUMN IF NOT EXISTS auth_uid UUID")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_users_auth_uid      ON users(auth_uid)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_acct_users_auth_uid ON accounting_users(auth_uid)")
+        # Sprint 53 — Razorpay: store the gateway order id to match verify/webhook.
+        cur.execute("ALTER TABLE token_purchases ADD COLUMN IF NOT EXISTS provider_order_id TEXT")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_token_purch_order ON token_purchases(provider_order_id)")
         conn.commit(); cur.close(); conn.close()
         _seed_agents()
     except Exception as e:
@@ -1783,12 +1786,13 @@ def recent_ledger(org_id, limit=20):
     return rows
 
 
-def create_purchase(org_id, amount_inr, tokens, created_by=None, provider=None):
+def create_purchase(org_id, amount_inr, tokens, created_by=None, provider=None,
+                    provider_order_id=None):
     _ensure_billing_schema()
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("""INSERT INTO token_purchases (org_id, amount_inr, tokens, created_by, provider)
-                   VALUES (%s,%s,%s,%s,%s) RETURNING id, status""",
-                (org_id, amount_inr, tokens, created_by, provider))
+    cur.execute("""INSERT INTO token_purchases (org_id, amount_inr, tokens, created_by, provider, provider_order_id)
+                   VALUES (%s,%s,%s,%s,%s,%s) RETURNING id, status""",
+                (org_id, amount_inr, tokens, created_by, provider, provider_order_id))
     row = cur.fetchone(); conn.commit(); cur.close(); conn.close()
     return row
 
@@ -1798,6 +1802,32 @@ def mark_purchase_paid(purchase_id, provider_ref=None):
     cur.execute("""UPDATE token_purchases SET status='paid', paid_at=CURRENT_TIMESTAMP,
                    provider_ref=COALESCE(%s, provider_ref) WHERE id=%s AND status<>'paid'
                    RETURNING org_id, tokens""", (provider_ref, purchase_id))
+    row = cur.fetchone(); conn.commit(); cur.close(); conn.close()
+    return row
+
+
+def mark_purchase_order(purchase_id, order_id):
+    """Sprint 53 — attach the gateway order id to a purchase (for verify/webhook match)."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("UPDATE token_purchases SET provider_order_id=%s WHERE id=%s", (order_id, purchase_id))
+        conn.commit()
+    except Exception as e:
+        conn.rollback(); print(f"[mark_purchase_order] {e}")
+    finally:
+        cur.close(); conn.close()
+
+
+def mark_purchase_paid_by_order(order_id, provider_ref=None):
+    """Sprint 53 — atomically mark a Razorpay-order purchase paid (idempotent: returns
+    org_id+tokens only on the transition to paid, so credit happens exactly once)."""
+    if not order_id:
+        return None
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""UPDATE token_purchases SET status='paid', paid_at=CURRENT_TIMESTAMP,
+                   provider_ref=COALESCE(%s, provider_ref)
+                   WHERE provider_order_id=%s AND status<>'paid'
+                   RETURNING id, org_id, tokens""", (provider_ref, order_id))
     row = cur.fetchone(); conn.commit(); cur.close(); conn.close()
     return row
 
