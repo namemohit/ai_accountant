@@ -436,6 +436,21 @@ body {
 }
 .feat-name { font-size: 0.8rem; color: #cbd5e1; text-align: center; line-height: 1.2; }
 
+/* Sprint 71 — Upload anything: shared action buttons + list view */
+.upl-btn { padding: 7px 10px; background: var(--bg-light); color: #cbd5e1; border: 1px solid var(--border);
+  border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 0.85rem; line-height: 1; }
+.upl-btn:hover { border-color: var(--primary); color: #f4f4f5; }
+.upl-del { background: rgba(239,68,68,0.1); color: #f87171; border-color: rgba(239,68,68,0.25); }
+.uploads-list { display: flex; flex-direction: column; gap: 8px; }
+.upl-row { display: flex; align-items: center; gap: 12px; padding: 9px 12px; background: var(--card-bg);
+  border: 1px solid var(--border); border-radius: 10px; }
+.upl-ic { font-size: 1.3rem; cursor: pointer; flex-shrink: 0; }
+.upl-name { flex: 1; min-width: 0; color: #e2e8f0; font-weight: 600; font-size: 0.88rem; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upl-meta { color: #94a3b8; font-size: 0.78rem; flex-shrink: 0; }
+.upl-acts { display: flex; gap: 6px; flex-shrink: 0; }
+@media (max-width: 768px) { .upl-when { display: none; } .upl-name { white-space: normal; } .upl-acts .upl-btn { padding: 7px 8px; } }
+
 /* ===== CARD ===== */
 .card {
   background: var(--card-bg);
