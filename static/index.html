@@ -423,7 +423,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v79</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v80</div>
         </div>
     </div>
 
@@ -2106,6 +2106,20 @@
                 <button onclick="handleLogout()" title="Log out"
                         style="flex-shrink:0; display:inline-flex; align-items:center; gap:8px; padding:9px 16px; background:rgba(239,68,68,0.1); color:#ef4444; border:1px solid rgba(239,68,68,0.3); border-radius:8px; font-weight:600; cursor:pointer; font-size:0.85rem;">🚪 Log out</button>
             </header>
+
+            <!-- Sprint 67 — About / Updates -->
+            <div class="card" style="margin-top:24px;">
+                <h3 style="margin-bottom: 12px;">📦 About &amp; Updates</h3>
+                <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v80</strong></span>
+                    <span id="settings-update-msg" style="font-size:0.82rem; color:#94a3b8;"></span>
+                </div>
+                <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
+                    <button onclick="checkForUpdates()" style="padding:9px 16px; background:rgba(56,189,248,0.1); color:#38bdf8; border:1px solid rgba(56,189,248,0.3); border-radius:8px; font-weight:600; cursor:pointer; font-size:0.85rem;">🔄 Check for updates</button>
+                    <button onclick="_resetApp()" title="Clear cache + reload (fixes a stuck/old version)" style="padding:9px 16px; background:var(--bg-light); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; font-weight:600; cursor:pointer; font-size:0.85rem;">♻️ Reset app</button>
+                </div>
+                <div style="font-size:0.75rem; color:#64748b; margin-top:10px;">If the app looks out of date, tap <strong>Check for updates</strong>. Still stuck? <strong>Reset app</strong> clears the cache and reloads.</div>
+            </div>
             <div class="grid" style="grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 24px;">
                 <div class="card">
                     <h3 style="margin-bottom: 16px;">👤 Account</h3>
@@ -2297,7 +2311,7 @@
                     style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer; margin-bottom:10px;"></select>
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 6px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="exitToHome(); if(typeof closeMobileMenu==='function') closeMobileMenu();"><span>🏠</span> Home</div>
-            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v79</div>
+            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v80</div>
         </div>
     </div>
 
@@ -6870,15 +6884,52 @@
                     // not on the very first install — avoids a needless first-load reload.
                     if (_hadController && !_swReloaded) { _swReloaded = true; window.location.reload(); }
                 });
-                navigator.serviceWorker.register('/sw.js')
+                navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
                     .then(reg => {
-                        // Proactively check for a newer SW on each load.
-                        reg.update().catch(() => {});
+                        window.__swReg = reg;
+                        reg.update().catch(() => {});   // check on load
+                        // Re-check whenever the app is reopened/refocused (covers standalone PWA relaunch).
+                        document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
+                        window.addEventListener('focus', () => reg.update().catch(() => {}));
                         console.log('ServiceWorker registered with scope: ', reg.scope);
                     })
                     .catch(err => console.log('ServiceWorker registration failed: ', err));
             }
         });
+
+        // Sprint 67 — in-app update controls (Settings → About & Updates).
+        async function checkForUpdates() {
+            const msg = document.getElementById('settings-update-msg');
+            if (msg) { msg.style.color = '#94a3b8'; msg.textContent = 'Checking…'; }
+            try {
+                const reg = (navigator.serviceWorker && (window.__swReg || await navigator.serviceWorker.getRegistration())) || null;
+                if (!reg) { if (msg) msg.textContent = 'Service worker not available.'; return; }
+                await reg.update();
+                // If a new worker is downloading/waiting, it will take over and the page reloads.
+                if (reg.installing || reg.waiting) {
+                    if (msg) { msg.style.color = '#4ade80'; msg.textContent = 'Update found — applying…'; }
+                    if (reg.waiting) reg.waiting.postMessage && reg.waiting.postMessage('skipWaiting');
+                    setTimeout(() => location.reload(), 1200);
+                } else {
+                    if (msg) { msg.style.color = '#4ade80'; msg.textContent = "You're on the latest version."; }
+                }
+            } catch (e) {
+                if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Could not check. Try Reset app.'; }
+            }
+        }
+        async function _resetApp() {
+            if (!confirm('Reset the app? This clears the local cache and reloads to the latest version.')) return;
+            try {
+                if ('serviceWorker' in navigator) {
+                    const regs = await navigator.serviceWorker.getRegistrations();
+                    for (const r of regs) { try { await r.unregister(); } catch(_) {} }
+                }
+                if ('caches' in window) {
+                    for (const k of await caches.keys()) { try { await caches.delete(k); } catch(_) {} }
+                }
+            } catch (_) {}
+            location.reload();
+        }
         
         // ═══════════ SPRINT 9 — chat composer drag-drop ═══════════
 
