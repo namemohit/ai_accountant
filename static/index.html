@@ -10,7 +10,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="apple-touch-icon" href="https://img.icons8.com/color/192/000000/accounting.png">
-    <link rel="stylesheet" href="/static/style.css?v=39">
+    <link rel="stylesheet" href="/static/style.css?v=40">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <script>
@@ -368,10 +368,7 @@
             <div class="nav-item" data-view="reports" data-role-gated="super_admin" onclick="showView('reports')"><span>📈</span> Financial Reports</div>
             <div class="nav-item" data-view="schema" onclick="showView('schema')"><span>📋</span> Masters</div>
             <div class="nav-item" data-view="tasks" data-role-gated="super_admin" onclick="showView('tasks')"><span>🎯</span> YantrAI Tasks</div>
-            <div class="nav-item" data-view="training" data-platform="1" onclick="showView('training')"><span>🧠</span> Connectors</div>
-            <div class="nav-item" data-view="whatsapp" data-platform="1" data-role-gated="super_admin" id="nav-whatsapp" onclick="showView('whatsapp')"><span>📱</span> WhatsApp Setup</div>
-            <!-- Sprint 24 — User Manager (super_admin only) -->
-            <div class="nav-item" data-view="users" data-platform="1" data-role-gated="super_admin" onclick="showView('users')"><span>👥</span> User Manager</div>
+            <!-- Sprint 60 — Connectors / WhatsApp / User Manager moved into the Settings app. -->
         </nav>
         <script>
           /* Sprint 55b — hide agent-scoped nav items at first paint (no full→reduced
@@ -422,7 +419,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v68</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v69</div>
         </div>
     </div>
 
@@ -1137,78 +1134,24 @@
         <!-- Sprint 48 — Agentic Store -->
         <!-- Sprint 56 — Home dashboard (landing for first-time / empty sessions) -->
         <div id="home-view" class="dashboard-view" style="display: none;">
-            <header>
+            <!-- Sprint 60 — Android-style launcher: top bar + app-icon grid (no sidebar) -->
+            <div class="home-topbar">
+                <span class="ht-logo">YantrAI</span>
+                <span class="ht-spacer"></span>
+                <select id="active-company-select-home" onchange="switchCompany(this.value)" title="Active company"></select>
+                <span class="ht-btn ht-wallet" onclick="if(typeof openWalletModal==='function') openWalletModal();" title="Tokens — click to recharge">⚡ <strong id="home-wallet-balance">…</strong></span>
+                <span class="ht-btn" onclick="showView('settings')" title="Settings">⚙️ Settings</span>
+                <span class="ht-btn" onclick="handleLogout()" title="Log out">⎋ Logout</span>
+            </div>
+
+            <header style="margin-top:4px;">
                 <h1 id="home-greeting">Good to see you</h1>
-                <p style="color: #94a3b8;">Your workspace at a glance — pick up where you left off, or jump into an agent.</p>
+                <p style="color: #94a3b8;">Your apps — tap to open. Manage connections, AI training & admin in Settings.</p>
             </header>
 
-            <!-- Wallet card -->
-            <div class="card" id="home-wallet-card" style="margin-top:8px; display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;">
-                <div>
-                    <div style="font-size:0.78rem; color:#94a3b8; text-transform:uppercase; letter-spacing:0.04em;">Token wallet</div>
-                    <div style="font-size:1.6rem; font-weight:700; color:#f4f4f5; margin-top:4px;">
-                        <span style="color:var(--primary);">⚡</span> <span id="home-wallet-balance">…</span>
-                    </div>
-                </div>
-                <button class="btn confirm-btn" onclick="if(typeof openWalletModal==='function') openWalletModal();"
-                        style="padding:10px 20px;">Recharge</button>
-            </div>
-
-            <!-- AI Model Performance Bar (real, company-scoped) -->
-            <h3 style="margin-top:28px; margin-bottom:12px; font-size:1rem; color:#e2e8f0;">AI learning</h3>
-            <div style="padding: 16px 20px; background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px;">
-                <div style="display: flex; align-items: center; gap: 24px; flex-wrap: wrap;">
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <span style="color: #94a3b8; font-size: 0.82rem;">Learned Mappings</span>
-                        <span id="stat-mappings" style="font-weight: 800; color: white; font-size: 0.95rem;">0 Mapped</span>
-                    </div>
-                    <div style="width: 1px; height: 20px; background: var(--border);"></div>
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <span style="color: #94a3b8; font-size: 0.82rem;">Confidence</span>
-                        <span id="stat-confidence" style="font-weight: 800; color: #4ade80; font-size: 0.95rem;">—</span>
-                    </div>
-                    <div style="width: 1px; height: 20px; background: var(--border);"></div>
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <span style="color: #94a3b8; font-size: 0.82rem;">Status</span>
-                        <span id="stat-status" style="background: rgba(16, 185, 129, 0.15); color: #10b981; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 0.72rem;">—</span>
-                    </div>
-                </div>
-                <button class="btn" onclick="startModelOptimization()" style="background: var(--accent); color: white; border: none; font-weight: bold; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; gap: 8px;">
-                    <i class="fas fa-bolt"></i> Optimize AI
-                </button>
-            </div>
-            <!-- Optimizer Console (hidden by default, shown during optimization) -->
-            <div id="optimizer-console-wrapper" style="margin-top: 16px; display: none;">
-                <div class="card" style="background: var(--bg-surface); border-color: rgba(255,255,255,0.05);">
-                    <h4 style="margin: 0 0 12px 0; color: #94a3b8; display: flex; align-items: center; gap: 8px;"><i class="fas fa-terminal" style="font-size: 0.8rem;"></i> Optimization Log</h4>
-                    <div id="optimizer-console" style="font-family: monospace; font-size: 0.8rem; color: #4ade80; text-align: left; height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;">
-                        <div style="color: #64748b;">[Ready] Click 'Optimize AI' to train model.</div>
-                    </div>
-                </div>
-            </div>
-
-            <h3 style="margin-top:28px; margin-bottom:12px; font-size:1rem; color:#e2e8f0;">Your agents</h3>
-            <div class="connector-grid" id="home-agents">
+            <!-- App-icon grid (built by loadHome: installed agents + system apps) -->
+            <div class="app-grid" id="home-app-grid">
                 <div style="color:#64748b; font-size:0.85rem;">Loading…</div>
-            </div>
-
-            <h3 style="margin-top:28px; margin-bottom:12px; font-size:1rem; color:#e2e8f0;">Quick actions</h3>
-            <div class="connector-grid" id="home-quick-actions">
-                <div class="connector-card" style="cursor:pointer;" onclick="homeNewChat()">
-                    <div class="connector-icon">💬</div>
-                    <div class="connector-name">New chat</div>
-                    <div class="connector-desc">Ask AI Accountant or record a voucher</div>
-                </div>
-                <div class="connector-card" style="cursor:pointer;" onclick="showView('uploads')">
-                    <div class="connector-icon">📎</div>
-                    <div class="connector-name">Upload anything</div>
-                    <div class="connector-desc">Add invoices, statements & docs</div>
-                </div>
-                <div class="connector-card" style="cursor:pointer;" onclick="exitToStore()">
-                    <div class="connector-icon">🛍️</div>
-                    <div class="connector-name">Store</div>
-                    <div class="connector-desc">Browse & install more agents</div>
-                </div>
             </div>
         </div>
 
@@ -2195,6 +2138,62 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Sprint 60 — Platform tools (moved off the launcher into Settings) -->
+            <div class="card" style="margin-top:24px;">
+                <h3 style="margin-bottom: 14px;">⚙️ Platform</h3>
+                <div class="connector-grid">
+                    <div class="connector-card" style="cursor:pointer;" onclick="showView('training')">
+                        <div class="connector-icon">🧠</div>
+                        <div class="connector-name">Connectors</div>
+                        <div class="connector-desc">Tally bridge, devices & data sources</div>
+                    </div>
+                    <div class="connector-card" data-role-gated="super_admin" style="cursor:pointer;" onclick="showView('whatsapp')">
+                        <div class="connector-icon">📱</div>
+                        <div class="connector-name">WhatsApp Setup</div>
+                        <div class="connector-desc">Receive invoices via WhatsApp</div>
+                    </div>
+                    <div class="connector-card" data-role-gated="super_admin" style="cursor:pointer;" onclick="showView('users')">
+                        <div class="connector-icon">👥</div>
+                        <div class="connector-name">User Manager</div>
+                        <div class="connector-desc">Users, companies & access</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sprint 60 — AI Learning (moved from Home) -->
+            <div class="card" style="margin-top:24px;">
+                <h3 style="margin-bottom: 14px;">🔬 AI Learning</h3>
+                <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px;">
+                    <div style="display: flex; align-items: center; gap: 24px; flex-wrap: wrap;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="color: #94a3b8; font-size: 0.82rem;">Learned Mappings</span>
+                            <span id="stat-mappings" style="font-weight: 800; color: white; font-size: 0.95rem;">0 Mapped</span>
+                        </div>
+                        <div style="width: 1px; height: 20px; background: var(--border);"></div>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="color: #94a3b8; font-size: 0.82rem;">Confidence</span>
+                            <span id="stat-confidence" style="font-weight: 800; color: #4ade80; font-size: 0.95rem;">—</span>
+                        </div>
+                        <div style="width: 1px; height: 20px; background: var(--border);"></div>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="color: #94a3b8; font-size: 0.82rem;">Status</span>
+                            <span id="stat-status" style="background: rgba(16, 185, 129, 0.15); color: #10b981; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 0.72rem;">—</span>
+                        </div>
+                    </div>
+                    <button class="btn" onclick="startModelOptimization()" style="background: var(--accent); color: white; border: none; font-weight: bold; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; gap: 8px;">
+                        <i class="fas fa-bolt"></i> Optimize AI
+                    </button>
+                </div>
+                <div id="optimizer-console-wrapper" style="margin-top: 16px; display: none;">
+                    <div style="background: var(--bg-surface); border:1px solid rgba(255,255,255,0.05); border-radius:10px; padding:14px;">
+                        <h4 style="margin: 0 0 12px 0; color: #94a3b8; display: flex; align-items: center; gap: 8px;"><i class="fas fa-terminal" style="font-size: 0.8rem;"></i> Optimization Log</h4>
+                        <div id="optimizer-console" style="font-family: monospace; font-size: 0.8rem; color: #4ade80; text-align: left; height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;">
+                            <div style="color: #64748b;">[Ready] Click 'Optimize AI' to train model.</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- WhatsApp Setup View -->
@@ -2286,14 +2285,13 @@
             <div class="mobile-drawer-item" data-view="reports" data-role-gated="super_admin" onclick="mobileNav('reports')"><span>📈</span> Financial Reports</div>
             <div class="mobile-drawer-item" data-view="schema" onclick="mobileNav('schema')"><span>📋</span> Masters</div>
             <div class="mobile-drawer-item" data-view="tasks" data-role-gated="super_admin" onclick="mobileNav('tasks')"><span>🎯</span> YantrAI Tasks</div>
-            <div class="mobile-drawer-item" data-view="training" data-platform="1" onclick="mobileNav('training')"><span>🧠</span> Connectors</div>
-            <div class="mobile-drawer-item" data-view="whatsapp" data-platform="1" data-role-gated="super_admin" id="drawer-whatsapp" onclick="mobileNav('whatsapp')"><span>📱</span> WhatsApp Setup</div>
-            <div class="mobile-drawer-item" data-view="users" data-platform="1" data-role-gated="super_admin" onclick="mobileNav('users')"><span>👥</span> User Manager</div>
+            <!-- Sprint 60 — Connectors / WhatsApp / User Manager moved into the Settings app. -->
+            <div class="mobile-drawer-item" data-view="settings" data-platform="1" onclick="mobileNav('settings')"><span>⚙️</span> Settings</div>
         </nav>
         <div class="mobile-drawer-footer">
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
-            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v68</div>
+            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v69</div>
         </div>
     </div>
 
@@ -2958,7 +2956,11 @@
             const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
             const greet = document.getElementById('home-greeting');
             if (greet) greet.textContent = `Good to see you${u.name ? ', ' + u.name.split(' ')[0] : ''}`;
-            // Wallet balance
+            // Mirror the company switcher into the Home top bar.
+            const homeSel = document.getElementById('active-company-select-home');
+            const src = document.getElementById('active-company-select');
+            if (homeSel && src) { homeSel.innerHTML = src.innerHTML; homeSel.value = src.value; }
+            // Wallet balance (top-bar pill)
             try {
                 const r = await fetch(`${API}/api/wallet?username=${encodeURIComponent(u.username||'')}`);
                 const d = await r.json();
@@ -2968,22 +2970,26 @@
                 const bal = document.getElementById('home-wallet-balance');
                 if (bal) bal.textContent = '—';
             }
-            // Installed agents → launcher cards
-            const grid = document.getElementById('home-agents');
+            // App-icon grid: installed agents + system apps.
+            const grid = document.getElementById('home-app-grid');
             if (grid) {
                 if (typeof _fetchInstalled === 'function' && !(window.__installedAgents && window.__installedAgents.length)) {
                     try { await _fetchInstalled(); } catch(_) {}
                 }
-                const list = window.__installedAgents || [];
-                grid.innerHTML = list.length ? list.map(a => `
-                    <div class="connector-card" style="cursor:pointer;" onclick="enterAgent('${escapeHtml(a.slug)}')">
-                        <div class="connector-icon">${a.icon || '🧩'}</div>
-                        <div class="connector-name">${escapeHtml(a.name || a.slug)}</div>
-                        <div class="connector-desc">${escapeHtml(a.tagline || 'Open agent')}</div>
-                    </div>`).join('')
-                    : '<div style="color:#64748b; font-size:0.85rem;">No agents installed yet. Visit the Store to add one.</div>';
+                const tile = (icon, name, sub, onclick) =>
+                    `<div class="app-tile" onclick="${onclick}"><div class="at-icon">${icon}</div>` +
+                    `<div class="at-name">${escapeHtml(name)}</div><div class="at-sub">${escapeHtml(sub)}</div></div>`;
+                const agents = (window.__installedAgents || []).map(a =>
+                    tile(a.icon || '🧩', a.name || a.slug, a.tagline || 'Open app',
+                         `enterAgent('${escapeHtml(a.slug)}')`)).join('');
+                const systemApps =
+                    tile('🛍️', 'Store', 'Get more apps', "showView('store')") +
+                    tile('📎', 'Upload anything', 'Files for this company', "showView('uploads')") +
+                    tile('🤝', 'Chat with YantrAI', 'Raise a task', "showView('yantrai-chat')") +
+                    tile('⚙️', 'Settings', 'Account, connectors & admin', "showView('settings')");
+                grid.innerHTML = agents + systemApps;
             }
-            if (typeof loadTrainingStats === 'function') loadTrainingStats();
+            // AI-learning stats now live in Settings (Sprint 60) — not loaded here.
         }
         // Sprint 56 — real, company-scoped AI training stats.
         async function loadTrainingStats() {
@@ -3811,6 +3817,8 @@
             if (view === 'bankregister') {
                 view = 'bank';
             }
+            // Sprint 60 — Home is a full-width Android launcher: hide the sidebar on Home.
+            document.body.classList.toggle('home-active', view === 'home');
             document.querySelectorAll('.dashboard-view').forEach(el => el.style.display = 'none');
             // Sprint 49 — remote (embedded) agent view → render the iframe host instead
             // of a local #<view>-view div.
@@ -3906,6 +3914,7 @@
 
             if (view === 'settings') {
                 populateSettings();
+                if (typeof loadTrainingStats === 'function') loadTrainingStats();   // Sprint 60 — AI learning moved here
             }
 
             if (view === 'whatsapp') {
