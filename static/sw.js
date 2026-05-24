@@ -1,9 +1,9 @@
-const CACHE_NAME = 'yantrai-accounting-v83';
+const CACHE_NAME = 'yantrai-accounting-v84';
 const ASSETS = [
   '/',
   '/login',
   '/manifest.json',
-  '/static/style.css?v=46',
+  '/static/style.css?v=47',
   '/static/index.html'
 ];
 

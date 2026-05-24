@@ -366,6 +366,13 @@ body {
 .dashboard-view > header p { font-size: 0.82rem; margin: 0; line-height: 1.4; }
 .dashboard-view > .grid { max-width: 1100px; margin-left: auto; margin-right: auto; }
 .grid { display: grid; grid-template-columns: 1fr 1.2fr; gap: 24px; }
+/* Sprint 69 — launcher/grid pages span full width, so their header must left-align
+   with the tiles (not the centered 1100px column used by card pages). */
+#home-view > header,
+#aiacc-home-view > header,
+#store-view > header,
+#uploads-view > header,
+#dev-portal-view > header { max-width: none; margin-left: 0; margin-right: 0; }
 
 /* ===== Sprint 60/61 — full-width app with a universal top bar (no left sidebar) ===== */
 .sidebar { display: none !important; }                   /* chrome moved to #app-topbar */
