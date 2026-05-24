@@ -10,7 +10,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="apple-touch-icon" href="https://img.icons8.com/color/192/000000/accounting.png">
-    <link rel="stylesheet" href="/static/style.css?v=45">
+    <link rel="stylesheet" href="/static/style.css?v=46">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <script>
@@ -423,7 +423,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v82</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v83</div>
         </div>
     </div>
 
@@ -2129,7 +2129,7 @@
             <div class="card" style="margin-top:24px;">
                 <h3 style="margin-bottom: 12px;">📦 About &amp; Updates</h3>
                 <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v82</strong></span>
+                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v83</strong></span>
                     <span id="settings-update-msg" style="font-size:0.82rem; color:#94a3b8;"></span>
                 </div>
                 <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
@@ -2329,7 +2329,7 @@
                     style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer; margin-bottom:10px;"></select>
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 6px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="exitToHome(); if(typeof closeMobileMenu==='function') closeMobileMenu();"><span>🏠</span> Home</div>
-            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v82</div>
+            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v83</div>
         </div>
     </div>
 
@@ -2951,6 +2951,9 @@
             const sep = meta.remote_url.includes('?') ? '&' : '?';
             frame.src = meta.remote_url + sep + 'token=' + encodeURIComponent(token);
         }
+        // Sprint 69 — AI Accountant features that live ON its launcher (aiacc-home);
+        // these are hidden from the in-agent tabs/drawer to avoid duplicating the launcher.
+        const _AIACC_LAUNCHER = new Set(['chat', 'vouchers', 'bank', 'schema']);
         function _renderNav() {
             const active = window.__activeAgent;
             const meta = active ? window.__agentBySlug[active] : null;
@@ -2967,6 +2970,8 @@
                 if (roleHidden) show = false;
                 else if (active) show = activeViews.has(v);
                 else show = isPlatform;
+                // Don't repeat launcher tiles as tabs/drawer items inside AI Accountant.
+                if (show && active === 'ai-accountant' && _AIACC_LAUNCHER.has(v)) show = false;
                 el.style.display = show ? '' : 'none';
             });
             // Agent header (desktop + mobile) — only inside an agent.
@@ -2978,7 +2983,12 @@
                 if (inAgent) {
                     const ie = document.getElementById(i), ne = document.getElementById(n);
                     if (ie) ie.textContent = meta.icon || '🤖';
-                    if (ne) ne.textContent = meta.name || active;
+                    if (ne) {
+                        ne.textContent = meta.name || active;
+                        // Tap the agent name → its launcher (first view).
+                        ne.style.cursor = 'pointer';
+                        ne.onclick = () => { const v = _firstViewOf(active); if (typeof mobileNav === 'function') mobileNav(v); else showView(v); };
+                    }
                 }
             });
             if (typeof _renderTopbar === 'function') _renderTopbar();
@@ -3006,7 +3016,8 @@
             if (meta) {
                 html += `<span class="tb-tab" onclick="exitToHome()">‹ Home</span>`;
                 html += `<span class="tb-divider"></span>`;
-                html += `<span class="tb-appname">${meta.icon || '🤖'} ${escapeHtml(meta.name || active)}</span>`;
+                // App name → return to the agent's own launcher (its first view).
+                html += `<span class="tb-appname" style="cursor:pointer" title="Apps" onclick="showView('${_firstViewOf(active)}')">${meta.icon || '🤖'} ${escapeHtml(meta.name || active)}</span>`;
                 html += `<span class="tb-divider"></span>`;
                 // Tabs from the hidden sidebar nav items that belong to this agent.
                 document.querySelectorAll('nav .nav-item[data-view]').forEach(el => {
