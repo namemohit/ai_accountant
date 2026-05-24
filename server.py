@@ -1,7 +1,9 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Form, WebSocket, WebSocketDisconnect
 import fastapi
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import Response as _StarletteResponse
 from fastapi.responses import FileResponse, PlainTextResponse
 import uvicorn
 import os
@@ -427,6 +429,9 @@ def load_kb():
     with open(KB_PATH, "r") as f:
         return json.load(f)
 
+# Sprint 72 — gzip every response >512B (887KB index.html -> ~120KB; also CSS + JSON).
+app.add_middleware(GZipMiddleware, minimum_size=512)
+
 # Enable CORS for frontend
 app.add_middleware(
     CORSMiddleware,
@@ -617,7 +622,19 @@ async def handle_whatsapp_message(request: Request):
 # --- Existing Endpoints ---
 
 # Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Sprint 72 — long-cache static assets. They're versioned via ?v=NN (style.css?v=90,
+# sw bumps), so a far-future immutable cache lets reloads reuse them without re-downloading.
+# The PWA shell (/, /sw.js, /manifest.json) keeps no-cache below so it always revalidates.
+class _CachedStatic(StaticFiles):
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        try:
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        except Exception:
+            pass
+        return resp
+
+app.mount("/static", _CachedStatic(directory="static"), name="static")
 
 # PWA shell + service worker must always be revalidated so phones never get
 # stuck on a stale build. no-cache = "check with the server before reusing"

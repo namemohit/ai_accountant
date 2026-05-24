@@ -10,9 +10,15 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="apple-touch-icon" href="https://img.icons8.com/color/192/000000/accounting.png">
-    <link rel="stylesheet" href="/static/style.css?v=50">
+    <!-- Sprint 72 — warm up the CDN/font connections so they don't stall first paint -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+    <link rel="stylesheet" href="/static/style.css?v=90">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <!-- Sprint 72 — load FontAwesome non-render-blocking (swap media to 'all' onload). -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" media="print" onload="this.media='all'">
+    <noscript><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"></noscript>
     <script>
         // ── Sprint 23 — Global fetch wrapper attaches X-User header on every request.
         // The server's role-gate middleware reads this header to enforce super_admin
@@ -277,6 +283,8 @@
         function handleLogout() {
             localStorage.removeItem('currentUser');
             try { localStorage.removeItem('lastRoute'); localStorage.removeItem('activeAgent'); } catch(_) {}
+            // Sprint 72 — clear the per-company launcher/wallet SWR caches.
+            try { Object.keys(localStorage).forEach(k => { if (k.indexOf('__cache_agents_')===0 || k.indexOf('__cache_wallet_')===0) localStorage.removeItem(k); }); } catch(_) {}
             window.location.href = '/login';
         }
 
@@ -423,7 +431,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v90</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v91</div>
         </div>
     </div>
 
@@ -2148,7 +2156,7 @@
             <div class="card" style="margin-top:24px;">
                 <h3 style="margin-bottom: 12px;">📦 About &amp; Updates</h3>
                 <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v90</strong></span>
+                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v91</strong></span>
                     <span id="settings-update-msg" style="font-size:0.82rem; color:#94a3b8;"></span>
                 </div>
                 <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
@@ -2348,7 +2356,7 @@
                     style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer; margin-bottom:10px;"></select>
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 6px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="exitToHome(); if(typeof closeMobileMenu==='function') closeMobileMenu();"><span>🏠</span> Home</div>
-            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v90</div>
+            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v91</div>
         </div>
     </div>
 
@@ -2732,13 +2740,28 @@
                 return await r.json();
             } catch(_) { return null; }
         }
-        async function refreshWalletPill() {
-            const d = await _fetchWallet();
+        // Sprint 72 — cache the balance so reloads paint the ⚡ pill instantly, then revalidate.
+        function _walletCacheKey() { return '__cache_wallet_' + _walletActiveCompany(); }
+        function _paintWalletPill(bal) {
             const el = document.getElementById('wallet-balance');
-            if (el && d && typeof d.balance === 'number') el.textContent = d.balance.toLocaleString('en-IN');
-            if (d) { _walletTokensPerInr = d.tokens_per_inr || 1000; _walletOrgId = d.org_id; }
+            if (el && typeof bal === 'number') el.textContent = bal.toLocaleString('en-IN');
             const tbw = document.getElementById('tb-wallet');          // Sprint 61 — mirror into top bar
             if (tbw && el) tbw.textContent = el.textContent || '—';
+        }
+        let _walletInflight = false;
+        async function refreshWalletPill() {
+            // 1) instant paint from cache
+            try { const c = localStorage.getItem(_walletCacheKey()); if (c) _paintWalletPill(parseFloat(c)); } catch(_) {}
+            if (_walletInflight) return;                                // dedupe rapid double-calls
+            _walletInflight = true;
+            try {
+                const d = await _fetchWallet();
+                if (d && typeof d.balance === 'number') {
+                    _paintWalletPill(d.balance);
+                    try { localStorage.setItem(_walletCacheKey(), String(d.balance)); } catch(_) {}
+                }
+                if (d) { _walletTokensPerInr = d.tokens_per_inr || 1000; _walletOrgId = d.org_id; }
+            } finally { _walletInflight = false; }
         }
         async function openWalletModal() {
             const d = await _fetchWallet();
@@ -2849,7 +2872,7 @@
             openWalletModal();
         }
         // initial + periodic pill refresh
-        window.addEventListener('load', () => setTimeout(refreshWalletPill, 800));
+        /* Sprint 72 — wallet pill now refreshed by bootstrapAgents (no artificial +800ms). */
 
         // ── Sprint 48b — Agentic store: TWO-LEVEL nav (Store home + agent menus) ──
         // Platform views are agent-agnostic and visible everywhere. Agent views
@@ -2888,6 +2911,21 @@
             });
             window.__INSTALLED_VIEWS = union;
         }
+        // ── Sprint 72 — stale-while-revalidate cache for the launcher (instant reload) ──
+        function _agentsCacheKey() {
+            try { return '__cache_agents_' + (JSON.parse(localStorage.getItem('currentUser')||'{}').company_name || ''); }
+            catch(_) { return '__cache_agents_'; }
+        }
+        function _readAgentsCache() {
+            try { const a = JSON.parse(localStorage.getItem(_agentsCacheKey()) || 'null'); return Array.isArray(a) && a.length ? a : null; }
+            catch(_) { return null; }
+        }
+        function _writeAgentsCache(a) { try { if (Array.isArray(a) && a.length) localStorage.setItem(_agentsCacheKey(), JSON.stringify(a)); } catch(_) {} }
+        function _primeAgentsFromCache() {
+            const a = _readAgentsCache();
+            if (a) { window.__installedAgents = a; _buildAgentMaps(a); window.__agentsPrimed = true; return true; }
+            return false;
+        }
         async function _fetchInstalled() {
             const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
             let agents = null;
@@ -2896,20 +2934,21 @@
                 const d = await r.json();
                 if (d && Array.isArray(d.agents)) agents = d.agents;
             } catch(_) {}
-            if (!agents || !agents.length) agents = [_FALLBACK_AGENT];   // graceful degrade
+            if (agents && agents.length) {
+                _writeAgentsCache(agents);                 // refresh cache for the next instant paint
+            } else {
+                agents = _readAgentsCache() || [_FALLBACK_AGENT];   // offline/error → cache, else degrade
+            }
             window.__installedAgents = agents;
             _buildAgentMaps(agents);
             return agents;
         }
-        async function bootstrapAgents() {
-            await _fetchInstalled();
-            // Validate any persisted active agent against what's actually installed.
-            if (window.__activeAgent && !window.__agentBySlug[window.__activeAgent]) {
-                window.__activeAgent = null;
-                try { localStorage.removeItem('activeAgent'); } catch(_) {}
-            }
-            // Landing: honor a meaningful deep-link hash; else auto-open the only
-            // installed agent; else (0 or >1) land on the Store.
+        // Prime maps from cache + start the live fetch NOW (API is defined above), so the
+        // launcher can paint instantly and bootstrapAgents just awaits the in-flight request.
+        try { _primeAgentsFromCache(); } catch(_) {}
+        try { window.__agentsBoot = _fetchInstalled(); } catch(_) { window.__agentsBoot = null; }
+        // Landing logic (extracted so it can run from cache AND after revalidation).
+        function _routeInitial() {
             const rawHash = (location.hash || '').replace(/^#/, '');
             let baseView = (rawHash.split('/')[0] || '');
             if (baseView === 'masters') baseView = 'schema';   // URL alias
@@ -2923,10 +2962,25 @@
                 exitToStore();
             } else {
                 // Sprint 63 — always land on the Home launcher after login (no resume).
-                // (Typed deep links are handled by the branch above; an in-app reload keeps
-                //  its URL hash, so this only fires for a fresh login / cold launch at '/'.)
                 showView('home');
             }
+        }
+        async function bootstrapAgents() {
+            // Sprint 72 — instant paint: if landing on Home and we have cached agents,
+            // render the launcher NOW (no network wait); revalidate below and reconcile.
+            const isHomeLanding = !((location.hash || '').replace(/^#/, ''));
+            if (isHomeLanding && window.__agentsPrimed) { _renderNav(); showView('home'); }
+            // Revalidate against the in-flight (or fresh) network fetch.
+            await (window.__agentsBoot || _fetchInstalled());
+            window.__agentsBoot = null;
+            // Validate any persisted active agent against what's actually installed.
+            if (window.__activeAgent && !window.__agentBySlug[window.__activeAgent]) {
+                window.__activeAgent = null;
+                try { localStorage.removeItem('activeAgent'); } catch(_) {}
+            }
+            _renderNav();
+            _routeInitial();                 // route with fresh data (re-renders Home if list changed)
+            if (typeof refreshWalletPill === 'function') refreshWalletPill();   // replaces the +800ms timer
         }
         function enterAgent(slug) {
             window.__activeAgent = slug;
@@ -3387,7 +3441,7 @@
         // DOMContentLoaded (after role flags set), then refine with the real fetch.
         try { _buildAgentMaps([_FALLBACK_AGENT]); _renderNav(); } catch (_) {}
         document.addEventListener('DOMContentLoaded', () => { try { _buildAgentMaps([_FALLBACK_AGENT]); _renderNav(); } catch (_) {} });
-        window.addEventListener('load', () => setTimeout(bootstrapAgents, 200));
+        window.addEventListener('load', () => bootstrapAgents());   // Sprint 72 — no artificial +200ms delay
 
         // ── Sprint 55 — Upload anything: company-scoped file library ────────
         function _uploadsCo() { try { return JSON.parse(localStorage.getItem('currentUser')||'{}').company_name || ''; } catch(_) { return ''; } }
