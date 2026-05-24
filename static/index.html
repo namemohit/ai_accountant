@@ -337,8 +337,8 @@
         <nav>
             <!-- Sprint 48b — agent header (shown only when inside an agent) -->
             <div id="agent-nav-header" style="display:none; padding:8px 12px; margin-bottom:6px; border-bottom:1px solid var(--border);">
-                <div onclick="exitToStore()" style="display:flex; align-items:center; gap:6px; color:#94a3b8; font-size:0.72rem; cursor:pointer; margin-bottom:6px;">
-                    <span>‹</span> <span>Store</span>
+                <div onclick="exitToHome()" style="display:flex; align-items:center; gap:6px; color:#94a3b8; font-size:0.72rem; cursor:pointer; margin-bottom:6px;">
+                    <span>‹</span> <span>Home</span>
                 </div>
                 <div style="display:flex; align-items:center; gap:8px;">
                     <span id="agent-nav-icon" style="font-size:1.1rem;">🧮</span>
@@ -380,10 +380,13 @@
           (function () {
             var active = null; try { active = localStorage.getItem('activeAgent'); } catch (e) {}
             var AG1 = ['chat','vouchers','schema','bank','gstr-reco','recon','gstr','tds','itr','audit','reports','tasks'];
+            // Sprint 59 — match the final two-state nav at first paint:
+            //  inside an app → only that agent's views; on home → only launchers.
             document.querySelectorAll('nav [data-view]').forEach(function (el) {
-              if (el.hasAttribute('data-platform')) return;
               var v = el.getAttribute('data-view');
-              if (!(active && AG1.indexOf(v) >= 0)) el.style.display = 'none';
+              var isPlatform = el.hasAttribute('data-platform');
+              var show = active ? (AG1.indexOf(v) >= 0) : isPlatform;
+              el.style.display = show ? '' : 'none';
             });
           })();
         </script>
@@ -419,7 +422,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v67</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v68</div>
         </div>
     </div>
 
@@ -2256,8 +2259,8 @@
         <nav class="mobile-drawer-nav">
             <!-- Sprint 48b — agent header (shown only when inside an agent) -->
             <div id="agent-drawer-header" style="display:none; padding:6px 16px 10px; margin-bottom:6px; border-bottom:1px solid var(--border);">
-                <div onclick="exitToStore()" style="display:flex; align-items:center; gap:6px; color:#94a3b8; font-size:0.74rem; cursor:pointer; margin-bottom:6px;">
-                    <span>‹</span> <span>Store</span>
+                <div onclick="exitToHome()" style="display:flex; align-items:center; gap:6px; color:#94a3b8; font-size:0.74rem; cursor:pointer; margin-bottom:6px;">
+                    <span>‹</span> <span>Home</span>
                 </div>
                 <div style="display:flex; align-items:center; gap:8px;">
                     <span id="agent-drawer-icon" style="font-size:1.15rem;">🧮</span>
@@ -2290,7 +2293,7 @@
         <div class="mobile-drawer-footer">
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
-            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v67</div>
+            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v68</div>
         </div>
     </div>
 
@@ -2888,6 +2891,13 @@
             _renderNav();
             showView('store');
         }
+        // Sprint 59 — leave the current app back to the Home launcher (Android "Home" key).
+        function exitToHome() {
+            window.__activeAgent = null;
+            try { localStorage.removeItem('activeAgent'); } catch(_) {}
+            _renderNav();
+            showView('home');
+        }
         // Sprint 49 — load a remote (embedded) agent into the iframe host with SSO context.
         let _remoteLoadedKey = null;
         async function loadRemoteAgent(slug) {
@@ -2919,13 +2929,14 @@
                 const v = el.getAttribute('data-view');
                 const isPlatform = el.hasAttribute('data-platform') || window.__PLATFORM_VIEWS.has(v);
                 const roleHidden = el.hasAttribute('data-role-gated') && !window.__isSuperAdmin;
+                // Android-style two-state nav (Sprint 59):
+                //  • HOME (no active agent): show only home-launcher platform items.
+                //  • INSIDE an app: show ONLY that agent's own views; hide all launchers.
+                // Footer (user/wallet/Settings/logout) lives outside this loop → always on.
                 let show;
                 if (roleHidden) show = false;
-                else if (isPlatform) show = true;
-                else show = !!(active && activeViews.has(v));   // agent view only inside its agent
-                // Store nav item is redundant inside an agent (the agent header's
-                // "‹ Store" link already goes back) — show it only on the home shell.
-                if (v === 'store' && active) show = false;
+                else if (active) show = activeViews.has(v);
+                else show = isPlatform;
                 el.style.display = show ? '' : 'none';
             });
             // Agent header (desktop + mobile) — only inside an agent.
