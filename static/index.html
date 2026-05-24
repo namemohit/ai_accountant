@@ -423,7 +423,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v70</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v71</div>
         </div>
     </div>
 
@@ -547,7 +547,7 @@
                 <select id="tb-company" onchange="switchCompany(this.value)" title="Active company"></select>
                 <span class="ht-btn ht-wallet" onclick="if(typeof openWalletModal==='function') openWalletModal();" title="Tokens — click to recharge">⚡ <strong id="tb-wallet">—</strong></span>
                 <span class="ht-btn" onclick="showView('settings')" title="Settings">⚙️ Settings</span>
-                <span class="ht-btn" onclick="handleLogout()" title="Log out">⎋ Logout</span>
+                <span class="tb-logo" onclick="exitToHome()" style="margin-left:4px;" title="Home">YantrAI</span>
             </div>
         </div>
         <!-- Demo Company Banner -->
@@ -2099,9 +2099,13 @@
 
         <!-- Settings View -->
         <div id="settings-view" class="dashboard-view" style="display: none;">
-            <header>
-                <h1>Settings</h1>
-                <p style="color: #94a3b8;">Manage your account, company, and application preferences.</p>
+            <header style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap;">
+                <div>
+                    <h1>Settings</h1>
+                    <p style="color: #94a3b8;">Manage your account, company, and application preferences.</p>
+                </div>
+                <button onclick="handleLogout()" title="Log out"
+                        style="flex-shrink:0; display:inline-flex; align-items:center; gap:8px; padding:9px 16px; background:rgba(239,68,68,0.1); color:#ef4444; border:1px solid rgba(239,68,68,0.3); border-radius:8px; font-weight:600; cursor:pointer; font-size:0.85rem;">🚪 Log out</button>
             </header>
             <div class="grid" style="grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 24px;">
                 <div class="card">
@@ -2296,7 +2300,7 @@
         <div class="mobile-drawer-footer">
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
-            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v70</div>
+            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v71</div>
         </div>
     </div>
 
@@ -2977,7 +2981,7 @@
             const active = window.__activeAgent;
             const meta = active ? (window.__agentBySlug || {})[active] : null;
             const cur = window.__currentView || '';
-            let html = `<span class="tb-logo" onclick="exitToHome()">YantrAI</span>`;
+            let html = '';   // brand now lives at the far right of the bar (Sprint 62)
             if (meta) {
                 html += `<span class="tb-tab" onclick="exitToHome()">‹ Home</span>`;
                 html += `<span class="tb-divider"></span>`;
