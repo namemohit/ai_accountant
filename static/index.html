@@ -423,7 +423,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v75</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v76</div>
         </div>
     </div>
 
@@ -2243,7 +2243,7 @@
         <button class="hamburger-btn" id="hamburger-btn" onclick="toggleMobileMenu()">
             <i class="fas fa-bars"></i>
         </button>
-        <div class="mobile-logo">YantrAI</div>
+        <div class="mobile-logo" onclick="exitToHome(); if(typeof closeMobileMenu==='function') closeMobileMenu();" style="cursor:pointer;" title="Home">YantrAI</div>
         <div class="mobile-header-spacer"></div>
         <button class="hamburger-btn mobile-chats-btn" id="mobile-chats-btn" onclick="toggleMobileChatSidebar()" title="Chat sessions">
             <i class="fas fa-comments"></i>
@@ -2256,12 +2256,6 @@
         <div class="mobile-drawer-header">
             <div class="mobile-drawer-logo">YantrAI Accounting</div>
             <button class="mobile-drawer-close" onclick="closeMobileMenu()"><i class="fas fa-times"></i></button>
-        </div>
-        <!-- Mobile company picker (the desktop one lives in the hidden sidebar) -->
-        <div style="padding: 4px 16px 12px; border-bottom: 1px solid var(--border); margin-bottom: 8px;">
-            <label style="display:block; font-size:0.68rem; text-transform:uppercase; letter-spacing:0.06em; color:#8a8178; margin-bottom:5px;">Active company</label>
-            <select id="active-company-select-mobile" onchange="switchCompany(this.value)"
-                    style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer;"></select>
         </div>
         <nav class="mobile-drawer-nav">
             <!-- Sprint 48b — agent header (shown only when inside an agent) -->
@@ -2294,12 +2288,16 @@
             <div class="mobile-drawer-item" data-view="schema" onclick="mobileNav('schema')"><span>📋</span> Masters</div>
             <div class="mobile-drawer-item" data-view="tasks" data-role-gated="super_admin" onclick="mobileNav('tasks')"><span>🎯</span> YantrAI Tasks</div>
             <!-- Sprint 60 — Connectors / WhatsApp / User Manager moved into the Settings app. -->
-            <div class="mobile-drawer-item" data-view="settings" data-platform="1" onclick="mobileNav('settings')"><span>⚙️</span> Settings</div>
+            <!-- Sprint 64 — Settings + company switcher now live in the footer (mirrors desktop top-right). -->
         </nav>
         <div class="mobile-drawer-footer">
-            <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
-            <div class="mobile-drawer-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
-            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v75</div>
+            <!-- Sprint 64 — desktop top-right items (company · Settings · brand) at the bottom -->
+            <label style="display:block; font-size:0.68rem; text-transform:uppercase; letter-spacing:0.06em; color:#8a8178; margin-bottom:5px;">Active company</label>
+            <select id="active-company-select-mobile" onchange="switchCompany(this.value)"
+                    style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer; margin-bottom:10px;"></select>
+            <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 6px;"><span>⚙️</span> Settings</div>
+            <div class="mobile-drawer-item" onclick="exitToHome(); if(typeof closeMobileMenu==='function') closeMobileMenu();"><span>🏠</span> Home</div>
+            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v76</div>
         </div>
     </div>
 
