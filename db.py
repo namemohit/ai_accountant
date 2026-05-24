@@ -1445,6 +1445,7 @@ AI_ACCOUNTANT_MANIFEST = {
     "required_connectors": ["tally"],
     "nav_groups": [
         {"label": "Core", "items": [
+            {"view": "aiacc-home", "label": "Apps", "icon": "🗂️"},
             {"view": "chat", "label": "Chat", "icon": "💬"},
             {"view": "vouchers", "label": "Vouchers", "icon": "📑"},
             {"view": "schema", "label": "Masters", "icon": "📋"},

@@ -10,7 +10,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="apple-touch-icon" href="https://img.icons8.com/color/192/000000/accounting.png">
-    <link rel="stylesheet" href="/static/style.css?v=44">
+    <link rel="stylesheet" href="/static/style.css?v=45">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <script>
@@ -380,7 +380,7 @@
              Platform items (data-platform) stay; agent views show only inside an agent. */
           (function () {
             var active = null; try { active = localStorage.getItem('activeAgent'); } catch (e) {}
-            var AG1 = ['chat','vouchers','schema','bank','gstr-reco','recon','gstr','tds','itr','audit','reports','tasks'];
+            var AG1 = ['aiacc-home','chat','vouchers','schema','bank','gstr-reco','recon','gstr','tds','itr','audit','reports','tasks'];
             // Sprint 59 — match the final two-state nav at first paint:
             //  inside an app → only that agent's views; on home → only launchers.
             document.querySelectorAll('nav [data-view]').forEach(function (el) {
@@ -423,7 +423,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v81</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v82</div>
         </div>
     </div>
 
@@ -1145,6 +1145,24 @@
 
         <!-- AI Training View -->
         <!-- Sprint 48 — Agentic Store -->
+        <!-- Sprint 68 — AI Accountant feature launcher (agent landing) -->
+        <div id="aiacc-home-view" class="dashboard-view" style="display: none;">
+            <header>
+                <h1>🧮 AI Accountant</h1>
+                <p style="color:#94a3b8;">Pick a feature to get started.</p>
+            </header>
+            <div class="feat-grid" style="margin-top:18px;">
+                <div class="feat-tile" onclick="showView('chat')"><div class="feat-ic">💬</div><div class="feat-name">Chat with Tally</div></div>
+                <div class="feat-tile" onclick="showView('vouchers')"><div class="feat-ic">📑</div><div class="feat-name">Vouchers</div></div>
+                <div class="feat-tile" onclick="showView('bank')"><div class="feat-ic">🏦</div><div class="feat-name">Bank Reco</div></div>
+                <div class="feat-tile" onclick="_aiaccMaster('items')"><div class="feat-ic">📦</div><div class="feat-name">Item Master</div></div>
+                <div class="feat-tile" onclick="_aiaccMaster('parties')"><div class="feat-ic">👥</div><div class="feat-name">Party Master</div></div>
+                <div class="feat-tile" onclick="_aiaccMaster('coa')"><div class="feat-ic">📒</div><div class="feat-name">Ledgers</div></div>
+                <div class="feat-tile" onclick="if(typeof openVoucherChat==='function') openVoucherChat()"><div class="feat-ic">🧾</div><div class="feat-name">Create invoice</div></div>
+                <div class="feat-tile" onclick="_aiaccScan()"><div class="feat-ic">📷</div><div class="feat-name">Scan Voucher</div></div>
+            </div>
+        </div>
+
         <!-- Sprint 56 — Home dashboard (landing for first-time / empty sessions) -->
         <div id="home-view" class="dashboard-view" style="display: none;">
             <!-- Sprint 60/61 — Android-style launcher (chrome lives in #app-topbar) -->
@@ -2111,7 +2129,7 @@
             <div class="card" style="margin-top:24px;">
                 <h3 style="margin-bottom: 12px;">📦 About &amp; Updates</h3>
                 <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v81</strong></span>
+                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v82</strong></span>
                     <span id="settings-update-msg" style="font-size:0.82rem; color:#94a3b8;"></span>
                 </div>
                 <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
@@ -2311,7 +2329,7 @@
                     style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer; margin-bottom:10px;"></select>
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 6px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="exitToHome(); if(typeof closeMobileMenu==='function') closeMobileMenu();"><span>🏠</span> Home</div>
-            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v81</div>
+            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v82</div>
         </div>
     </div>
 
@@ -3096,6 +3114,15 @@
         function homeNewChat() {
             if (typeof enterAgent === 'function') enterAgent('ai-accountant');
             setTimeout(() => { if (typeof startNewChat === 'function') startNewChat(); }, 60);
+        }
+        // Sprint 68 — AI Accountant feature-launcher tile actions.
+        function _aiaccMaster(sub) {
+            showView('schema');
+            setTimeout(() => { if (typeof switchSchemaSubView === 'function') switchSchemaSubView(sub); }, 60);
+        }
+        function _aiaccScan() {
+            showView('chat');
+            setTimeout(() => { if (typeof openCameraCapture === 'function') openCameraCapture(); }, 300);
         }
 
         // ── Sprint 57 — Chat with YantrAI (task intake → Problem Document → SA inbox) ──
