@@ -1177,11 +1177,15 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
      the app grid). Agent views keep their hamburger. */
   body.home-active #hamburger-btn { display: none; }
   /* iPhone-style swipeable app pages (Home, mobile) */
-  .app-pager { display: flex; overflow-x: auto; scroll-snap-type: x mandatory;
+  .app-pager { display: flex; width: 100%; overflow-x: auto; scroll-snap-type: x mandatory;
     -webkit-overflow-scrolling: touch; scrollbar-width: none; }
   .app-pager::-webkit-scrollbar { display: none; }
-  .app-page { min-width: 100%; scroll-snap-align: start; flex-shrink: 0;
-    display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; padding: 4px; }
+  /* Each page = exactly the viewport width (no bleed into the next page),
+     laid out 2 columns × 3 rows = 6 apps, with consistent tile heights. */
+  .app-page { flex: 0 0 100%; width: 100%; box-sizing: border-box; scroll-snap-align: start;
+    display: grid; grid-template-columns: repeat(2, 1fr); grid-auto-rows: 150px;
+    gap: 14px; padding: 4px; }
+  .app-page .app-tile { padding: 16px 12px; }
   .app-dots { display: flex; justify-content: center; gap: 8px; margin-top: 14px; }
   .app-dot { width: 8px; height: 8px; border-radius: 50%; background: rgba(255,255,255,0.2);
     border: none; padding: 0; cursor: pointer; }
