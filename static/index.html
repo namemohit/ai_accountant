@@ -423,7 +423,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v71</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v72</div>
         </div>
     </div>
 
@@ -2300,7 +2300,7 @@
         <div class="mobile-drawer-footer">
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
-            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v71</div>
+            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v72</div>
         </div>
     </div>
 
@@ -2874,18 +2874,10 @@
             } else if (baseView === 'store') {
                 exitToStore();
             } else {
-                // No deep-link hash. Sprint 56: returning users resume exactly where
-                // they left off (last view / agent / open chat session); first-time
-                // or empty → Home dashboard.
-                let last = '';
-                try { last = localStorage.getItem('lastRoute') || ''; } catch(_) {}
-                const lb = (last.split('/')[0] || '');
-                if (last && lb !== 'home') {
-                    location.hash = last;
-                    if (typeof handleHashChange === 'function') handleHashChange();
-                } else {
-                    showView('home');
-                }
+                // Sprint 63 — always land on the Home launcher after login (no resume).
+                // (Typed deep links are handled by the branch above; an in-app reload keeps
+                //  its URL hash, so this only fires for a fresh login / cold launch at '/'.)
+                showView('home');
             }
         }
         function enterAgent(slug) {
@@ -3871,7 +3863,6 @@
                 if (typeof loadRemoteAgent === 'function') loadRemoteAgent(_rOwner);
                 if (!skipHashUpdate) {
                     window.location.hash = view;
-                    try { localStorage.setItem('lastRoute', view); } catch(_) {}
                 }
                 return;   // remote agents have no local view hooks
             }
@@ -3943,8 +3934,6 @@
                 } else {
                     window.location.hash = view;
                 }
-                // Sprint 56 — remember the last route so returning users resume here.
-                try { localStorage.setItem('lastRoute', (location.hash || '').replace(/^#/, '')); } catch(_) {}
             }
 
             if (view === 'schema') {
