@@ -10,7 +10,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="apple-touch-icon" href="https://img.icons8.com/color/192/000000/accounting.png">
-    <link rel="stylesheet" href="/static/style.css?v=41">
+    <link rel="stylesheet" href="/static/style.css?v=42">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <script>
@@ -423,7 +423,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v76</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v77</div>
         </div>
     </div>
 
@@ -2297,7 +2297,7 @@
                     style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer; margin-bottom:10px;"></select>
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 6px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="exitToHome(); if(typeof closeMobileMenu==='function') closeMobileMenu();"><span>🏠</span> Home</div>
-            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v76</div>
+            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v77</div>
         </div>
     </div>
 
@@ -3007,18 +3007,59 @@
                 const tile = (icon, name, sub, onclick) =>
                     `<div class="app-tile" onclick="${onclick}"><div class="at-icon">${icon}</div>` +
                     `<div class="at-name">${escapeHtml(name)}</div><div class="at-sub">${escapeHtml(sub)}</div></div>`;
-                const agents = (window.__installedAgents || []).map(a =>
-                    tile(a.icon || '🧩', a.name || a.slug, a.tagline || 'Open app',
-                         `enterAgent('${escapeHtml(a.slug)}')`)).join('');
-                const systemApps =
-                    tile('⚡', 'Wallet', 'Tokens & recharge', "if(typeof openWalletModal==='function') openWalletModal()") +
-                    tile('🛍️', 'Store', 'Get more apps', "showView('store')") +
-                    tile('📎', 'Upload anything', 'Files for this company', "showView('uploads')") +
-                    tile('🤝', 'Chat with YantrAI', 'Raise a task', "showView('yantrai-chat')") +
-                    tile('⚙️', 'Settings', 'Account, connectors & admin', "showView('settings')");
-                grid.innerHTML = agents + systemApps;
+                const tiles = [];
+                (window.__installedAgents || []).forEach(a => tiles.push(
+                    tile(a.icon || '🧩', a.name || a.slug, a.tagline || 'Open app', `enterAgent('${escapeHtml(a.slug)}')`)));
+                tiles.push(tile('⚡', 'Wallet', 'Tokens & recharge', "if(typeof openWalletModal==='function') openWalletModal()"));
+                tiles.push(tile('🛍️', 'Store', 'Get more apps', "showView('store')"));
+                tiles.push(tile('📎', 'Upload anything', 'Files for this company', "showView('uploads')"));
+                tiles.push(tile('🤝', 'Chat with YantrAI', 'Raise a task', "showView('yantrai-chat')"));
+                tiles.push(tile('⚙️', 'Settings', 'Account, connectors & admin', "showView('settings')"));
+                window.__homeTiles = tiles;
+                _renderHomeGrid();
+            }
+            // One-time: re-page the Home grid when the viewport crosses the mobile breakpoint.
+            if (!window.__homeResizeHooked) {
+                window.__homeResizeHooked = true;
+                let _t; window.addEventListener('resize', () => {
+                    clearTimeout(_t);
+                    _t = setTimeout(() => { if (document.body.classList.contains('home-active')) _renderHomeGrid(); }, 200);
+                });
             }
             // AI-learning stats now live in Settings (Sprint 60) — not loaded here.
+        }
+        // Sprint 65 — render the Home app tiles: flat grid on desktop, iPhone-style
+        // swipeable pages (scroll-snap) on mobile.
+        function _renderHomeGrid() {
+            const grid = document.getElementById('home-app-grid');
+            if (!grid) return;
+            const tiles = window.__homeTiles || [];
+            const isMobile = window.matchMedia('(max-width:768px)').matches;
+            if (!isMobile) { grid.className = 'app-grid'; grid.innerHTML = tiles.join(''); return; }
+            const perPage = 6;   // 3×2 per page → spans multiple swipeable pages on a phone
+            const pages = [];
+            for (let i = 0; i < tiles.length; i += perPage) pages.push(tiles.slice(i, i + perPage));
+            grid.className = '';
+            let html = '<div class="app-pager" id="home-pager">';
+            pages.forEach(p => { html += '<div class="app-page">' + p.join('') + '</div>'; });
+            html += '</div>';
+            if (pages.length > 1) {
+                html += '<div class="app-dots" id="home-dots">';
+                pages.forEach((_, i) => { html += `<button class="app-dot${i === 0 ? ' active' : ''}" onclick="_homePageTo(${i})"></button>`; });
+                html += '</div>';
+            }
+            grid.innerHTML = html;
+            const pager = document.getElementById('home-pager');
+            if (pager) pager.addEventListener('scroll', _homeDotsSync, { passive: true });
+        }
+        function _homeDotsSync() {
+            const pager = document.getElementById('home-pager'); if (!pager) return;
+            const idx = Math.round(pager.scrollLeft / pager.clientWidth);
+            document.querySelectorAll('#home-dots .app-dot').forEach((d, i) => d.classList.toggle('active', i === idx));
+        }
+        function _homePageTo(i) {
+            const pager = document.getElementById('home-pager'); if (!pager) return;
+            pager.scrollTo({ left: i * pager.clientWidth, behavior: 'smooth' });
         }
         // Sprint 56 — real, company-scoped AI training stats.
         async function loadTrainingStats() {

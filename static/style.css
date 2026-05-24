@@ -1173,6 +1173,19 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
   #bank-stats > span, #voucher-stats > span { flex-shrink: 0; }
 
   .mobile-header { display: flex; }
+  /* Sprint 65 — on the Home launcher, drop the hamburger (its drawer just repeats
+     the app grid). Agent views keep their hamburger. */
+  body.home-active #hamburger-btn { display: none; }
+  /* iPhone-style swipeable app pages (Home, mobile) */
+  .app-pager { display: flex; overflow-x: auto; scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .app-pager::-webkit-scrollbar { display: none; }
+  .app-page { min-width: 100%; scroll-snap-align: start; flex-shrink: 0;
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; padding: 4px; }
+  .app-dots { display: flex; justify-content: center; gap: 8px; margin-top: 14px; }
+  .app-dot { width: 8px; height: 8px; border-radius: 50%; background: rgba(255,255,255,0.2);
+    border: none; padding: 0; cursor: pointer; }
+  .app-dot.active { background: var(--primary); }
   .mobile-drawer { display: flex; }
 
   .main-content {
