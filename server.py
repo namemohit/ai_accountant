@@ -5858,24 +5858,71 @@ async def api_webhook_razorpay(request: Request):
 # =============================================================================
 # Sprint 55 — "Upload anything": a company-scoped file library
 # =============================================================================
+# ── Sprint 70 — durable file storage on Supabase Storage (Cloud Run disk is ephemeral) ──
+_FILES_BUCKET = "company-files"
+_storage_bucket_ready = False
+
+def _ensure_storage_bucket():
+    """Idempotently create the public 'company-files' bucket. Best-effort."""
+    global _storage_bucket_ready
+    if _storage_bucket_ready or not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return
+    try:
+        requests.post(f"{SUPABASE_URL}/storage/v1/bucket",
+                      headers={"apikey": SUPABASE_SERVICE_ROLE_KEY,
+                               "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                               "Content-Type": "application/json"},
+                      json={"id": _FILES_BUCKET, "name": _FILES_BUCKET, "public": True},
+                      timeout=10)
+    except Exception as e:
+        print(f"[storage bucket] {e}", flush=True)
+    _storage_bucket_ready = True   # don't retry every upload; 409 (exists) is fine
+
+def _supabase_upload(path, data, content_type):
+    """Upload bytes to Supabase Storage; return the durable public URL or None."""
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return None
+    _ensure_storage_bucket()
+    try:
+        r = requests.post(
+            f"{SUPABASE_URL}/storage/v1/object/{_FILES_BUCKET}/{path}",
+            headers={"apikey": SUPABASE_SERVICE_ROLE_KEY,
+                     "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                     "Content-Type": content_type or "application/octet-stream",
+                     "x-upsert": "true"},
+            data=data, timeout=60)
+        if r.status_code in (200, 201):
+            return f"{SUPABASE_URL}/storage/v1/object/public/{_FILES_BUCKET}/{path}"
+        print(f"[storage upload] {r.status_code} {r.text[:200]}", flush=True)
+    except Exception as e:
+        print(f"[storage upload] {e}", flush=True)
+    return None
+
 @app.post("/api/files/upload")
 async def api_files_upload(file: UploadFile = File(...), company_name: str = Form(None),
                            username: str = Form(None)):
-    import uuid as _uuid
+    import uuid as _uuid, re as _re
     if not company_name:
         raise HTTPException(status_code=400, detail="company_name required")
-    os.makedirs("static/uploads", exist_ok=True)
     ext = os.path.splitext(file.filename or "")[1]
-    stored = f"{_uuid.uuid4().hex}{ext}"
     data = await file.read()
-    with open(f"static/uploads/{stored}", "wb") as f:
-        f.write(data)
-    url = f"/static/uploads/{stored}"
+    ct = file.content_type
+    # Group objects by a safe company slug; random uuid key = unguessable capability URL.
+    slug = _re.sub(r'[^a-z0-9]+', '-', (company_name or 'co').lower()).strip('-') or 'co'
+    path = f"{slug}/{_uuid.uuid4().hex}{ext}"
+    url = _supabase_upload(path, data, ct)
+    if not url:
+        # Fallback (local/dev or Storage unavailable): write to disk as before.
+        os.makedirs("static/uploads", exist_ok=True)
+        stored = f"{_uuid.uuid4().hex}{ext}"
+        with open(f"static/uploads/{stored}", "wb") as f:
+            f.write(data)
+        url = f"/static/uploads/{stored}"
     row = db.save_company_file(company_name, url, original_name=file.filename,
-                               file_type=file.content_type, size_bytes=len(data),
+                               file_type=ct, size_bytes=len(data),
                                uploaded_by=username)
     return {"status": "success", "file": {"id": str(row["id"]), "file_url": url,
-            "original_name": file.filename, "file_type": file.content_type,
+            "original_name": file.filename, "file_type": ct,
             "size_bytes": len(data)}}
 
 
