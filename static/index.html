@@ -419,7 +419,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v66</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v67</div>
         </div>
     </div>
 
@@ -2290,7 +2290,7 @@
         <div class="mobile-drawer-footer">
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
-            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v66</div>
+            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v67</div>
         </div>
     </div>
 
@@ -12867,10 +12867,11 @@
             refreshTallyBridgeStatus();
             // Sprint 25 — super_admin gets the two-selector flow
             if (window.__isSuperAdmin) _initSuperAdminSelectors();
+            // Sprint 56 — landing: deep-link hash routes immediately here; the no-hash
+            // case is owned by bootstrapAgents() (resume lastRoute / Home). Do NOT
+            // showView('chat') here — it would clobber lastRoute before resume reads it.
             if (window.location.hash) {
                 handleHashChange();
-            } else {
-                showView('chat');
             }
         };
 
