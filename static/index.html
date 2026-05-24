@@ -423,7 +423,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v87</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v88</div>
         </div>
     </div>
 
@@ -707,7 +707,7 @@
             </header>
 
             <!-- Sprint 27 — AI Gap Scan card for masters -->
-            <div style="background: rgba(56,189,248,0.05); border:1px solid rgba(56,189,248,0.25); border-radius:8px; padding:12px 14px; margin: 14px 0;">
+            <div id="master-gap-card" style="background: rgba(56,189,248,0.05); border:1px solid rgba(56,189,248,0.25); border-radius:8px; padding:12px 14px; margin: 14px 0;">
                 <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
                     <button id="master-ai-scan-btn" onclick="runMasterAIScan()" style="background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%); color:white; border:none; padding:8px 14px; border-radius:6px; font-weight:600; font-size:0.85rem; cursor:pointer;">🔬 Run AI Master Gap Scan</button>
                     <span style="color:#94a3b8; font-size:0.78rem;">AI walks Party + Item master. Proposes fills for missing GSTIN / PAN / Place of Supply / HSN / GST rate / Unit / Standard Rate. Review inline — nothing is changed until you click Apply.</span>
@@ -715,7 +715,7 @@
                 <div id="master-ai-scan-status" style="margin-top:8px; font-size:0.8rem; color:#cbd5e1;"></div>
             </div>
 
-            <div style="display: flex; gap: 16px; margin-top: 20px; border-bottom: 1px solid var(--border); padding-bottom: 2px; margin-bottom: 24px;">
+            <div id="schema-tabbar" style="display: flex; gap: 16px; margin-top: 20px; border-bottom: 1px solid var(--border); padding-bottom: 2px; margin-bottom: 24px;">
                 <button class="schema-tab-btn active" id="schema-tab-coa" onclick="switchSchemaSubView('coa')" style="background: none; border: none; color: var(--primary); font-weight: 600; font-size: 0.95rem; cursor: pointer; padding: 10px 20px; border-bottom: 2px solid var(--accent); transition: all 0.2s;">📋 Chart of Accounts</button>
                 <button class="schema-tab-btn" id="schema-tab-parties" onclick="switchSchemaSubView('parties')" style="background: none; border: none; color: #94a3b8; font-weight: 600; font-size: 0.95rem; cursor: pointer; padding: 10px 20px; transition: all 0.2s;">👥 Party Master Directory</button>
                 <button class="schema-tab-btn" id="schema-tab-items" onclick="switchSchemaSubView('items')" style="background: none; border: none; color: #94a3b8; font-weight: 600; font-size: 0.95rem; cursor: pointer; padding: 10px 20px; transition: all 0.2s;">📦 Item Master Directory</button>
@@ -1158,6 +1158,7 @@
                 <div class="feat-tile" onclick="_aiaccMaster('items')"><div class="feat-ic">📦</div><div class="feat-name">Item Master</div></div>
                 <div class="feat-tile" onclick="_aiaccMaster('parties')"><div class="feat-ic">👥</div><div class="feat-name">Party Master</div></div>
                 <div class="feat-tile" onclick="_aiaccMaster('coa')"><div class="feat-ic">📒</div><div class="feat-name">Ledgers</div></div>
+                <div class="feat-tile" onclick="_aiaccMaster('actionlog')"><div class="feat-ic">📋</div><div class="feat-name">Action Log</div></div>
                 <div class="feat-tile" onclick="if(typeof openVoucherChat==='function') openVoucherChat()"><div class="feat-ic">🧾</div><div class="feat-name">Create invoice</div></div>
                 <div class="feat-tile" onclick="_aiaccScan()"><div class="feat-ic">📷</div><div class="feat-name">Scan Voucher</div></div>
             </div>
@@ -2133,7 +2134,7 @@
             <div class="card" style="margin-top:24px;">
                 <h3 style="margin-bottom: 12px;">📦 About &amp; Updates</h3>
                 <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v87</strong></span>
+                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v88</strong></span>
                     <span id="settings-update-msg" style="font-size:0.82rem; color:#94a3b8;"></span>
                 </div>
                 <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
@@ -2333,7 +2334,7 @@
                     style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer; margin-bottom:10px;"></select>
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 6px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="exitToHome(); if(typeof closeMobileMenu==='function') closeMobileMenu();"><span>🏠</span> Home</div>
-            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v87</div>
+            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v88</div>
         </div>
     </div>
 
@@ -3131,9 +3132,32 @@
             setTimeout(() => { if (typeof startNewChat === 'function') startNewChat(); }, 60);
         }
         // Sprint 68 — AI Accountant feature-launcher tile actions.
+        // Sprint 71 — each master section is its own focused screen (no shared tab bar)
+        const _MASTER_SECTIONS = {
+            coa:       { icon: '📒', title: 'Ledgers',      sub: 'Your complete Tally chart of accounts — every ledger grouped by its account group. Read-only mirror of Tally Prime.', gap: false },
+            parties:   { icon: '👥', title: 'Party Master', sub: 'Sundry debtors & creditors — GSTIN, PAN, place of supply. Keep them complete for GST & TDS.', gap: true },
+            items:     { icon: '📦', title: 'Item Master',  sub: 'Stock items — HSN, GST rate, unit. Powers GSTR-1/3B HSN summaries.', gap: true },
+            actionlog: { icon: '📋', title: 'Action Log',   sub: "Every AI-detected gap and master change — what needs your attention and what's already been actioned.", gap: true },
+        };
+        function _renderMastersSection(sub) {
+            const meta = _MASTER_SECTIONS[sub] || _MASTER_SECTIONS.coa;
+            const hdr = document.querySelector('#schema-view header');
+            if (hdr) {
+                const h1 = hdr.querySelector('h1'); const p = hdr.querySelector('p');
+                if (h1) h1.textContent = `${meta.icon} ${meta.title}`;
+                if (p)  p.textContent  = meta.sub;
+            }
+            const tabbar = document.getElementById('schema-tabbar');
+            if (tabbar) tabbar.style.display = 'none';
+            const gapCard = document.getElementById('master-gap-card');
+            if (gapCard) gapCard.style.display = meta.gap ? '' : 'none';
+            if (typeof switchSchemaSubView === 'function') switchSchemaSubView(sub);
+        }
         function _aiaccMaster(sub) {
+            window.__masterSection = sub;
+            // If already on the Masters view, re-render in place (showView would no-op the hook timing)
             showView('schema');
-            setTimeout(() => { if (typeof switchSchemaSubView === 'function') switchSchemaSubView(sub); }, 60);
+            if (typeof _renderMastersSection === 'function') _renderMastersSection(sub);
         }
         function _aiaccScan() {
             showView('chat');
@@ -4094,9 +4118,10 @@
             }
 
             if (view === 'schema') {
-                loadChartOfAccounts();   // Sprint 36 — default COA tab loads on entry
-                loadPartyMaster();
-                loadItemMaster();
+                // Sprint 71 — render the focused master section (own header, no tab bar).
+                // Persist the choice so the hashchange re-fire (#masters) and reloads keep it.
+                const sec = window.__masterSection || 'coa';
+                if (typeof _renderMastersSection === 'function') _renderMastersSection(sec);
             }
 
             if (view === 'settings') {
