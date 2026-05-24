@@ -1,4 +1,4 @@
-const CACHE_NAME = 'yantrai-accounting-v64';
+const CACHE_NAME = 'yantrai-accounting-v65';
 const ASSETS = [
   '/',
   '/login',
@@ -29,6 +29,34 @@ self.addEventListener('activate', (e) => {
 
 // Network-first: always try fresh from the network, fall back to cache offline.
 self.addEventListener('fetch', (e) => {
+  // PWA Share Target: the OS POSTs shared files to /share-target. Stash them in a
+  // dedicated cache, then redirect into the app — the front-end uploads them with
+  // the logged-in user's token + active company.
+  const url = new URL(e.request.url);
+  if (e.request.method === 'POST' && url.pathname === '/share-target') {
+    e.respondWith((async () => {
+      try {
+        const form = await e.request.formData();
+        const files = form.getAll('files').filter((f) => f && f.size);
+        const cache = await caches.open('yantrai-shared');
+        for (const k of await cache.keys()) await cache.delete(k);   // clear stale
+        let i = 0;
+        for (const f of files) {
+          await cache.put(new Request(`/__shared/${i}`), new Response(f, {
+            headers: {
+              'x-file-name': encodeURIComponent(f.name || `shared-${i}`),
+              'content-type': f.type || 'application/octet-stream'
+            }
+          }));
+          i++;
+        }
+      } catch (err) {
+        console.log('share-target error:', err);
+      }
+      return Response.redirect('/?shared=1', 303);
+    })());
+    return;
+  }
   e.respondWith(
     fetch(e.request).catch(() => caches.match(e.request))
   );

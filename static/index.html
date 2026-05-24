@@ -139,10 +139,44 @@
                     } catch (e) {
                         console.error("Error parsing user session: ", e);
                     }
+                    // Sprint 58 — absorb any files shared into the PWA from other apps.
+                    if (typeof _absorbSharedFiles === 'function') { try { _absorbSharedFiles(); } catch(_) {} }
                 });
             }
         }
         checkAuth();
+
+        // Sprint 58 — PWA Share Target pickup. The service worker stashes shared files
+        // in the 'yantrai-shared' cache and redirects here; upload them to the active
+        // company's library via the existing uploader (token + company already in JS).
+        async function _absorbSharedFiles() {
+            if (!('caches' in window)) return;
+            let cache, keys;
+            try { cache = await caches.open('yantrai-shared'); keys = await cache.keys(); }
+            catch(_) { return; }
+            if (!keys || !keys.length) return;
+            const files = [];
+            for (const req of keys) {
+                try {
+                    const res = await cache.match(req);
+                    if (!res) continue;
+                    const blob = await res.blob();
+                    let name = res.headers.get('x-file-name') || 'shared-file';
+                    try { name = decodeURIComponent(name); } catch(_) {}
+                    files.push(new File([blob], name, { type: blob.type || 'application/octet-stream' }));
+                } catch(_) {}
+                try { await cache.delete(req); } catch(_) {}   // consume once
+            }
+            // Clean the ?shared marker from the URL.
+            try { if (location.search.includes('shared')) history.replaceState({}, '', location.pathname + location.hash); } catch(_) {}
+            if (!files.length) return;
+            const go = () => {
+                if (typeof showView === 'function') showView('uploads');
+                if (typeof uploadAnything === 'function') uploadAnything(files);
+            };
+            // Defer slightly so the app shell + uploads view are ready.
+            setTimeout(go, 400);
+        }
 
         async function switchCompany(newCompany) {
             const user = JSON.parse(localStorage.getItem('currentUser'));
@@ -385,7 +419,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v64</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v65</div>
         </div>
     </div>
 
@@ -2256,7 +2290,7 @@
         <div class="mobile-drawer-footer">
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
-            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v64</div>
+            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v65</div>
         </div>
     </div>
 

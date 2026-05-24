@@ -636,6 +636,15 @@ async def get_sw():
 async def read_index():
     return FileResponse('static/index.html', headers=_NOCACHE)
 
+# Sprint 58 — PWA Share Target fallback. Normally the service worker intercepts the
+# POST and stashes the file; this only fires on the first launch before the SW controls
+# the page. Just bounce into the app (the SW will catch it next time).
+from fastapi.responses import RedirectResponse as _RedirectResponse
+@app.post("/share-target")
+@app.get("/share-target")
+async def share_target():
+    return _RedirectResponse(url="/?shared=1", status_code=303)
+
 @app.get("/knowledge")
 async def get_knowledge():
     return load_kb()
@@ -794,7 +803,8 @@ def _verify_token(authz):
 _AUTH_WHITELIST_PREFIXES = ("/api/login", "/api/auth/", "/api/onboard", "/api/register",
                             "/api/agent/", "/tally/", "/api/agents/verify-sso",
                             "/api/webhooks/", "/static/", "/tally_bridge_agent")
-_AUTH_WHITELIST_EXACT = ("/", "/login", "/sw.js", "/manifest.json", "/favicon.ico")
+_AUTH_WHITELIST_EXACT = ("/", "/login", "/sw.js", "/manifest.json", "/favicon.ico",
+                         "/share-target")
 def _is_auth_whitelisted(path):
     return path in _AUTH_WHITELIST_EXACT or any(path.startswith(p) for p in _AUTH_WHITELIST_PREFIXES)
 

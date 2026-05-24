@@ -6,6 +6,19 @@
   "background_color": "#2a2623",
   "theme_color": "#da7756",
   "orientation": "portrait",
+  "share_target": {
+    "action": "/share-target",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "files": [{
+        "name": "files",
+        "accept": ["image/*", "application/pdf", ".csv", "text/csv",
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "application/vnd.ms-excel"]
+      }]
+    }
+  },
   "icons": [
     {
       "src": "https://img.icons8.com/color/192/000000/accounting.png",
