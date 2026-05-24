@@ -10,7 +10,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="apple-touch-icon" href="https://img.icons8.com/color/192/000000/accounting.png">
-    <link rel="stylesheet" href="/static/style.css?v=40">
+    <link rel="stylesheet" href="/static/style.css?v=41">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <script>
@@ -221,6 +221,10 @@
                 const wasOnStore = !window.__activeAgent;
                 user.company_name = newCompany;
                 localStorage.setItem('currentUser', JSON.stringify(user));
+                // Sprint 61 — keep every company selector (sidebar, top bar, mobile) in sync.
+                ['active-company-select','tb-company','active-company-select-mobile'].forEach(id => {
+                    const s = document.getElementById(id); if (s) s.value = newCompany;
+                });
 
                 const tokenInput = document.getElementById('activation-token-input');
                 if(tokenInput) {
@@ -419,7 +423,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v69</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v70</div>
         </div>
     </div>
 
@@ -536,6 +540,16 @@
     </div>
 
     <main class="main-content">
+        <!-- Sprint 61 — universal top bar (replaces the left sidebar on desktop) -->
+        <div id="app-topbar">
+            <div class="tb-left" id="tb-left"></div>
+            <div class="tb-right">
+                <select id="tb-company" onchange="switchCompany(this.value)" title="Active company"></select>
+                <span class="ht-btn ht-wallet" onclick="if(typeof openWalletModal==='function') openWalletModal();" title="Tokens — click to recharge">⚡ <strong id="tb-wallet">—</strong></span>
+                <span class="ht-btn" onclick="showView('settings')" title="Settings">⚙️ Settings</span>
+                <span class="ht-btn" onclick="handleLogout()" title="Log out">⎋ Logout</span>
+            </div>
+        </div>
         <!-- Demo Company Banner -->
         <div id="demo-company-banner" class="demo-banner" style="display: none;">
             <span class="demo-banner-icon">📋</span>
@@ -1134,16 +1148,7 @@
         <!-- Sprint 48 — Agentic Store -->
         <!-- Sprint 56 — Home dashboard (landing for first-time / empty sessions) -->
         <div id="home-view" class="dashboard-view" style="display: none;">
-            <!-- Sprint 60 — Android-style launcher: top bar + app-icon grid (no sidebar) -->
-            <div class="home-topbar">
-                <span class="ht-logo">YantrAI</span>
-                <span class="ht-spacer"></span>
-                <select id="active-company-select-home" onchange="switchCompany(this.value)" title="Active company"></select>
-                <span class="ht-btn ht-wallet" onclick="if(typeof openWalletModal==='function') openWalletModal();" title="Tokens — click to recharge">⚡ <strong id="home-wallet-balance">…</strong></span>
-                <span class="ht-btn" onclick="showView('settings')" title="Settings">⚙️ Settings</span>
-                <span class="ht-btn" onclick="handleLogout()" title="Log out">⎋ Logout</span>
-            </div>
-
+            <!-- Sprint 60/61 — Android-style launcher (chrome lives in #app-topbar) -->
             <header style="margin-top:4px;">
                 <h1 id="home-greeting">Good to see you</h1>
                 <p style="color: #94a3b8;">Your apps — tap to open. Manage connections, AI training & admin in Settings.</p>
@@ -2291,7 +2296,7 @@
         <div class="mobile-drawer-footer">
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
-            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v69</div>
+            <div style="margin-top:6px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v70</div>
         </div>
     </div>
 
@@ -2680,6 +2685,8 @@
             const el = document.getElementById('wallet-balance');
             if (el && d && typeof d.balance === 'number') el.textContent = d.balance.toLocaleString('en-IN');
             if (d) { _walletTokensPerInr = d.tokens_per_inr || 1000; _walletOrgId = d.org_id; }
+            const tbw = document.getElementById('tb-wallet');          // Sprint 61 — mirror into top bar
+            if (tbw && el) tbw.textContent = el.textContent || '—';
         }
         async function openWalletModal() {
             const d = await _fetchWallet();
@@ -2949,6 +2956,46 @@
                     if (ne) ne.textContent = meta.name || active;
                 }
             });
+            if (typeof _renderTopbar === 'function') _renderTopbar();
+        }
+
+        // Sprint 61 — universal top bar: mirrors the (hidden) sidebar's nav + footer
+        // controls. On Home: just the logo. Inside an app: ‹ Home + app name + that
+        // app's screens as tabs. On a platform view: ‹ Home + the view's title.
+        const _PLATFORM_TITLES = { store:'🛍️ Store', uploads:'📎 Upload anything',
+            'yantrai-chat':'🤝 Chat with YantrAI', settings:'⚙️ Settings',
+            training:'🧠 Connectors', whatsapp:'📱 WhatsApp Setup', users:'👥 User Manager' };
+        function _renderTopbar() {
+            const left = document.getElementById('tb-left'); if (!left) return;
+            // Sync company switcher + wallet from the (hidden) sidebar source of truth.
+            const src = document.getElementById('active-company-select');
+            const tbCo = document.getElementById('tb-company');
+            if (tbCo && src) { if (tbCo.innerHTML !== src.innerHTML) tbCo.innerHTML = src.innerHTML; tbCo.value = src.value; }
+            const wb = document.getElementById('wallet-balance'), tbw = document.getElementById('tb-wallet');
+            if (tbw && wb) tbw.textContent = wb.textContent || '—';
+
+            const active = window.__activeAgent;
+            const meta = active ? (window.__agentBySlug || {})[active] : null;
+            const cur = window.__currentView || '';
+            let html = `<span class="tb-logo" onclick="exitToHome()">YantrAI</span>`;
+            if (meta) {
+                html += `<span class="tb-tab" onclick="exitToHome()">‹ Home</span>`;
+                html += `<span class="tb-divider"></span>`;
+                html += `<span class="tb-appname">${meta.icon || '🤖'} ${escapeHtml(meta.name || active)}</span>`;
+                html += `<span class="tb-divider"></span>`;
+                // Tabs from the hidden sidebar nav items that belong to this agent.
+                document.querySelectorAll('nav .nav-item[data-view]').forEach(el => {
+                    const v = el.getAttribute('data-view');
+                    if (!meta.views || !meta.views.includes(v)) return;
+                    if (el.style.display === 'none') return;   // respects role-gating from _renderNav
+                    html += `<span class="tb-tab${v === cur ? ' active' : ''}" onclick="showView('${v}')">${el.innerHTML}</span>`;
+                });
+            } else if (cur && cur !== 'home') {
+                html += `<span class="tb-tab" onclick="exitToHome()">‹ Home</span>`;
+                html += `<span class="tb-divider"></span>`;
+                html += `<span class="tb-appname">${_PLATFORM_TITLES[cur] || ''}</span>`;
+            }
+            left.innerHTML = html;
         }
 
         // Sprint 56 — Home dashboard loader.
@@ -2956,20 +3003,8 @@
             const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
             const greet = document.getElementById('home-greeting');
             if (greet) greet.textContent = `Good to see you${u.name ? ', ' + u.name.split(' ')[0] : ''}`;
-            // Mirror the company switcher into the Home top bar.
-            const homeSel = document.getElementById('active-company-select-home');
-            const src = document.getElementById('active-company-select');
-            if (homeSel && src) { homeSel.innerHTML = src.innerHTML; homeSel.value = src.value; }
-            // Wallet balance (top-bar pill)
-            try {
-                const r = await fetch(`${API}/api/wallet?username=${encodeURIComponent(u.username||'')}`);
-                const d = await r.json();
-                const bal = document.getElementById('home-wallet-balance');
-                if (bal) bal.textContent = (d && typeof d.balance === 'number') ? d.balance.toLocaleString('en-IN') : '—';
-            } catch(_) {
-                const bal = document.getElementById('home-wallet-balance');
-                if (bal) bal.textContent = '—';
-            }
+            // Company switcher + wallet now live in the universal top bar (#app-topbar).
+            if (typeof refreshWalletPill === 'function') refreshWalletPill();
             // App-icon grid: installed agents + system apps.
             const grid = document.getElementById('home-app-grid');
             if (grid) {
@@ -3819,6 +3854,8 @@
             }
             // Sprint 60 — Home is a full-width Android launcher: hide the sidebar on Home.
             document.body.classList.toggle('home-active', view === 'home');
+            window.__currentView = view;                       // Sprint 61 — top-bar highlight
+            if (typeof _renderTopbar === 'function') _renderTopbar();
             document.querySelectorAll('.dashboard-view').forEach(el => el.style.display = 'none');
             // Sprint 49 — remote (embedded) agent view → render the iframe host instead
             // of a local #<view>-view div.
