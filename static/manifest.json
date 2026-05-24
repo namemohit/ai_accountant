@@ -1,7 +1,9 @@
 {
+  "id": "/",
   "name": "YantrAI Accounting",
   "short_name": "YantrAI",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#2a2623",
   "theme_color": "#da7756",
