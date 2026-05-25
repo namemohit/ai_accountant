@@ -363,6 +363,7 @@
             <div class="nav-item" data-view="store" data-platform="1" onclick="showView('store')"><span>🛍️</span> Store</div>
             <div class="nav-item" data-view="uploads" data-platform="1" onclick="showView('uploads')"><span>📎</span> Upload anything</div>
             <div class="nav-item" data-view="yantrai-chat" data-platform="1" onclick="showView('yantrai-chat')"><span>📝</span> Create task</div>
+            <div class="nav-item" data-view="leadgen" data-platform="1" onclick="showView('leadgen')"><span>🎯</span> Lead Gen</div>
 
             <div class="nav-item active" data-view="chat" onclick="showView('chat')"><span>💬</span> Chat with Tally</div>
 
@@ -1331,6 +1332,36 @@
                 </div>
                 <div id="file-preview-body" style="padding:16px; overflow:auto;"></div>
             </div>
+        </div>
+
+        <!-- Lead Gen — describe your ideal customer, get real scored leads -->
+        <div id="leadgen-view" class="dashboard-view" style="display: none;">
+            <header>
+                <h1>🎯 Lead Gen</h1>
+                <p style="color:#94a3b8;">Describe the customers you want — we find real businesses, score them for fit, and let you export or track them.</p>
+            </header>
+            <div style="margin-top:18px; border:1px solid var(--border); border-radius:14px; padding:18px; background:var(--card-bg);">
+                <label style="display:block; font-size:0.85rem; color:#cbd5e1; margin-bottom:6px;">Who are your ideal customers?</label>
+                <textarea id="leadgen-context" rows="3" placeholder="e.g. small textile manufacturers in Surat who might need accounting software"
+                    style="width:100%; box-sizing:border-box; padding:11px 13px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:10px; font-size:0.9rem; resize:vertical;"></textarea>
+                <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; margin-top:12px;">
+                    <div>
+                        <label style="display:block; font-size:0.78rem; color:#94a3b8; margin-bottom:4px;">Source</label>
+                        <select id="leadgen-source" style="padding:8px 11px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; font-size:0.85rem;"></select>
+                    </div>
+                    <div>
+                        <label style="display:block; font-size:0.78rem; color:#94a3b8; margin-bottom:4px;">Max leads</label>
+                        <input id="leadgen-count" type="number" value="20" min="1" max="20"
+                            style="width:90px; padding:8px 11px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; font-size:0.85rem;">
+                    </div>
+                    <button id="leadgen-go" onclick="generateLeads()"
+                        style="padding:10px 20px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:10px; font-weight:600; font-size:0.88rem; cursor:pointer;">Generate leads</button>
+                    <button onclick="exportLeads()"
+                        style="padding:10px 16px; background:var(--bg-light); color:#cbd5e1; border:1px solid var(--border); border-radius:10px; font-weight:600; font-size:0.85rem; cursor:pointer;">⬇ Export CSV</button>
+                </div>
+                <div id="leadgen-msg" style="font-size:0.82rem; margin-top:10px; color:#94a3b8;"></div>
+            </div>
+            <div id="leadgen-results" style="margin-top:18px; overflow-x:auto;"></div>
         </div>
 
         <!-- Sprint 57 — Chat with YantrAI: task intake that builds a Problem Document -->
@@ -2350,6 +2381,7 @@
             <div class="mobile-drawer-item" data-view="store" data-platform="1" onclick="mobileNav('store')"><span>🛍️</span> Store</div>
             <div class="mobile-drawer-item" data-view="uploads" data-platform="1" onclick="mobileNav('uploads')"><span>📎</span> Upload anything</div>
             <div class="mobile-drawer-item" data-view="yantrai-chat" data-platform="1" onclick="mobileNav('yantrai-chat')"><span>📝</span> Create task</div>
+            <div class="mobile-drawer-item" data-view="leadgen" data-platform="1" onclick="mobileNav('leadgen')"><span>🎯</span> Lead Gen</div>
             <div class="mobile-drawer-item active" data-view="chat" onclick="mobileNav('chat')"><span>💬</span> Chat with Tally</div>
 
             <div class="mobile-drawer-item" data-view="vouchers" onclick="mobileNav('vouchers')"><span>📑</span> Vouchers</div>
@@ -4435,6 +4467,11 @@
                 setTimeout(() => { if (typeof loadYantraiChat === 'function') loadYantraiChat(); }, 50);
             }
 
+            // Lead Gen
+            if (view === 'leadgen') {
+                setTimeout(() => { if (typeof loadLeadGen === 'function') loadLeadGen(); }, 50);
+            }
+
             // Sprint 48 — Store view
             if (view === 'store') {
                 setTimeout(() => { if (typeof loadStore === 'function') loadStore(); }, 50);
@@ -6203,6 +6240,104 @@
             let lastTab = 'reco';
             try { lastTab = localStorage.getItem('gstrRecoActiveTab') || 'reco'; } catch (e) {}
             switchGstrRecoTab(lastTab);
+        }
+
+        // ── Lead Gen ──
+        const _leEsc = (s) => escapeHtml(s == null ? '' : String(s));
+        let _leadgenBatchId = null;
+        let _leadgenSourcesLoaded = false;
+        async function loadLeadGen() {
+            if (_leadgenSourcesLoaded) return;
+            try {
+                const res = await fetch(`${API}/api/leads/sources`);
+                const j = await res.json();
+                const sel = document.getElementById('leadgen-source');
+                if (sel && j.sources) {
+                    sel.innerHTML = j.sources.map(s => `<option value="${s.name}">${_leEsc(s.label)}</option>`).join('');
+                    _leadgenSourcesLoaded = true;
+                }
+            } catch (e) { /* dropdown stays empty; backend default still applies */ }
+        }
+
+        async function generateLeads() {
+            const ctx = (document.getElementById('leadgen-context').value || '').trim();
+            const msg = document.getElementById('leadgen-msg');
+            if (!ctx) { msg.textContent = 'Describe the customers you want first.'; return; }
+            const btn = document.getElementById('leadgen-go');
+            btn.disabled = true; const old = btn.textContent; btn.textContent = 'Finding leads…';
+            msg.style.color = '#94a3b8'; msg.textContent = 'Searching real businesses and scoring fit…';
+            const co = _getActiveCo();
+            const fd = new FormData();
+            fd.append('context', ctx);
+            fd.append('source', document.getElementById('leadgen-source').value || '');
+            fd.append('count', document.getElementById('leadgen-count').value || '20');
+            fd.append('company_name', co.company_name || '');
+            fd.append('username', window.__currentUsername || '');
+            try {
+                const res = await fetch(`${API}/api/leads/generate`, { method: 'POST', body: fd });
+                const j = await res.json();
+                if (!res.ok) {
+                    const m = (j.detail && j.detail.message) || j.detail || 'Generation failed.';
+                    msg.style.color = '#f87171'; msg.textContent = '⚠ ' + m;
+                    return;
+                }
+                _leadgenBatchId = j.batch_id;
+                msg.style.color = '#4ade80';
+                msg.textContent = `✅ ${j.count} lead(s) found.`;
+                renderLeads(j.leads);
+            } catch (e) {
+                msg.style.color = '#f87171'; msg.textContent = '⚠ Network error.';
+            } finally {
+                btn.disabled = false; btn.textContent = old;
+            }
+        }
+
+        const _LEAD_STATUSES = ['new', 'contacted', 'qualified', 'won', 'lost'];
+        function renderLeads(leads) {
+            const box = document.getElementById('leadgen-results');
+            if (!leads || !leads.length) {
+                box.innerHTML = '<div style="color:#64748b; font-size:0.85rem; padding:14px;">No leads yet.</div>';
+                return;
+            }
+            const rows = leads.map(l => {
+                const site = l.website ? `<a href="${_leEsc(l.website)}" target="_blank" rel="noopener" style="color:#38bdf8; text-decoration:none;">site ↗</a>` : '';
+                const phone = l.phone ? _leEsc(l.phone) : '';
+                const score = (l.score != null) ? l.score : '';
+                const opts = _LEAD_STATUSES.map(s => `<option value="${s}"${s === (l.status || 'new') ? ' selected' : ''}>${s}</option>`).join('');
+                return `<tr style="border-bottom:1px solid var(--border);">
+                    <td style="padding:8px 10px; color:#e2e8f0;">${_leEsc(l.business_name || l.name || '')}</td>
+                    <td style="padding:8px 10px; color:#94a3b8;">${_leEsc(l.category || '')}</td>
+                    <td style="padding:8px 10px; color:#cbd5e1;">${phone}</td>
+                    <td style="padding:8px 10px;">${site}</td>
+                    <td style="padding:8px 10px; color:#94a3b8;">${_leEsc(l.city || '')}</td>
+                    <td style="padding:8px 10px; color:#fbbf24; font-weight:600; text-align:center;">${score}</td>
+                    <td style="padding:8px 10px; color:#94a3b8; font-size:0.8rem; max-width:260px;">${_leEsc(l.why_fit || '')}</td>
+                    <td style="padding:8px 10px;"><select onchange="setLeadStatus('${l.id}', this.value)" style="background:var(--bg-light); color:#cbd5e1; border:1px solid var(--border); border-radius:6px; padding:4px 6px; font-size:0.78rem;">${opts}</select></td>
+                </tr>`;
+            }).join('');
+            box.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:0.85rem;">
+                <thead><tr style="text-align:left; color:#64748b; font-size:0.75rem; text-transform:uppercase;">
+                    <th style="padding:8px 10px;">Business</th><th style="padding:8px 10px;">Category</th>
+                    <th style="padding:8px 10px;">Phone</th><th style="padding:8px 10px;">Web</th>
+                    <th style="padding:8px 10px;">City</th><th style="padding:8px 10px; text-align:center;">Fit</th>
+                    <th style="padding:8px 10px;">Why it fits</th><th style="padding:8px 10px;">Status</th>
+                </tr></thead><tbody>${rows}</tbody></table>`;
+        }
+
+        async function setLeadStatus(leadId, status) {
+            try {
+                await fetch(`${API}/api/leads/${leadId}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: window.__currentUsername || '', status })
+                });
+            } catch (e) { /* non-blocking */ }
+        }
+
+        function exportLeads() {
+            const params = new URLSearchParams({ username: window.__currentUsername || '' });
+            if (_leadgenBatchId) params.append('batch_id', _leadgenBatchId);
+            window.open(`${API}/api/leads/export?${params}`, '_blank');
         }
 
         async function upload2A2B(file) {
@@ -12822,7 +12957,7 @@
                 const rowsHtml = legs.map(l => {
                     if (l.is_debit) drTotal += l.amount; else crTotal += l.amount;
                     return `<tr>
-                        <td>${esc(l.name)}</td>
+                        <td>${_leEsc(l.name)}</td>
                         <td class="amt">${l.is_debit ? inr(l.amount) : ''}</td>
                         <td class="amt">${!l.is_debit ? inr(l.amount) : ''}</td>
                     </tr>`;

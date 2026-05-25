@@ -1077,6 +1077,156 @@ def archive_company_file(file_id, company_name):
         cur.close(); conn.close()
 
 
+# ── Lead Generation — a generation run (batch) + its real-business leads. The
+# status/action_taken columns are the seams for a future end-to-end CRM. ──
+LEAD_STATUSES = ("new", "contacted", "qualified", "won", "lost")
+
+def _ensure_leads_schema():
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS lead_batches (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id TEXT,
+                company_name TEXT,
+                context_text TEXT,
+                search_params JSONB DEFAULT '{}',
+                source TEXT,
+                lead_count INT DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );""")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS leads (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                batch_id UUID REFERENCES lead_batches(id) ON DELETE CASCADE,
+                user_id TEXT,
+                company_name TEXT,
+                source TEXT,
+                name TEXT,
+                business_name TEXT,
+                category TEXT,
+                address TEXT,
+                city TEXT,
+                phone TEXT,
+                website TEXT,
+                email TEXT,
+                rating REAL,
+                score INT,
+                why_fit TEXT,
+                status TEXT DEFAULT 'new',
+                action_taken JSONB DEFAULT '{}',
+                raw_json JSONB,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_user ON leads(user_id, created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_batch ON leads(batch_id)")
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f"[_ensure_leads_schema] {e}")
+
+
+def insert_lead_batch(user_id, company_name, context_text, search_params, source):
+    _ensure_leads_schema()
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""INSERT INTO lead_batches (user_id, company_name, context_text, search_params, source)
+                       VALUES (%s,%s,%s,%s,%s) RETURNING id""",
+                    (user_id, company_name, context_text, json.dumps(search_params or {}), source))
+        bid = cur.fetchone()[0]; conn.commit(); return str(bid)
+    finally:
+        cur.close(); conn.close()
+
+
+def insert_leads(batch_id, user_id, company_name, rows):
+    """Bulk-insert normalized+scored lead dicts. Returns the persisted rows."""
+    _ensure_leads_schema()
+    if not rows:
+        return []
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        out = []
+        for r in rows:
+            cur.execute("""INSERT INTO leads
+                             (batch_id, user_id, company_name, source, name, business_name,
+                              category, address, city, phone, website, email, rating,
+                              score, why_fit, raw_json)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                           RETURNING id, source, name, business_name, category, address, city,
+                                     phone, website, email, rating, score, why_fit, status,
+                                     action_taken, created_at""",
+                        (batch_id, user_id, company_name, r.get("source"), r.get("name"),
+                         r.get("business_name"), r.get("category"), r.get("address"),
+                         r.get("city"), r.get("phone"), r.get("website"), r.get("email"),
+                         r.get("rating"), r.get("score"), r.get("why_fit"),
+                         json.dumps(r.get("raw_json")) if r.get("raw_json") is not None else None))
+            out.append(cur.fetchone())
+        cur.execute("UPDATE lead_batches SET lead_count=%s WHERE id=%s", (len(out), batch_id))
+        conn.commit(); return out
+    except Exception as e:
+        conn.rollback(); print(f"[insert_leads] {e}"); return []
+    finally:
+        cur.close(); conn.close()
+
+
+def list_leads(user_id, batch_id=None, limit=500):
+    _ensure_leads_schema()
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        if batch_id:
+            cur.execute("""SELECT id, source, name, business_name, category, address, city,
+                                  phone, website, email, rating, score, why_fit, status,
+                                  action_taken, created_at
+                           FROM leads WHERE user_id=%s AND batch_id=%s
+                           ORDER BY score DESC NULLS LAST, created_at DESC LIMIT %s""",
+                        (user_id, batch_id, limit))
+        else:
+            cur.execute("""SELECT id, source, name, business_name, category, address, city,
+                                  phone, website, email, rating, score, why_fit, status,
+                                  action_taken, created_at
+                           FROM leads WHERE user_id=%s
+                           ORDER BY created_at DESC LIMIT %s""",
+                        (user_id, limit))
+        return cur.fetchall()
+    finally:
+        cur.close(); conn.close()
+
+
+def list_lead_batches(user_id, limit=50):
+    _ensure_leads_schema()
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""SELECT id, context_text, source, lead_count, created_at
+                       FROM lead_batches WHERE user_id=%s
+                       ORDER BY created_at DESC LIMIT %s""", (user_id, limit))
+        return cur.fetchall()
+    finally:
+        cur.close(); conn.close()
+
+
+def update_lead_status(lead_id, user_id, status=None, action=None):
+    """Update a lead's CRM status and/or merge an action marker into action_taken."""
+    _ensure_leads_schema()
+    if status and status not in LEAD_STATUSES:
+        return None
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""UPDATE leads
+                       SET status = COALESCE(%s, status),
+                           action_taken = CASE WHEN %s::jsonb IS NULL THEN action_taken
+                                               ELSE COALESCE(action_taken,'{}'::jsonb) || %s::jsonb END
+                       WHERE id=%s AND user_id=%s
+                       RETURNING id, status, action_taken""",
+                    (status,
+                     json.dumps(action) if action is not None else None,
+                     json.dumps(action) if action is not None else None,
+                     lead_id, user_id))
+        row = cur.fetchone(); conn.commit(); return row
+    except Exception as e:
+        conn.rollback(); print(f"[update_lead_status] {e}"); return None
+    finally:
+        cur.close(); conn.close()
+
+
 def rename_company_file(file_id, company_name, new_name):
     """Sprint 55b — rename a file's display name (original_name); the stored
     file on disk is untouched, so existing links keep working."""
@@ -2313,6 +2463,9 @@ def _ensure_chat_user_column():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_chat_sessions_user ON chat_sessions(user_username, company_name)")
         # Sprint 82 — distinguish Tally chats ('chat') from Create-task sessions ('yantrai_task').
         cursor.execute("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'chat'")
+        # Sprint 84 — public shareable per-chat link (read-only).
+        cursor.execute("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS share_token TEXT")
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_sessions_share ON chat_sessions(share_token)")
         conn.commit()
         cursor.close()
         conn.close()

@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response as _StarletteResponse
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 import uvicorn
 import os
 from dotenv import load_dotenv
@@ -20,6 +20,8 @@ from utils.parser import InvoiceParser
 import db
 from psycopg2.extras import RealDictCursor
 from utils.reconciler import reconcile_statement
+from providers.leads import registry as lead_registry
+from providers.leads.base import LeadProviderUnavailable
 
 app = FastAPI()
 
@@ -995,6 +997,175 @@ def _charge_ai(username, company_name, action, response=None, est_text=None,
                         total_tokens=t, agent_slug=agent)
     except Exception as e:
         print(f"[_charge_ai] {e}")
+
+
+# ─────────────────────────────────────────────────────────────
+# Lead Generation — turn a user's plain-language context into real, contactable
+# businesses (via a pluggable data source), AI-scored for fit. Persisted with a
+# status/action marker so it can grow into end-to-end customer management.
+# ─────────────────────────────────────────────────────────────
+LEADGEN_MODEL = "gemini-flash-latest"
+
+def _leadgen_search_params(context):
+    """Ask Gemini to turn free-text context into structured search params.
+    Returns (params_dict, gemini_response_or_None)."""
+    fallback = {"query": (context or "").strip(), "business_type": "", "location": "",
+                "keywords": []}
+    if not (context or "").strip():
+        return fallback, None
+    prompt = (
+        "You convert a user's description of their ideal customer into a business "
+        "directory search. Reply ONLY with JSON: "
+        '{"query": "<concise text search for a maps/business directory>", '
+        '"business_type": "<category>", "location": "<city/area or empty>", '
+        '"keywords": ["..."]}. '
+        "Make 'query' something that works in Google Maps text search.\n\n"
+        f"User context: {context.strip()}")
+    try:
+        resp = genai.GenerativeModel(LEADGEN_MODEL).generate_content(prompt)
+        parsed = _parse_ai_json(getattr(resp, "text", "") or "")
+        if isinstance(parsed, dict) and parsed.get("query"):
+            for k, v in fallback.items():
+                parsed.setdefault(k, v)
+            return parsed, resp
+    except Exception as e:
+        print(f"[_leadgen_search_params] {e}")
+    return fallback, None
+
+def _leadgen_score(context, leads):
+    """Ask Gemini to score each lead 0-100 for fit + a one-line why_fit.
+    Mutates `leads` in place; returns the gemini response (for token charging)."""
+    if not leads:
+        return None
+    brief = [{"i": i, "name": l.get("name"), "category": l.get("category"),
+              "city": l.get("city"), "website": l.get("website")}
+             for i, l in enumerate(leads)]
+    prompt = (
+        "Score how well each business fits the user's target customer. "
+        "Reply ONLY with JSON: {\"scores\":[{\"i\":<index>,\"score\":<0-100>,"
+        "\"why_fit\":\"<one short sentence>\"}, ...]}.\n\n"
+        f"User target: {context}\n\nBusinesses: {json.dumps(brief)}")
+    try:
+        resp = genai.GenerativeModel(LEADGEN_MODEL).generate_content(prompt)
+        parsed = _parse_ai_json(getattr(resp, "text", "") or "")
+        by_i = {}
+        for s in (parsed.get("scores") or []) if isinstance(parsed, dict) else []:
+            try:
+                by_i[int(s.get("i"))] = s
+            except Exception:
+                pass
+        for i, l in enumerate(leads):
+            s = by_i.get(i) or {}
+            try:
+                l["score"] = max(0, min(100, int(s.get("score")))) if s.get("score") is not None else None
+            except Exception:
+                l["score"] = None
+            l["why_fit"] = s.get("why_fit")
+        return resp
+    except Exception as e:
+        print(f"[_leadgen_score] {e}")
+        return None
+
+def _dedupe_leads(leads):
+    seen, out = set(), []
+    for l in leads:
+        key = ((l.get("name") or "").strip().lower(),
+               (l.get("phone") or l.get("website") or "").strip().lower())
+        if key in seen:
+            continue
+        seen.add(key); out.append(l)
+    return out
+
+
+@app.post("/api/leads/generate")
+async def generate_leads(
+    context: str = Form(...),
+    source: str = Form(lead_registry.DEFAULT_SOURCE),
+    count: int = Form(20),
+    username: str = Form(None),
+    company_name: str = Form(None),
+):
+    _ensure_tokens(username, company_name)   # block if workspace out of tokens (402)
+    provider = lead_registry.get_provider(source)
+    if provider is None:
+        raise HTTPException(status_code=400, detail=f"Unknown lead source '{source}'")
+
+    # 1) free-text context -> structured search params (Gemini)
+    params, r1 = _leadgen_search_params(context)
+    # 2) fetch real leads from the chosen source
+    try:
+        leads = provider.search(params, limit=max(1, min(int(count or 20), 20)))
+    except LeadProviderUnavailable as e:
+        raise HTTPException(status_code=503, detail={"error": "source_unavailable",
+                                                     "message": str(e)})
+    except Exception as e:
+        print(f"[generate_leads] provider error: {e}")
+        raise HTTPException(status_code=502, detail={"error": "source_error",
+                                                     "message": "Lead source failed."})
+    leads = _dedupe_leads(leads)
+    # 3) AI fit-scoring
+    r2 = _leadgen_score(context, leads) if leads else None
+
+    # 4) persist + charge credits
+    u = db.get_user_by_username(username) if username else None
+    uid = (u or {}).get("users_id")
+    batch_id = db.insert_lead_batch(uid, company_name, context, params, source)
+    saved = db.insert_leads(batch_id, uid, company_name, leads)
+    for resp in (r1, r2):
+        if resp is not None:
+            _charge_ai(username, company_name, "leadgen", response=resp,
+                       model=LEADGEN_MODEL, agent="lead-gen")
+
+    return {"status": "success", "batch_id": batch_id, "count": len(saved),
+            "search_params": params, "leads": saved}
+
+
+@app.get("/api/leads")
+async def get_leads(username: str = None, batch_id: str = None):
+    u = db.get_user_by_username(username) if username else None
+    uid = (u or {}).get("users_id")
+    if not uid:
+        return {"status": "success", "leads": [], "batches": []}
+    return {"status": "success",
+            "leads": db.list_leads(uid, batch_id=batch_id),
+            "batches": db.list_lead_batches(uid)}
+
+
+@app.get("/api/leads/export")
+async def export_leads(username: str = None, batch_id: str = None):
+    import csv, io
+    u = db.get_user_by_username(username) if username else None
+    uid = (u or {}).get("users_id")
+    rows = db.list_leads(uid, batch_id=batch_id) if uid else []
+    cols = ["business_name", "category", "phone", "website", "email", "address",
+            "city", "rating", "score", "why_fit", "status", "source"]
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([c.replace("_", " ").title() for c in cols])
+    for r in rows:
+        w.writerow([r.get(c, "") if r.get(c) is not None else "" for c in cols])
+    buf.seek(0)
+    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=leads.csv"})
+
+
+@app.patch("/api/leads/{lead_id}")
+async def patch_lead(lead_id: str, request: Request):
+    body = await request.json()
+    u = db.get_user_by_username(body.get("username")) if body.get("username") else None
+    uid = (u or {}).get("users_id")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unknown user")
+    row = db.update_lead_status(lead_id, uid, status=body.get("status"),
+                                action=body.get("action"))
+    if not row:
+        raise HTTPException(status_code=400, detail="Update failed (bad status or lead not found)")
+    return {"status": "success", "lead": row}
+
+
+@app.get("/api/leads/sources")
+async def lead_sources():
+    return {"status": "success", "sources": lead_registry.list_sources()}
 
 
 @app.post("/chat")
