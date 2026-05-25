@@ -1,0 +1,1 @@
+# Empty on purpose — every request falls through the "**" rewrite to the Cloud Run service.

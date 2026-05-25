@@ -1,0 +1,12 @@
+{
+  "hosting": {
+    "public": "firebase-public",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "rewrites": [
+      {
+        "source": "**",
+        "run": { "serviceId": "yantrai-accounting", "region": "asia-south1" }
+      }
+    ]
+  }
+}
