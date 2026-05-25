@@ -362,7 +362,7 @@
             <!-- Sprint 48 — Agentic store. data-view powers nav-from-installs. -->
             <div class="nav-item" data-view="store" data-platform="1" onclick="showView('store')"><span>🛍️</span> Store</div>
             <div class="nav-item" data-view="uploads" data-platform="1" onclick="showView('uploads')"><span>📎</span> Upload anything</div>
-            <div class="nav-item" data-view="yantrai-chat" data-platform="1" onclick="showView('yantrai-chat')"><span>🤝</span> Chat with YantrAI</div>
+            <div class="nav-item" data-view="yantrai-chat" data-platform="1" onclick="showView('yantrai-chat')"><span>📝</span> Create task</div>
 
             <div class="nav-item active" data-view="chat" onclick="showView('chat')"><span>💬</span> Chat with Tally</div>
 
@@ -431,7 +431,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v97</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v98</div>
         </div>
     </div>
 
@@ -1336,7 +1336,7 @@
         <!-- Sprint 57 — Chat with YantrAI: task intake that builds a Problem Document -->
         <div id="yantrai-chat-view" class="dashboard-view" style="display: none;">
             <header>
-                <h1>🤝 Chat with YantrAI</h1>
+                <h1>📝 Create task</h1>
                 <p style="color:#94a3b8;">Describe any task you want the YantrAI team to deliver. We'll shape it into a clear brief together, then raise it with a tracking ID.</p>
             </header>
             <!-- Sprint 80 — single-column chat (like Chat with Tally) + My-tasks toggle -->
@@ -2172,7 +2172,7 @@
             <div class="card" style="margin-top:24px;">
                 <h3 style="margin-bottom: 12px;">📦 About &amp; Updates</h3>
                 <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v97</strong></span>
+                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v98</strong></span>
                     <span id="settings-update-msg" style="font-size:0.82rem; color:#94a3b8;"></span>
                 </div>
                 <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
@@ -2346,7 +2346,7 @@
             <div class="mobile-drawer-item" data-view="home" data-platform="1" onclick="mobileNav('home')"><span>🏠</span> Home</div>
             <div class="mobile-drawer-item" data-view="store" data-platform="1" onclick="mobileNav('store')"><span>🛍️</span> Store</div>
             <div class="mobile-drawer-item" data-view="uploads" data-platform="1" onclick="mobileNav('uploads')"><span>📎</span> Upload anything</div>
-            <div class="mobile-drawer-item" data-view="yantrai-chat" data-platform="1" onclick="mobileNav('yantrai-chat')"><span>🤝</span> Chat with YantrAI</div>
+            <div class="mobile-drawer-item" data-view="yantrai-chat" data-platform="1" onclick="mobileNav('yantrai-chat')"><span>📝</span> Create task</div>
             <div class="mobile-drawer-item active" data-view="chat" onclick="mobileNav('chat')"><span>💬</span> Chat with Tally</div>
 
             <div class="mobile-drawer-item" data-view="vouchers" onclick="mobileNav('vouchers')"><span>📑</span> Vouchers</div>
@@ -2372,7 +2372,7 @@
                     style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer; margin-bottom:10px;"></select>
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 6px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="exitToHome(); if(typeof closeMobileMenu==='function') closeMobileMenu();"><span>🏠</span> Home</div>
-            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v97</div>
+            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v98</div>
         </div>
     </div>
 
@@ -3091,7 +3091,7 @@
         // controls. On Home: just the logo. Inside an app: ‹ Home + app name + that
         // app's screens as tabs. On a platform view: ‹ Home + the view's title.
         const _PLATFORM_TITLES = { store:'🛍️ Store', uploads:'📎 Upload anything',
-            'yantrai-chat':'🤝 Chat with YantrAI', settings:'⚙️ Settings',
+            'yantrai-chat':'📝 Create task', settings:'⚙️ Settings',
             training:'🧠 Connectors', whatsapp:'📱 WhatsApp Setup', users:'👥 User Manager',
             analytics:'📊 Data Analyst' };
         function _renderTopbar() {
@@ -3243,13 +3243,14 @@
                 const tile = (icon, name, sub, onclick) =>
                     `<div class="app-tile" onclick="${onclick}"><div class="at-icon">${icon}</div>` +
                     `<div class="at-name">${escapeHtml(name)}</div><div class="at-sub">${escapeHtml(sub)}</div></div>`;
+                // Sprint 81 — fixed launcher order: Create task · <agents> · Store · Upload · Wallet · (Data Analyst SA) · Settings.
                 const tiles = [];
+                tiles.push(tile('📝', 'Create task', 'Tell YantrAI what you need', "showView('yantrai-chat')"));
                 (window.__installedAgents || []).forEach(a => tiles.push(
                     tile(a.icon || '🧩', a.name || a.slug, a.tagline || 'Open app', `enterAgent('${escapeHtml(a.slug)}')`)));
-                tiles.push(tile('⚡', 'Wallet', 'Tokens & recharge', "if(typeof openWalletModal==='function') openWalletModal()"));
                 tiles.push(tile('🛍️', 'Store', 'Get more apps', "showView('store')"));
                 tiles.push(tile('📎', 'Upload anything', 'Files for this company', "showView('uploads')"));
-                tiles.push(tile('🤝', 'Chat with YantrAI', 'Raise a task', "showView('yantrai-chat')"));
+                tiles.push(tile('⚡', 'Wallet', 'Tokens & recharge', "if(typeof openWalletModal==='function') openWalletModal()"));
                 if (window.__isSuperAdmin) tiles.push(tile('📊', 'Data Analyst', 'Platform usage & tokens', "showView('analytics')"));
                 tiles.push(tile('⚙️', 'Settings', 'Account, connectors & admin', "showView('settings')"));
                 window.__homeTiles = tiles;

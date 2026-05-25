@@ -1488,18 +1488,7 @@ AGENT_SEED = [
      "icon": "💼", "category": "hr", "status": "coming_soon", "publisher": "first-party",
      "token_policy": {"chargeable": True}, "manifest": {"version": 1, "nav_groups": []},
      "sort_order": 20},
-    # Sprint 49 — marketplace spike: an app that lives OUTSIDE the YantrAI SPA,
-    # loaded as a remote agent via manifest.remote_url (rendered in an iframe with SSO).
-    {"slug": "demo-remote", "name": "Remote Demo",
-     "tagline": "Proof: an app loaded from outside the YantrAI codebase.",
-     "description": "A tiny external web app embedded as a remote agent — demonstrates the "
-                    "marketplace seam (manifest remote_url + signed SSO context).",
-     "icon": "🧩", "category": "developer", "status": "published", "publisher": "first-party",
-     "token_policy": {"chargeable": False},
-     "manifest": {"version": 1, "agent_kind": "remote", "remote_url": "/static/demo_agent.html",
-                  "nav_groups": [{"label": "App", "items": [
-                      {"view": "remote-demo-remote", "label": "Open App", "icon": "🧩"}]}]},
-     "sort_order": 30},
+    # Sprint 81 — Remote Demo (Sprint-49 marketplace demo agent) removed.
     # Sprint 50 — Developer Portal: an in-app first-party agent any user opens to
     # register + run their own remote agentic apps (self-integration).
     {"slug": "developer-portal", "name": "Developer Portal",
