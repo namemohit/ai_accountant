@@ -3275,14 +3275,15 @@
                 if (typeof _fetchInstalled === 'function' && !(window.__installedAgents && window.__installedAgents.length)) {
                     try { await _fetchInstalled(); } catch(_) {}
                 }
-                const tile = (icon, name, sub, onclick) =>
-                    `<div class="app-tile" onclick="${onclick}"><div class="at-icon">${icon}</div>` +
+                const tile = (icon, name, sub, onclick, slug) =>
+                    `<div class="app-tile"${slug ? ` data-agent-slug="${escapeHtml(slug)}" title="Open · long-press or right-click to remove"` : ''} onclick="${onclick}"><div class="at-icon">${icon}</div>` +
                     `<div class="at-name">${escapeHtml(name)}</div><div class="at-sub">${escapeHtml(sub)}</div></div>`;
                 // Sprint 81 — fixed launcher order: Create task · <agents> · Store · Upload · Wallet · (Data Analyst SA) · Settings.
                 const tiles = [];
                 tiles.push(tile('📝', 'Create task', 'Tell YantrAI what you need', "showView('yantrai-chat')"));
+                // Sprint 85 — agent tiles get data-agent-slug → long-press / right-click to uninstall.
                 (window.__installedAgents || []).forEach(a => tiles.push(
-                    tile(a.icon || '🧩', a.name || a.slug, a.tagline || 'Open app', `enterAgent('${escapeHtml(a.slug)}')`)));
+                    tile(a.icon || '🧩', a.name || a.slug, a.tagline || 'Open app', `enterAgent('${escapeHtml(a.slug)}')`, a.slug)));
                 tiles.push(tile('🛍️', 'Store', 'Get more apps', "showView('store')"));
                 tiles.push(tile('📎', 'Upload anything', 'Files for this company', "showView('uploads')"));
                 tiles.push(tile('⚡', 'Wallet', 'Tokens & recharge', "if(typeof openWalletModal==='function') openWalletModal()"));
@@ -3324,6 +3325,33 @@
             grid.innerHTML = html;
             const pager = document.getElementById('home-pager');
             if (pager) pager.addEventListener('scroll', _homeDotsSync, { passive: true });
+            _wireHomeTileUninstall();
+        }
+        // Sprint 85 — Android-launcher-style uninstall: long-press (touch) or right-click
+        // (desktop) an agent tile → confirm → remove from this workspace.
+        function _wireHomeTileUninstall() {
+            document.querySelectorAll('#home-app-grid .app-tile[data-agent-slug]').forEach(el => {
+                const slug = el.getAttribute('data-agent-slug');
+                const name = (el.querySelector('.at-name') || {}).textContent || slug;
+                el.oncontextmenu = (e) => { e.preventDefault(); _homeUninstall(slug, name); };
+                let timer = null, moved = false;
+                el.addEventListener('touchstart', () => { moved = false; timer = setTimeout(() => { if (!moved) _homeUninstall(slug, name); }, 600); }, { passive: true });
+                el.addEventListener('touchmove', () => { moved = true; clearTimeout(timer); }, { passive: true });
+                el.addEventListener('touchend', () => clearTimeout(timer), { passive: true });
+            });
+        }
+        async function _homeUninstall(slug, name) {
+            if (!confirm(`Remove "${name}" from your workspace?\n\nIts data is preserved — you can reinstall anytime from the Store.`)) return;
+            const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
+            try {
+                const r = await fetch(`${API}/api/agents/uninstall`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: u.username, slug }) });
+                const d = await r.json();
+                if (!r.ok) throw new Error((d && (d.detail || d.message)) || 'Uninstall failed');
+                if (typeof _fetchInstalled === 'function') await _fetchInstalled();
+                if (typeof _renderNav === 'function') _renderNav();
+                loadHome();   // re-render the Home grid (stay on Home)
+                try { showChatToast && showChatToast(`Removed "${name}"`, 'info'); } catch(_) {}
+            } catch(e) { try { showChatToast ? showChatToast(e.message, 'warn') : alert(e.message); } catch(_) { alert(e.message); } }
         }
         function _homeDotsSync() {
             const pager = document.getElementById('home-pager'); if (!pager) return;
