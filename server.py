@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response as _StarletteResponse
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse, HTMLResponse
 import uvicorn
 import os
 from dotenv import load_dotenv
@@ -821,7 +821,8 @@ def _verify_token(authz):
 # Paths that never require a session (login, onboard, public, desktop agent, static).
 _AUTH_WHITELIST_PREFIXES = ("/api/login", "/api/auth/", "/api/onboard", "/api/register",
                             "/api/agent/", "/tally/", "/api/agents/verify-sso",
-                            "/api/webhooks/", "/static/", "/tally_bridge_agent")
+                            "/api/webhooks/", "/static/", "/tally_bridge_agent",
+                            "/api/shared/", "/s/")  # Sprint 84 public shared chats
 _AUTH_WHITELIST_EXACT = ("/", "/login", "/sw.js", "/manifest.json", "/favicon.ico",
                          "/share-target")
 def _is_auth_whitelisted(path):
@@ -2130,6 +2131,120 @@ async def update_chat_title_endpoint(payload: dict):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── Sprint 84 — public shareable chat links ──────────────────────────────
+_SHARED_CHAT_HTML = """<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Shared chat · YantrAI</title>
+<style>
+  :root{--bg:#2a2623;--surface:#1e1b18;--card:#221f1c;--primary:#da7756;--text:#f5f1ec;--muted:#a8a199;--border:#3a3530;}
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;line-height:1.5;}
+  header{position:sticky;top:0;background:var(--surface);border-bottom:1px solid var(--border);padding:14px 18px;display:flex;align-items:center;gap:10px;}
+  header .brand{font-weight:700;color:var(--primary);}
+  header .title{color:var(--muted);font-size:.9rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  main{max-width:820px;margin:0 auto;padding:18px 16px 60px;}
+  .msg{margin:0 0 16px;display:flex;}
+  .msg.user{justify-content:flex-end;}
+  .bubble{max-width:88%;padding:11px 14px;border-radius:14px;white-space:pre-wrap;word-wrap:break-word;}
+  .msg.user .bubble{background:var(--primary);color:#fff;border-bottom-right-radius:4px;}
+  .msg.assistant .bubble{background:var(--card);border:1px solid var(--border);border-bottom-left-radius:4px;}
+  .pd{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:14px 16px;width:100%;}
+  .pd h3{margin:0 0 8px;font-size:1rem;}
+  .pd .row{margin:6px 0;font-size:.9rem;}
+  .pd .row b{color:var(--muted);font-weight:600;display:block;font-size:.78rem;text-transform:uppercase;letter-spacing:.03em;}
+  .empty,.err{color:var(--muted);text-align:center;padding:40px 16px;}
+  footer{color:var(--muted);font-size:.78rem;text-align:center;padding:18px;border-top:1px solid var(--border);}
+  a{color:var(--primary);}
+</style></head>
+<body>
+<header><span class="brand">YantrAI</span><span class="title" id="t">Shared chat</span></header>
+<main id="m"><div class="empty">Loading…</div></main>
+<footer>Read-only shared view · <a href="/">Open YantrAI</a></footer>
+<script>
+function esc(s){return (s==null?'':String(s)).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
+function pdCard(d){
+  d=d||{};
+  var fields=[['Title',d.title],['Category',d.category],['Priority',d.priority],['Objective',d.objective],
+    ['Context',d.context],['Scope',d.scope],['Constraints',d.constraints],['Success criteria',d.success_criteria]];
+  var rows=fields.filter(function(f){return f[1];}).map(function(f){
+    return '<div class="row"><b>'+esc(f[0])+'</b>'+esc(f[1])+'</div>';}).join('');
+  function arr(label,v){ if(!v) return ''; if(Array.isArray(v)) v=v.join(', ');
+    return '<div class="row"><b>'+esc(label)+'</b>'+esc(v)+'</div>';}
+  rows+=arr('Deliverables',d.deliverables)+arr('Data required',d.data_required);
+  return '<div class="pd"><h3>📋 '+esc(d.title||'Problem Document')+'</h3>'+rows+'</div>';
+}
+(async function(){
+  var token=location.pathname.split('/s/')[1]||'';
+  var m=document.getElementById('m');
+  try{
+    var r=await fetch('/api/shared/'+encodeURIComponent(token));
+    if(!r.ok){ m.innerHTML='<div class="err">This shared link is invalid or was revoked.</div>'; return; }
+    var data=await r.json();
+    document.getElementById('t').textContent=data.title||'Shared chat';
+    document.title=(data.title||'Shared chat')+' · YantrAI';
+    var msgs=data.messages||[];
+    if(!msgs.length){ m.innerHTML='<div class="empty">No messages in this chat yet.</div>'; return; }
+    m.innerHTML=msgs.map(function(x){
+      var role=(x.role==='user')?'user':'assistant';
+      var ui=x.ui_data; if(typeof ui==='string'){ try{ui=JSON.parse(ui);}catch(e){ui=null;} }
+      if(x.ui_type==='pdcard' && ui){ return '<div class="msg assistant">'+pdCard(ui.pd||ui)+'</div>'; }
+      var body=esc(x.content||'');
+      if(!body) return '';
+      return '<div class="msg '+role+'"><div class="bubble">'+body+'</div></div>';
+    }).join('');
+  }catch(e){ m.innerHTML='<div class="err">Could not load this shared chat.</div>'; }
+})();
+</script>
+</body></html>"""
+
+
+@app.post("/api/chat/{session_id}/share")
+async def create_chat_share(session_id: str, payload: dict = None):
+    """Mint (or return) a public read-only link for this chat. Owner-checked."""
+    username = (payload or {}).get("username")
+    owner = db.get_chat_session_owner(session_id)
+    if not owner:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    if username and owner.get("user_username") and owner["user_username"] != username:
+        user = db.get_user_by_username(username)
+        if not (user and user.get("role") == "super_admin"):
+            raise HTTPException(status_code=403, detail="This chat belongs to another user.")
+    token = db.get_or_create_share_token(session_id)
+    if not token:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return {"token": token, "path": f"/s/{token}"}
+
+
+@app.delete("/api/chat/{session_id}/share")
+async def revoke_chat_share(session_id: str, username: str = None):
+    owner = db.get_chat_session_owner(session_id)
+    if not owner:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    if username and owner.get("user_username") and owner["user_username"] != username:
+        user = db.get_user_by_username(username)
+        if not (user and user.get("role") == "super_admin"):
+            raise HTTPException(status_code=403, detail="This chat belongs to another user.")
+    db.revoke_share_token(session_id)
+    return {"status": "revoked"}
+
+
+@app.get("/api/shared/{token}")
+async def get_shared_chat(token: str):
+    """Public read-only transcript for a share token."""
+    data = db.get_shared_transcript(token)
+    if not data:
+        raise HTTPException(status_code=404, detail="This shared link is invalid or was revoked.")
+    return data
+
+
+@app.get("/s/{token}", response_class=HTMLResponse)
+async def shared_chat_page(token: str):
+    """Standalone public read-only viewer for a shared chat."""
+    return HTMLResponse(_SHARED_CHAT_HTML)
 
 
 @app.post("/analyze")

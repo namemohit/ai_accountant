@@ -3433,7 +3433,10 @@
                         style="padding:9px 10px; border-radius:9px; cursor:pointer; display:flex; flex-direction:column; gap:4px;">
                         <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
                             <span style="font-size:0.7rem; font-family:monospace; color:#94a3b8;">${escapeHtml(s.task_code||'draft')}</span>
-                            <span style="font-size:0.62rem; padding:1px 7px; border-radius:9px; background:${_ytStColor(s.status)}22; color:${_ytStColor(s.status)};">${escapeHtml(st)}</span>
+                            <span style="display:flex; align-items:center; gap:5px;">
+                                <span class="chat-share-ic" title="Copy shareable link" onclick="event.stopPropagation(); shareChat('${s.id}', event)" style="cursor:pointer; opacity:0.55; font-size:0.72rem;">🔗</span>
+                                <span style="font-size:0.62rem; padding:1px 7px; border-radius:9px; background:${_ytStColor(s.status)}22; color:${_ytStColor(s.status)};">${escapeHtml(st)}</span>
+                            </span>
                         </div>
                         <div style="font-size:0.82rem; color:#e2e8f0; line-height:1.25;">${title}</div>
                     </div>`;
@@ -9268,7 +9271,7 @@
                 const title = (s.title && s.title.length > 40) ? s.title.slice(0, 37) + '…' : (s.title || 'New Chat');
                 // Show company tag only for super_admin (platform-wide view); regular users see scoped chats so no tag needed
                 const companyTag = isSuperAdmin && s.company_name ? `<span style="font-size:0.65rem;background:rgba(218,119,86,0.2);color:var(--primary);padding:1px 5px;border-radius:4px;white-space:nowrap;flex-shrink:0;">${s.company_name}</span>` : '';
-                item.innerHTML = `<span style="flex-shrink:0;">💬</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">${title}</span>${companyTag}`;
+                item.innerHTML = `<span style="flex-shrink:0;">💬</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">${title}</span>${companyTag}<span class="chat-share-ic" title="Copy shareable link" onclick="event.stopPropagation(); shareChat('${s.id}', event)" style="flex-shrink:0;cursor:pointer;opacity:0.55;padding:2px 4px;">🔗</span>`;
                 item.onclick = () => { loadChat(s.id); if (typeof closeMobileChatSidebar === 'function') closeMobileChatSidebar(); };
                 list.appendChild(item);
             });
@@ -9316,6 +9319,23 @@
             document.getElementById('chat-suggestions').style.display = 'none';
             loadChatSessions();
             if (typeof closeMobileChatSidebar === 'function') closeMobileChatSidebar();
+        }
+
+        // Sprint 84 — mint + copy a public read-only shareable link for a chat.
+        async function shareChat(sessionId, ev) {
+            try {
+                const u = JSON.parse(localStorage.getItem('currentUser') || '{}').username || '';
+                const r = await fetch(`${API}/api/chat/${sessionId}/share`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: u })
+                });
+                if (!r.ok) { showChatToast('Could not create share link.'); return; }
+                const j = await r.json();
+                const url = location.origin + j.path;
+                try { await navigator.clipboard.writeText(url); showChatToast('🔗 Shareable link copied to clipboard'); }
+                catch (e) { window.prompt('Shareable link (read-only):', url); }
+            } catch (e) { showChatToast('Could not create share link.'); }
         }
 
         function scrollChat() { const el = document.getElementById('chat-messages'); el.scrollTop = el.scrollHeight; }

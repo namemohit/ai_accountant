@@ -2674,6 +2674,73 @@ def get_chat_messages(session_id):
     finally:
         pput(conn)
 
+
+# ─── Sprint 84 — public shareable chat links ──────────────────────────────
+def get_or_create_share_token(session_id):
+    """Return the session's public share token, minting one on first request."""
+    _ensure_chat_user_column()
+    conn = pget()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT share_token FROM chat_sessions WHERE id = %s", (session_id,))
+        row = cur.fetchone()
+        if not row:
+            cur.close()
+            return None
+        if row[0]:
+            cur.close()
+            return row[0]
+        import secrets
+        token = secrets.token_urlsafe(12)
+        cur.execute("UPDATE chat_sessions SET share_token = %s WHERE id = %s", (token, session_id))
+        conn.commit(); cur.close()
+        return token
+    except Exception:
+        try: conn.rollback()
+        except Exception: pass
+        raise
+    finally:
+        pput(conn)
+
+
+def revoke_share_token(session_id):
+    conn = pget()
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE chat_sessions SET share_token = NULL WHERE id = %s", (session_id,))
+        conn.commit(); cur.close()
+    except Exception:
+        try: conn.rollback()
+        except Exception: pass
+        raise
+    finally:
+        pput(conn)
+
+
+def get_shared_transcript(token):
+    """Public read-only transcript for a share token. Returns
+    {title, kind, messages:[...]} or None if the token is unknown/revoked."""
+    if not token:
+        return None
+    _ensure_chat_user_column()
+    conn = pget()
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT id, title, kind FROM chat_sessions WHERE share_token = %s", (token,))
+        sess = cur.fetchone()
+        if not sess:
+            cur.close()
+            return None
+        cur.execute("""SELECT role, content, ui_type, ui_data, created_at
+                       FROM chat_messages WHERE session_id = %s ORDER BY created_at ASC""",
+                    (sess["id"],))
+        msgs = cur.fetchall()
+        cur.close()
+        return {"title": sess.get("title") or "Shared chat",
+                "kind": sess.get("kind") or "chat", "messages": msgs}
+    finally:
+        pput(conn)
+
 def save_invoice(data):
     conn = get_conn()
     cursor = conn.cursor()
