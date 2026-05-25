@@ -431,7 +431,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v95</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v96</div>
         </div>
     </div>
 
@@ -2185,7 +2185,7 @@
             <div class="card" style="margin-top:24px;">
                 <h3 style="margin-bottom: 12px;">📦 About &amp; Updates</h3>
                 <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v95</strong></span>
+                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v96</strong></span>
                     <span id="settings-update-msg" style="font-size:0.82rem; color:#94a3b8;"></span>
                 </div>
                 <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
@@ -2385,7 +2385,7 @@
                     style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer; margin-bottom:10px;"></select>
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 6px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="exitToHome(); if(typeof closeMobileMenu==='function') closeMobileMenu();"><span>🏠</span> Home</div>
-            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v95</div>
+            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v96</div>
         </div>
     </div>
 
@@ -3168,13 +3168,18 @@
         function _anRender(d){
             const k = d.kpis || {};
             const cards = [
-                _anCard('Active users', _anFmt(k.active_users)),
+                // Acquisition (who signed up + what companies they added)
+                _anCard('Sign-ups', _anFmt(k.new_users), '= new workspaces'),
+                _anCard('Companies added', _anFmt(k.companies_added), `${_anFmt(k.companies_added_later)} added later`),
+                // Engagement
+                _anCard('Active users', _anFmt(k.active_users), 'had an AI call'),
+                _anCard('Active companies', _anFmt(k.active_companies), 'had an AI call'),
+                _anCard('Logins', _anFmt(k.logins), 'distinct users'),
                 _anCard('AI calls', _anFmt(k.ai_calls)),
                 _anCard('Tokens consumed', _anFmt(k.tokens_consumed), `billed ${_anFmt(k.tokens_billed)}`),
                 _anCard('Prompt / Output', _anFmt(k.prompt_tokens)+' / '+_anFmt(k.output_tokens)),
                 _anCard('Revenue ₹', _anFmt(k.revenue_inr), `${_anFmt(k.tokens_purchased)} tk bought`),
                 _anCard('Tokens granted', _anFmt(k.tokens_granted)),
-                _anCard('New workspaces', _anFmt(k.new_workspaces), `${_anFmt(k.new_users)} users`),
                 _anCard('Chats / Msgs', _anFmt(k.chats)+' / '+_anFmt(k.messages), `${_anFmt(k.tasks)} tasks`),
             ].join('');
             let html = `<div style="display:flex; gap:10px; flex-wrap:wrap;">${cards}</div>`;
@@ -3186,6 +3191,15 @@
                     return `<div title="${x.day}: ${_anFmt(x.tokens)} tokens · ${_anFmt(x.calls)} calls · ${_anFmt(x.users)} users" style="flex:1; min-width:3px; display:flex; flex-direction:column; justify-content:flex-end;"><div style="height:${h}px; background:linear-gradient(180deg,var(--primary-light),var(--primary)); border-radius:3px 3px 0 0;"></div></div>`;
                 }).join('');
                 html += _anSection('📈 Daily tokens', `<div style="display:flex; align-items:flex-end; gap:2px; height:110px; background:var(--bg-light); border:1px solid var(--border); border-radius:10px; padding:8px;">${bars}</div>`);
+            }
+            // Sprint 77 — daily activity: signups + companies added (acquisition) vs active users/companies + logins (engagement)
+            if (daily.length){
+                const rows = daily.slice().reverse().slice(0,150).map(x=>[
+                    x.day, _anFmt(x.signups),
+                    `${_anFmt(x.new_companies)}${x.companies_later ? ` (+${_anFmt(x.companies_later)} later)` : ''}`,
+                    _anFmt(x.active_users), _anFmt(x.active_companies), _anFmt(x.logins), _anFmt(x.tokens)]);
+                html += _anSection('📅 Daily activity', _anTable(
+                    ['Date','Sign-ups','New companies','Active users','Active companies','Logins','Tokens'], rows));
             }
             const bu = d.by_user || [];
             html += _anSection(`👤 By user (${bu.length})`, _anTable(

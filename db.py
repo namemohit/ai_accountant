@@ -1355,6 +1355,14 @@ def _ensure_billing_schema():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_token_ledger_org ON token_ledger(org_id, created_at DESC)")
+        # Sprint 77 — login events (reliable daily-active-by-login for the Data Analyst).
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_logins (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                username TEXT, user_id UUID, company_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_logins_day ON user_logins(created_at)")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS token_purchases (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1584,6 +1592,17 @@ def list_catalog(org_id=None, include_all=False):
         cur.close(); conn.close()
 
 
+def record_login(username, user_id=None, company_name=None):
+    """Sprint 77 — best-effort login event for daily-active-by-login analytics."""
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("INSERT INTO user_logins (username, user_id, company_name) VALUES (%s,%s,%s)",
+                    (username, user_id, company_name))
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f"[record_login] {e}", flush=True)
+
+
 def platform_analytics(from_date=None, to_date=None):
     """Sprint 76 — super-agent platform analytics across ALL workspaces/users for a
     date range. Returns KPIs, by-user / by-agent / by-model / by-action breakdowns,
@@ -1614,12 +1633,23 @@ def platform_analytics(from_date=None, to_date=None):
         pur = cur.fetchone()
         cur.execute("SELECT reason, COALESCE(SUM(delta),0) d FROM token_ledger WHERE created_at BETWEEN %s AND %s GROUP BY reason", rng)
         led = {r['reason']: int(r['d']) for r in cur.fetchall()}
+        # Sprint 77 — companies added (split signup-primary vs added-later) + active companies + logins.
+        cur.execute("""SELECT COUNT(*) total,
+            COALESCE(SUM(CASE WHEN COALESCE(is_primary,false)=false THEN 1 ELSE 0 END),0) later
+            FROM companies WHERE created_at BETWEEN %s AND %s""", rng)
+        cmp_k = cur.fetchone()
+        cur.execute("SELECT COUNT(DISTINCT company_name) c FROM ai_usage_log WHERE created_at BETWEEN %s AND %s", rng)
+        active_co = cur.fetchone()['c']
+        cur.execute("SELECT COUNT(DISTINCT username) c FROM user_logins WHERE created_at BETWEEN %s AND %s", rng)
+        logins_k = cur.fetchone()['c']
         out['kpis'] = {
-            'active_users': int(k['active_users'] or 0), 'ai_calls': int(k['calls'] or 0),
+            'active_users': int(k['active_users'] or 0), 'active_companies': int(active_co or 0),
+            'logins': int(logins_k or 0), 'ai_calls': int(k['calls'] or 0),
             'tokens_consumed': int(k['tokens'] or 0), 'tokens_billed': int(k['billed'] or 0),
             'prompt_tokens': int(k['p'] or 0), 'output_tokens': int(k['o'] or 0),
             'chats': int(chats or 0), 'messages': int(msgs or 0), 'tasks': int(tasks or 0),
-            'new_workspaces': int(new_ws or 0), 'new_users': int(new_users or 0),
+            'new_workspaces': int(new_ws or 0), 'new_users': int(new_users or 0),     # signups (= workspaces, 1:1)
+            'companies_added': int(cmp_k['total'] or 0), 'companies_added_later': int(cmp_k['later'] or 0),
             'tokens_purchased': int(pur['tk'] or 0), 'revenue_inr': float(pur['inr'] or 0),
             'tokens_granted': int(led.get('grant', 0) + led.get('admin_adjust', 0)),
         }
@@ -1677,11 +1707,37 @@ def platform_analytics(from_date=None, to_date=None):
             FROM ai_usage_log WHERE created_at BETWEEN %s AND %s GROUP BY 1 ORDER BY t DESC""", rng)
         out['by_action'] = [{'action': a['action'], 'calls': int(a['calls']), 'tokens': int(a['t'])} for a in cur.fetchall()]
 
-        # ---- daily trend ----
+        # ---- daily series: acquisition (signups + companies) AND engagement (active + logins) ----
         cur.execute("""SELECT to_char(created_at::date,'YYYY-MM-DD') d, COUNT(*) calls,
-              COALESCE(SUM(total_tokens),0) tokens, COUNT(DISTINCT user_id) users
-            FROM ai_usage_log WHERE created_at BETWEEN %s AND %s GROUP BY 1 ORDER BY 1""", rng)
-        out['daily'] = [{'day': r['d'], 'calls': int(r['calls']), 'tokens': int(r['tokens']), 'users': int(r['users'])} for r in cur.fetchall()]
+              COALESCE(SUM(total_tokens),0) tokens, COUNT(DISTINCT user_id) users,
+              COUNT(DISTINCT company_name) companies
+            FROM ai_usage_log WHERE created_at BETWEEN %s AND %s GROUP BY 1""", rng)
+        d_use = {r['d']: r for r in cur.fetchall()}
+        cur.execute("""SELECT to_char(created_at::date,'YYYY-MM-DD') d, COUNT(*) c
+            FROM accounting_users WHERE created_at BETWEEN %s AND %s GROUP BY 1""", rng)
+        d_sign = {r['d']: int(r['c']) for r in cur.fetchall()}
+        cur.execute("""SELECT to_char(created_at::date,'YYYY-MM-DD') d, COUNT(*) total,
+              COALESCE(SUM(CASE WHEN COALESCE(is_primary,false)=false THEN 1 ELSE 0 END),0) later
+            FROM companies WHERE created_at BETWEEN %s AND %s GROUP BY 1""", rng)
+        d_comp = {r['d']: r for r in cur.fetchall()}
+        cur.execute("""SELECT to_char(created_at::date,'YYYY-MM-DD') d, COUNT(DISTINCT username) c
+            FROM user_logins WHERE created_at BETWEEN %s AND %s GROUP BY 1""", rng)
+        d_login = {r['d']: int(r['c']) for r in cur.fetchall()}
+        daily = []
+        cd = _dt.date.fromisoformat(from_date); ed = _dt.date.fromisoformat(to_date)
+        while cd <= ed:
+            ds = cd.isoformat(); u = d_use.get(ds); cm = d_comp.get(ds)
+            daily.append({'day': ds,
+                'signups': d_sign.get(ds, 0),
+                'new_companies': int(cm['total']) if cm else 0,
+                'companies_later': int(cm['later']) if cm else 0,
+                'active_users': int(u['users']) if u else 0,
+                'active_companies': int(u['companies']) if u else 0,
+                'logins': d_login.get(ds, 0),
+                'calls': int(u['calls']) if u else 0,
+                'tokens': int(u['tokens']) if u else 0})
+            cd += _dt.timedelta(days=1)
+        out['daily'] = daily
 
         # ---- token economy ----
         cur.execute("SELECT COALESCE(SUM(token_balance),0) bal FROM organizations WHERE archived_at IS NULL")

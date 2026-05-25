@@ -5616,6 +5616,12 @@ async def api_login(credentials: dict):
         if user.get("password") != password:
             raise HTTPException(status_code=401, detail="Invalid username or password")
 
+    # Sprint 77 — record the login event for daily-active-by-login analytics (best-effort).
+    try:
+        db.record_login(username, user.get("users_id"), user.get("company_name"))
+    except Exception:
+        pass
+
     # Memberships (Phase-B org model) — present once the user is onboarded/backfilled.
     memberships = []
     try:
