@@ -431,7 +431,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v91</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v92</div>
         </div>
     </div>
 
@@ -1183,6 +1183,15 @@
                 <div class="feat-tile" onclick="_aiaccMaster('actionlog')"><div class="feat-ic">📋</div><div class="feat-name">Action Log</div></div>
                 <div class="feat-tile" onclick="if(typeof openVoucherChat==='function') openVoucherChat()"><div class="feat-ic">🧾</div><div class="feat-name">Create invoice</div></div>
                 <div class="feat-tile" onclick="_aiaccScan()"><div class="feat-ic">📷</div><div class="feat-name">Scan Voucher</div></div>
+                <!-- Sprint 73 — super_admin-only features (checkAuth hides these for non-SA). -->
+                <div class="feat-tile" data-role-gated="super_admin" onclick="showView('gstr-reco')"><div class="feat-ic">📊</div><div class="feat-name">GSTR Reco</div></div>
+                <div class="feat-tile" data-role-gated="super_admin" onclick="showView('gstr')"><div class="feat-ic">🧾</div><div class="feat-name">GST Filing</div></div>
+                <div class="feat-tile" data-role-gated="super_admin" onclick="showView('tds')"><div class="feat-ic">🧑‍💼</div><div class="feat-name">TDS Filing</div></div>
+                <div class="feat-tile" data-role-gated="super_admin" onclick="showView('itr')"><div class="feat-ic">📋</div><div class="feat-name">ITR Filing</div></div>
+                <div class="feat-tile" data-role-gated="super_admin" onclick="showView('audit')"><div class="feat-ic">🛡️</div><div class="feat-name">Audit &amp; Compliance</div></div>
+                <div class="feat-tile" data-role-gated="super_admin" onclick="showView('recon')"><div class="feat-ic">🔄</div><div class="feat-name">Reconciliation Studio</div></div>
+                <div class="feat-tile" data-role-gated="super_admin" onclick="showView('reports')"><div class="feat-ic">📈</div><div class="feat-name">Financial Reports</div></div>
+                <div class="feat-tile" data-role-gated="super_admin" onclick="showView('tasks')"><div class="feat-ic">🎯</div><div class="feat-name">YantrAI Tasks</div></div>
             </div>
         </div>
 
@@ -2156,7 +2165,7 @@
             <div class="card" style="margin-top:24px;">
                 <h3 style="margin-bottom: 12px;">📦 About &amp; Updates</h3>
                 <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v91</strong></span>
+                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v92</strong></span>
                     <span id="settings-update-msg" style="font-size:0.82rem; color:#94a3b8;"></span>
                 </div>
                 <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
@@ -2356,7 +2365,7 @@
                     style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer; margin-bottom:10px;"></select>
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 6px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="exitToHome(); if(typeof closeMobileMenu==='function') closeMobileMenu();"><span>🏠</span> Home</div>
-            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v91</div>
+            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v92</div>
         </div>
     </div>
 
@@ -3026,7 +3035,11 @@
         }
         // Sprint 69 — AI Accountant features that live ON its launcher (aiacc-home);
         // these are hidden from the in-agent tabs/drawer to avoid duplicating the launcher.
-        const _AIACC_LAUNCHER = new Set(['chat', 'vouchers', 'bank', 'schema']);
+        // Sprint 73 — every AI Accountant view (except its 'aiacc-home' launcher) is reached
+        // from a feature icon, so none of them appear as top-bar tabs. The SA-gated filing/recon
+        // views are added here too (they were leaking into the top bar for super_admin).
+        const _AIACC_LAUNCHER = new Set(['chat', 'vouchers', 'bank', 'schema',
+            'gstr-reco', 'recon', 'gstr', 'tds', 'itr', 'audit', 'reports', 'tasks']);
         function _renderNav() {
             const active = window.__activeAgent;
             const meta = active ? window.__agentBySlug[active] : null;
