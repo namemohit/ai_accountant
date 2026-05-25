@@ -431,7 +431,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v100</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v101</div>
         </div>
     </div>
 
@@ -2175,7 +2175,7 @@
             <div class="card" style="margin-top:24px;">
                 <h3 style="margin-bottom: 12px;">📦 About &amp; Updates</h3>
                 <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v100</strong></span>
+                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v101</strong></span>
                     <span id="settings-update-msg" style="font-size:0.82rem; color:#94a3b8;"></span>
                 </div>
                 <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
@@ -2375,7 +2375,7 @@
                     style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer; margin-bottom:10px;"></select>
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 6px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="exitToHome(); if(typeof closeMobileMenu==='function') closeMobileMenu();"><span>🏠</span> Home</div>
-            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v100</div>
+            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v101</div>
         </div>
     </div>
 
@@ -3391,11 +3391,13 @@
                 if (cnt) cnt.textContent = sess.length;
                 if (!list) return;
                 if (!sess.length) { list.innerHTML = '<div style="color:#64748b; font-size:0.8rem; padding:10px;">No tasks yet. Hit “+ New task”.</div>'; return; }
+                window.__ytSessionsMap = {};
                 list.innerHTML = sess.map(s => {
+                    window.__ytSessionsMap[s.id] = s;   // avoid quoting code/status into the onclick attr
                     const st = s.status || 'Draft';
                     const active = (s.id === window.__ytSession) ? ' active' : '';
                     const title = escapeHtml((s.title && s.title !== 'New task') ? s.title : 'Untitled task').slice(0,60);
-                    return `<div class="yt-session-item${active}" onclick="ytOpenTask('${s.id}', ${JSON.stringify(s.task_code||'')}, ${JSON.stringify(s.status||'')})"
+                    return `<div class="yt-session-item${active}" onclick="ytOpenTask('${s.id}')"
                         style="padding:9px 10px; border-radius:9px; cursor:pointer; display:flex; flex-direction:column; gap:4px;">
                         <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
                             <span style="font-size:0.7rem; font-family:monospace; color:#94a3b8;">${escapeHtml(s.task_code||'draft')}</span>
@@ -3406,8 +3408,10 @@
                 }).join('');
             } catch(e) { if (list) list.innerHTML = '<div style="color:#f87171; font-size:0.8rem; padding:10px;">Could not load tasks.</div>'; }
         }
-        async function ytOpenTask(id, code, status) {
+        async function ytOpenTask(id) {
             const u = _ytUser();
+            const s = (window.__ytSessionsMap || {})[id] || {};
+            const code = s.task_code;
             window.__ytSession = id;
             const t = document.getElementById('yt-thread'); if (t) t.innerHTML = '<div style="color:#64748b; padding:8px;">Loading…</div>';
             try {
