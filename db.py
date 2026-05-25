@@ -11,6 +11,34 @@ DB_URL = os.getenv("DB_URL", "postgresql://postgres.vxnflumpectzqdamjqsc:yantr_a
 def get_conn():
     return psycopg2.connect(DB_URL)
 
+# ── Sprint 83 — connection pool for hot paths (chat/tasks). A fresh cloud-Postgres
+# connection per call was the main latency source. pget()/pput() reuse warm
+# connections; only the converted hot functions use them (rest keep get_conn()). ──
+import psycopg2.pool as _pgpool
+_POOL = None
+def _pool():
+    global _POOL
+    if _POOL is None:
+        try:
+            _POOL = _pgpool.ThreadedConnectionPool(1, 16, DB_URL)
+        except Exception as e:
+            print(f"[pool init] {e}")
+            _POOL = False   # fall back to direct connections
+    return _POOL
+def pget():
+    p = _pool()
+    return p.getconn() if p else psycopg2.connect(DB_URL)
+def pput(conn, bad=False):
+    p = _pool()
+    if not p:
+        try: conn.close()
+        except Exception: pass
+        return
+    try: p.putconn(conn, close=bad)
+    except Exception:
+        try: conn.close()
+        except Exception: pass
+
 def init_db():
     conn = get_conn()
     cursor = conn.cursor()
@@ -2271,8 +2299,13 @@ def onboard_google_user(auth_uid, email, name=None):
 
 # ---- Chat Functions ----
 
+_CHAT_COLS_READY = False
 def _ensure_chat_user_column():
-    """Idempotent ALTER — add user_username column to chat_sessions if missing."""
+    """Idempotent ALTER — runs ONCE per process (Sprint 83: was running a fresh
+    connection + ALTERs on every chat call, a big latency source)."""
+    global _CHAT_COLS_READY
+    if _CHAT_COLS_READY:
+        return
     try:
         conn = get_conn()
         cursor = conn.cursor()
@@ -2283,62 +2316,70 @@ def _ensure_chat_user_column():
         conn.commit()
         cursor.close()
         conn.close()
+        _CHAT_COLS_READY = True
     except Exception as e:
         print(f"[_ensure_chat_user_column] {e}")
 
 
 def create_chat_session(title="New Chat", company_name=None, user_username=None, kind='chat'):
     _ensure_chat_user_column()
-    conn = get_conn()
-    cursor = conn.cursor()
-    session_id = str(uuid.uuid4())
-    cursor.execute("""
-    INSERT INTO chat_sessions (id, title, company_name, user_username, kind) VALUES (%s, %s, %s, %s, %s)
-    """, (session_id, title, company_name, user_username, kind))
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return session_id
+    conn = pget()
+    try:
+        cursor = conn.cursor()
+        session_id = str(uuid.uuid4())
+        cursor.execute("""
+        INSERT INTO chat_sessions (id, title, company_name, user_username, kind) VALUES (%s, %s, %s, %s, %s)
+        """, (session_id, title, company_name, user_username, kind))
+        conn.commit(); cursor.close()
+        return session_id
+    except Exception:
+        try: conn.rollback()
+        except Exception: pass
+        raise
+    finally:
+        pput(conn)
 
 
 def get_chat_sessions(company_name=None, user_username=None):
     """List chat sessions scoped to (company, user). Both filters apply when given.
     If user_username is None → super_admin / all (use cautiously)."""
     _ensure_chat_user_column()
-    conn = get_conn()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    query = """
-        SELECT s.*, COALESCE(m.msg_count, 0) as message_count
-        FROM chat_sessions s
-        LEFT JOIN (SELECT session_id, COUNT(*) as msg_count FROM chat_messages GROUP BY session_id) m
-        ON s.id = m.session_id
-    """
-    # Sprint 82 — keep Create-task sessions out of the Tally recent-chats list.
-    where = ["COALESCE(s.kind,'chat') <> 'yantrai_task'"]
-    params = []
-    if company_name:
-        where.append("s.company_name = %s")
-        params.append(company_name)
-    if user_username:
-        # Show sessions owned by this user only. Legacy sessions tagged
-        # '__legacy__' (Sprint 7 backfill) are hidden from regular users
-        # — they remain visible to super_admin who passes user_username=None.
-        where.append("s.user_username = %s")
-        params.append(user_username)
-    query += " WHERE " + " AND ".join(where)
-    query += " ORDER BY s.updated_at DESC"
-    cursor.execute(query, tuple(params))
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    return rows
+    conn = pget()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        query = """
+            SELECT s.*, COALESCE(m.msg_count, 0) as message_count
+            FROM chat_sessions s
+            LEFT JOIN (SELECT session_id, COUNT(*) as msg_count FROM chat_messages GROUP BY session_id) m
+            ON s.id = m.session_id
+        """
+        # Sprint 82 — keep Create-task sessions out of the Tally recent-chats list.
+        where = ["COALESCE(s.kind,'chat') <> 'yantrai_task'"]
+        params = []
+        if company_name:
+            where.append("s.company_name = %s")
+            params.append(company_name)
+        if user_username:
+            # Show sessions owned by this user only. Legacy sessions tagged
+            # '__legacy__' (Sprint 7 backfill) are hidden from regular users
+            # — they remain visible to super_admin who passes user_username=None.
+            where.append("s.user_username = %s")
+            params.append(user_username)
+        query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY s.updated_at DESC"
+        cursor.execute(query, tuple(params))
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+    finally:
+        pput(conn)
 
 
 def list_task_sessions(company_name=None, user_username=None):
     """Sprint 82 — Create-task sessions for the sidebar: each task = one chat session,
     with the linked task's status (NULL ⇒ 'Draft') for the progress badge."""
     _ensure_chat_user_column()
-    conn = get_conn()
+    conn = pget()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         where = ["COALESCE(s.kind,'chat') = 'yantrai_task'"]
@@ -2361,7 +2402,7 @@ def list_task_sessions(company_name=None, user_username=None):
         """, tuple(params))
         return cur.fetchall()
     finally:
-        cur.close(); conn.close()
+        cur.close(); pput(conn)
 
 
 def get_chat_sessions_multi(company_names, user_username=None):
@@ -2397,28 +2438,35 @@ def get_chat_sessions_multi(company_names, user_username=None):
 def get_chat_session_owner(session_id):
     """Return the user_username + company_name of a session, used for /chat/messages auth."""
     _ensure_chat_user_column()
-    conn = get_conn()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("SELECT user_username, company_name FROM chat_sessions WHERE id = %s", (session_id,))
-    row = cursor.fetchone()
-    cursor.close()
-    conn.close()
-    return row
+    conn = pget()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT user_username, company_name FROM chat_sessions WHERE id = %s", (session_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        return row
+    finally:
+        pput(conn)
 
 def save_chat_message(session_id, role, content, ui_type="text", ui_data=None):
-    conn = get_conn()
-    cursor = conn.cursor()
-    msg_id = str(uuid.uuid4())
-    cursor.execute("""
-    INSERT INTO chat_messages (id, session_id, role, content, ui_type, ui_data)
-    VALUES (%s, %s, %s, %s, %s, %s)
-    """, (msg_id, session_id, role, content, ui_type, json.dumps(ui_data) if ui_data else None))
-    # Update session timestamp
-    cursor.execute("UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = %s", (session_id,))
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return msg_id
+    conn = pget()
+    try:
+        cursor = conn.cursor()
+        msg_id = str(uuid.uuid4())
+        cursor.execute("""
+        INSERT INTO chat_messages (id, session_id, role, content, ui_type, ui_data)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """, (msg_id, session_id, role, content, ui_type, json.dumps(ui_data) if ui_data else None))
+        # Update session timestamp
+        cursor.execute("UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = %s", (session_id,))
+        conn.commit(); cursor.close()
+        return msg_id
+    except Exception:
+        try: conn.rollback()
+        except Exception: pass
+        raise
+    finally:
+        pput(conn)
 
 def update_chat_message_ui_data(message_id, ui_data):
     conn = get_conn()
@@ -2450,21 +2498,28 @@ def get_chat_message_by_id(message_id):
         conn.close()
 
 def update_chat_title(session_id, title):
-    conn = get_conn()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE chat_sessions SET title = %s WHERE id = %s", (title, session_id))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = pget()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE chat_sessions SET title = %s WHERE id = %s", (title, session_id))
+        conn.commit(); cursor.close()
+    except Exception:
+        try: conn.rollback()
+        except Exception: pass
+        raise
+    finally:
+        pput(conn)
 
 def get_chat_messages(session_id):
-    conn = get_conn()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("SELECT * FROM chat_messages WHERE session_id = %s ORDER BY created_at ASC", (session_id,))
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    return rows
+    conn = pget()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM chat_messages WHERE session_id = %s ORDER BY created_at ASC", (session_id,))
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+    finally:
+        pput(conn)
 
 def save_invoice(data):
     conn = get_conn()
@@ -6604,7 +6659,7 @@ def _next_task_code(cursor):
 def create_task(session_id, company_name, description, assigned_to='sadmin',
                 title=None, category=None, priority=None, created_by=None,
                 source=None, pd=None):
-    conn = get_conn()
+    conn = pget()
     cursor = conn.cursor()
     task_id = str(uuid.uuid4())
     task_code = None
@@ -6632,12 +6687,12 @@ def create_task(session_id, company_name, description, assigned_to='sadmin',
         print(f"Error creating task: {e}")
     finally:
         cursor.close()
-        conn.close()
+        pput(conn)
     return {"task_id": task_id, "task_code": task_code}
 
 def get_tasks_for_company(company_name):
     """Tasks raised by a given workspace — lets the requester track their own."""
-    conn = get_conn()
+    conn = pget()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cursor.execute("SELECT * FROM tasks WHERE company_name = %s ORDER BY created_at DESC",
@@ -6647,7 +6702,7 @@ def get_tasks_for_company(company_name):
         print(f"Error fetching company tasks: {e}")
         return []
     finally:
-        cursor.close(); conn.close()
+        cursor.close(); pput(conn)
 
 def get_tasks(company_name=None, role='admin'):
     conn = get_conn()
