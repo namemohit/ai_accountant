@@ -431,7 +431,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v93</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v94</div>
         </div>
     </div>
 
@@ -2165,7 +2165,7 @@
             <div class="card" style="margin-top:24px;">
                 <h3 style="margin-bottom: 12px;">📦 About &amp; Updates</h3>
                 <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v93</strong></span>
+                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v94</strong></span>
                     <span id="settings-update-msg" style="font-size:0.82rem; color:#94a3b8;"></span>
                 </div>
                 <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
@@ -2365,7 +2365,7 @@
                     style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer; margin-bottom:10px;"></select>
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 6px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="exitToHome(); if(typeof closeMobileMenu==='function') closeMobileMenu();"><span>🏠</span> Home</div>
-            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v93</div>
+            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v94</div>
         </div>
     </div>
 
@@ -3409,6 +3409,15 @@
             const status = isInstalled ? '<div class="connector-status connected">Installed</div>'
                           : (soon ? '<div class="connector-status" style="background:rgba(148,163,184,0.12); color:#94a3b8;">Soon</div>'
                                   : '<div class="connector-status available">Available</div>');
+            // Sprint 75 — super agent sees every agent; tag the ones normal users can't see.
+            let saTags = '';
+            if (window.__isSuperAdmin) {
+                const t = [];
+                if (a.status === 'archived') t.push('<span style="background:rgba(239,68,68,0.12); color:#f87171; padding:1px 7px; border-radius:10px;">🗄 archived</span>');
+                if ((a.visibility || 'public') !== 'public') t.push('<span style="background:rgba(168,85,247,0.12); color:#c084fc; padding:1px 7px; border-radius:10px;">🔒 private</span>');
+                if (a.owner_org_id) t.push('<span style="background:rgba(148,163,184,0.12); color:#94a3b8; padding:1px 7px; border-radius:10px;">3rd-party</span>');
+                if (t.length) saTags = `<div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; font-size:0.68rem;">${t.join('')}</div>`;
+            }
             return `<div class="connector-card" style="cursor:default;">
                 <div class="connector-card-header">
                     <div class="connector-icon" style="background:rgba(56,189,248,0.1); color:#38bdf8;">${escapeHtml(a.icon||'🤖')}</div>
@@ -3417,6 +3426,7 @@
                 <h4 class="connector-name">${escapeHtml(a.name||a.slug)}</h4>
                 <p class="connector-desc">${escapeHtml(a.tagline||a.description||'')}</p>
                 <div class="connector-meta"><span>${escapeHtml(a.category||'agent')}</span><span>${escapeHtml(a.publisher||'')}</span></div>
+                ${saTags}
                 ${btn}
             </div>`;
         }

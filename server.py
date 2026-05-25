@@ -6012,6 +6012,17 @@ def _caller_org_any(username, company_name=None):
     return None
 
 
+def _is_super_admin(username) -> bool:
+    """Non-raising check: is this username the platform super agent (super_admin)?"""
+    if not username:
+        return False
+    try:
+        u = db.get_user_by_username(username)
+        return bool(u and (u.get("role") if isinstance(u, dict) else None) == "super_admin")
+    except Exception:
+        return False
+
+
 def _serialize_agent(a):
     """JSON-safe agent row."""
     return {
@@ -6020,6 +6031,9 @@ def _serialize_agent(a):
         "category": a.get("category"), "status": a.get("status"),
         "publisher": a.get("publisher"), "token_policy": a.get("token_policy"),
         "manifest": a.get("manifest"),
+        # Sprint 75 — expose visibility/owner so the super-agent catalog can tag non-public/archived.
+        "visibility": a.get("visibility") or "public",
+        "owner_org_id": str(a.get("owner_org_id")) if a.get("owner_org_id") else None,
         "installed": bool(a.get("installed")) if "installed" in a else None,
     }
 
@@ -6027,10 +6041,13 @@ def _serialize_agent(a):
 @app.get("/api/agents/catalog")
 async def api_agents_catalog(username: str = None, company_name: str = None):
     """Full agent catalog; if the caller's workspace resolves, each row carries an
-    `installed` flag."""
+    `installed` flag. The super agent (super_admin) sees EVERY agent — all visibility,
+    all owners, archived included."""
     org_id = _caller_org_any(username, company_name)
-    rows = db.list_catalog(org_id)
+    is_sa = _is_super_admin(username)
+    rows = db.list_catalog(org_id, include_all=is_sa)
     return {"status": "success", "org_id": str(org_id) if org_id else None,
+            "is_super_admin": is_sa,
             "agents": [_serialize_agent(r) for r in rows]}
 
 
@@ -6064,7 +6081,10 @@ async def api_agents_install(payload: dict):
         raise HTTPException(status_code=400, detail="slug required")
     uid, _ = _resolve_caller(username)
     org_id = _owner_org(uid, payload.get("org_id"), allow=("owner", "manager"))
-    cat = {a["slug"]: a for a in db.list_catalog()}
+    # Sprint 75 — the super agent can install/open ANY agent (private/other-org/archived);
+    # everyone else is limited to the public, non-archived catalog.
+    is_sa = _is_super_admin(username)
+    cat = {a["slug"]: a for a in db.list_catalog(org_id=None, include_all=is_sa)}
     ag = cat.get(slug)
     if not ag:
         raise HTTPException(status_code=404, detail="Unknown agent.")

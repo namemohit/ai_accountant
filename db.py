@@ -1549,11 +1549,21 @@ def _seed_agents():
         print(f"[_seed_agents] {e}")
 
 
-def list_catalog(org_id=None):
-    """Full agent catalog. If org_id given, each row carries an `installed` flag."""
+def list_catalog(org_id=None, include_all=False):
+    """Full agent catalog. If org_id given, each row carries an `installed` flag.
+    include_all (super agent / super_admin): return EVERY agent — all visibility,
+    all owners, and archived too — so the platform operator sees the whole estate."""
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        if org_id:
+        if include_all:
+            # Super-agent god-view: no visibility/owner/archived filter at all.
+            cur.execute("""
+                SELECT a.*, (i.org_id IS NOT NULL AND i.enabled) AS installed
+                FROM store_agents a
+                LEFT JOIN org_agent_installs i ON i.agent_slug = a.slug AND i.org_id = %s
+                ORDER BY a.sort_order, a.name
+            """, (org_id,))
+        elif org_id:
             # public catalog + this org's own private apps; never archived.
             cur.execute("""
                 SELECT a.*, (i.org_id IS NOT NULL AND i.enabled) AS installed
