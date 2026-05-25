@@ -6094,6 +6094,14 @@ async def api_agents_install(payload: dict):
     return {"status": "success", "slug": slug, "org_id": str(org_id)}
 
 
+@app.get("/api/admin/analytics")
+async def api_admin_analytics(username: str = None, start: str = None, end: str = None):
+    """Sprint 76 — super-agent-only platform analytics (usage by user, tokens, etc.)."""
+    if not _is_super_admin(username):
+        raise HTTPException(status_code=403, detail="super_admin only")
+    return {"status": "success", "data": db.platform_analytics(start, end)}
+
+
 @app.post("/api/agents/uninstall")
 async def api_agents_uninstall(payload: dict):
     """Soft-uninstall (disable) an agent for the caller's workspace (owner/manager)."""

@@ -128,7 +128,7 @@
                         });
                         // Expose for runtime checks (showView guard, FAB menu).
                         window.__isSuperAdmin = isSuperAdmin;
-                        window.__RESTRICTED_VIEWS = new Set(['gstr-reco','gstr','tds','audit','recon','tasks','reports','itr']);
+                        window.__RESTRICTED_VIEWS = new Set(['gstr-reco','gstr','tds','audit','recon','tasks','reports','itr','analytics']);
                         // Make username available globally so the fetch wrapper can attach X-User.
                         window.__currentUsername = user.username || '';
 
@@ -431,7 +431,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v94</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v95</div>
         </div>
     </div>
 
@@ -1207,6 +1207,26 @@
             <div class="app-grid" id="home-app-grid">
                 <div style="color:#64748b; font-size:0.85rem;">Loading…</div>
             </div>
+        </div>
+
+        <!-- Sprint 76 — Data Analyst (super-agent-only platform analytics) -->
+        <div id="analytics-view" class="dashboard-view" style="display: none;">
+            <header>
+                <h1>📊 Data Analyst</h1>
+                <p style="color:#94a3b8;">Platform activity across every workspace & user — tokens, usage, revenue.</p>
+            </header>
+            <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:14px 0;">
+                <input type="date" id="an-from" style="padding:7px 10px; background:var(--bg-light); color:#fff; border:1px solid var(--border); border-radius:8px; font-size:0.82rem;">
+                <span style="color:#64748b;">→</span>
+                <input type="date" id="an-to" style="padding:7px 10px; background:var(--bg-light); color:#fff; border:1px solid var(--border); border-radius:8px; font-size:0.82rem;">
+                <button onclick="loadAnalytics()" style="padding:7px 14px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:8px; font-weight:600; font-size:0.82rem; cursor:pointer;">Apply</button>
+                <span style="width:1px; height:22px; background:var(--border);"></span>
+                <button onclick="_anPreset(0)" class="an-preset" style="padding:6px 11px; background:rgba(255,255,255,0.05); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; font-size:0.78rem; cursor:pointer;">Today</button>
+                <button onclick="_anPreset(7)" class="an-preset" style="padding:6px 11px; background:rgba(255,255,255,0.05); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; font-size:0.78rem; cursor:pointer;">7d</button>
+                <button onclick="_anPreset(30)" class="an-preset" style="padding:6px 11px; background:rgba(255,255,255,0.05); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; font-size:0.78rem; cursor:pointer;">30d</button>
+                <button onclick="_anPreset(365)" class="an-preset" style="padding:6px 11px; background:rgba(255,255,255,0.05); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; font-size:0.78rem; cursor:pointer;">1y</button>
+            </div>
+            <div id="an-body" style="color:#94a3b8; font-size:0.85rem;">Loading…</div>
         </div>
 
         <div id="store-view" class="dashboard-view" style="display: none;">
@@ -2165,7 +2185,7 @@
             <div class="card" style="margin-top:24px;">
                 <h3 style="margin-bottom: 12px;">📦 About &amp; Updates</h3>
                 <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v94</strong></span>
+                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v95</strong></span>
                     <span id="settings-update-msg" style="font-size:0.82rem; color:#94a3b8;"></span>
                 </div>
                 <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
@@ -2365,7 +2385,7 @@
                     style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer; margin-bottom:10px;"></select>
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 6px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="exitToHome(); if(typeof closeMobileMenu==='function') closeMobileMenu();"><span>🏠</span> Home</div>
-            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v94</div>
+            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v95</div>
         </div>
     </div>
 
@@ -2886,7 +2906,7 @@
         // ── Sprint 48b — Agentic store: TWO-LEVEL nav (Store home + agent menus) ──
         // Platform views are agent-agnostic and visible everywhere. Agent views
         // (chat, vouchers, …) show ONLY when their agent is the active one.
-        window.__PLATFORM_VIEWS = new Set(['home','store','uploads','yantrai-chat','training','whatsapp','users','settings']);
+        window.__PLATFORM_VIEWS = new Set(['home','store','uploads','yantrai-chat','training','whatsapp','users','settings','analytics']);
         // Fallback agent (used if the installed-agents fetch fails) = today's full set.
         const _AGENT1_VIEWS = ['aiacc-home','chat','vouchers','schema','bank','gstr-reco','recon',
                                'gstr','tds','itr','audit','reports','tasks'];
@@ -3085,7 +3105,8 @@
         // app's screens as tabs. On a platform view: ‹ Home + the view's title.
         const _PLATFORM_TITLES = { store:'🛍️ Store', uploads:'📎 Upload anything',
             'yantrai-chat':'🤝 Chat with YantrAI', settings:'⚙️ Settings',
-            training:'🧠 Connectors', whatsapp:'📱 WhatsApp Setup', users:'👥 User Manager' };
+            training:'🧠 Connectors', whatsapp:'📱 WhatsApp Setup', users:'👥 User Manager',
+            analytics:'📊 Data Analyst' };
         function _renderTopbar() {
             const left = document.getElementById('tb-left'); if (!left) return;
             // Sync company switcher + wallet from the (hidden) sidebar source of truth.
@@ -3120,6 +3141,91 @@
             left.innerHTML = html;
         }
 
+        // ── Sprint 76 — Data Analyst (super-agent platform analytics) ──
+        function _anFmt(n){ return (Number(n)||0).toLocaleString('en-IN'); }
+        function _anPreset(days){
+            const to = new Date(); const from = new Date();
+            if (days > 0) from.setDate(from.getDate() - (days - 1));   // inclusive; 0 = Today
+            const iso = d => d.toISOString().slice(0,10);
+            const f = document.getElementById('an-from'), t = document.getElementById('an-to');
+            if (f) f.value = iso(days > 0 ? from : to);
+            if (t) t.value = iso(to);
+            loadAnalytics();
+        }
+        function _anCard(label, val, sub){
+            return `<div style="background:var(--bg-light); border:1px solid var(--border); border-radius:10px; padding:12px 14px; min-width:128px;">
+                <div style="font-size:0.68rem; color:#94a3b8; text-transform:uppercase; letter-spacing:.4px;">${label}</div>
+                <div style="font-size:1.25rem; font-weight:700; color:#f5f1ec; margin-top:3px;">${val}</div>
+                ${sub ? `<div style="font-size:0.68rem; color:#64748b; margin-top:2px;">${sub}</div>` : ''}</div>`;
+        }
+        function _anTable(headers, rows){
+            const th = headers.map((h,i)=>`<th style="text-align:${i>1?'right':'left'}; padding:6px 10px; color:#94a3b8; font-size:0.7rem; text-transform:uppercase; border-bottom:1px solid var(--border);">${h}</th>`).join('');
+            const tr = rows.length ? rows.map(cells=>`<tr>${cells.map((c,i)=>`<td style="padding:6px 10px; font-size:0.82rem; color:#cbd5e1; border-bottom:1px solid rgba(255,255,255,0.04); ${i>1?'text-align:right; font-family:monospace;':''}">${c}</td>`).join('')}</tr>`).join('')
+                     : `<tr><td colspan="${headers.length}" style="padding:10px; color:#64748b; font-size:0.82rem;">No data in range.</td></tr>`;
+            return `<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse;"><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table></div>`;
+        }
+        function _anSection(title, inner){ return `<div style="margin-top:22px;"><h3 style="margin-bottom:10px; font-size:0.98rem;">${title}</h3>${inner}</div>`; }
+        function _anRender(d){
+            const k = d.kpis || {};
+            const cards = [
+                _anCard('Active users', _anFmt(k.active_users)),
+                _anCard('AI calls', _anFmt(k.ai_calls)),
+                _anCard('Tokens consumed', _anFmt(k.tokens_consumed), `billed ${_anFmt(k.tokens_billed)}`),
+                _anCard('Prompt / Output', _anFmt(k.prompt_tokens)+' / '+_anFmt(k.output_tokens)),
+                _anCard('Revenue ₹', _anFmt(k.revenue_inr), `${_anFmt(k.tokens_purchased)} tk bought`),
+                _anCard('Tokens granted', _anFmt(k.tokens_granted)),
+                _anCard('New workspaces', _anFmt(k.new_workspaces), `${_anFmt(k.new_users)} users`),
+                _anCard('Chats / Msgs', _anFmt(k.chats)+' / '+_anFmt(k.messages), `${_anFmt(k.tasks)} tasks`),
+            ].join('');
+            let html = `<div style="display:flex; gap:10px; flex-wrap:wrap;">${cards}</div>`;
+            const daily = d.daily || [];
+            if (daily.length){
+                const max = Math.max(1, ...daily.map(x=>x.tokens));
+                const bars = daily.map(x=>{
+                    const h = Math.round((x.tokens/max)*90)+2;
+                    return `<div title="${x.day}: ${_anFmt(x.tokens)} tokens · ${_anFmt(x.calls)} calls · ${_anFmt(x.users)} users" style="flex:1; min-width:3px; display:flex; flex-direction:column; justify-content:flex-end;"><div style="height:${h}px; background:linear-gradient(180deg,var(--primary-light),var(--primary)); border-radius:3px 3px 0 0;"></div></div>`;
+                }).join('');
+                html += _anSection('📈 Daily tokens', `<div style="display:flex; align-items:flex-end; gap:2px; height:110px; background:var(--bg-light); border:1px solid var(--border); border-radius:10px; padding:8px;">${bars}</div>`);
+            }
+            const bu = d.by_user || [];
+            html += _anSection(`👤 By user (${bu.length})`, _anTable(
+                ['User','Workspace','Calls','Tokens','Billed','Chats','Msgs','Last active'],
+                bu.slice(0,200).map(u=>[
+                    `${escapeHtml(u.username||'')}${u.role==='super_admin'?' ⭐':''}`, escapeHtml(u.workspace||''),
+                    _anFmt(u.calls), _anFmt(u.tokens), _anFmt(u.billed), _anFmt(u.chats), _anFmt(u.messages),
+                    (u.last_active||'').slice(0,10)])));
+            html += _anSection('🤖 By agent', _anTable(['Agent','Calls','Tokens','Users','Installs'],
+                (d.by_agent||[]).map(a=>[escapeHtml(a.name||a.slug), _anFmt(a.calls), _anFmt(a.tokens), _anFmt(a.users), _anFmt(a.installs)])));
+            html += _anSection('🧠 By model', _anTable(['Model','Calls','Prompt','Output','Total','Billed'],
+                (d.by_model||[]).map(m=>[escapeHtml(m.model), _anFmt(m.calls), _anFmt(m.prompt), _anFmt(m.output), _anFmt(m.total), _anFmt(m.billed)])));
+            html += _anSection('⚙️ By action', _anTable(['Action','Calls','Tokens'],
+                (d.by_action||[]).map(a=>[escapeHtml(a.action), _anFmt(a.calls), _anFmt(a.tokens)])));
+            const e = d.token_economy || {};
+            html += _anSection('⚡ Token economy', `<div style="display:flex; gap:10px; flex-wrap:wrap;">${[
+                _anCard('Granted', _anFmt(e.granted)), _anCard('Purchased', _anFmt(e.purchased)),
+                _anCard('Consumed', _anFmt(e.consumed)), _anCard('Balance · all workspaces', _anFmt(e.total_balance)),
+            ].join('')}</div>`);
+            const w = d.workspaces || {};
+            html += _anSection(`🏢 Workspaces (${_anFmt(w.active)}/${_anFmt(w.total)} active)`, _anTable(
+                ['Workspace','Tokens (range)','Calls','Balance'],
+                (w.list||[]).map(x=>[escapeHtml(x.name||''), _anFmt(x.tokens), _anFmt(x.calls), _anFmt(x.balance)])));
+            return html;
+        }
+        async function loadAnalytics(){
+            const body = document.getElementById('an-body'); if (!body) return;
+            const f = document.getElementById('an-from'), t = document.getElementById('an-to');
+            if (f && !f.value){ const to=new Date(), from=new Date(); from.setDate(from.getDate()-29);
+                const iso=d=>d.toISOString().slice(0,10); f.value=iso(from); t.value=iso(to); }
+            const u = (()=>{ try{ return JSON.parse(localStorage.getItem('currentUser')||'{}'); }catch(_){ return {}; } })();
+            body.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading…';
+            try {
+                const r = await fetch(`${API}/api/admin/analytics?username=${encodeURIComponent(u.username||'')}&start=${f.value}&end=${t.value}`);
+                const j = await r.json();
+                if (!r.ok) throw new Error((j && (j.detail||j.message)) || 'Failed to load analytics');
+                body.innerHTML = _anRender(j.data || {});
+            } catch(e){ body.innerHTML = `<div style="color:#f87171; font-size:0.85rem;">${escapeHtml(e.message||'Error')}</div>`; }
+        }
+
         // Sprint 56 — Home dashboard loader.
         async function loadHome() {
             const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
@@ -3143,6 +3249,7 @@
                 tiles.push(tile('🛍️', 'Store', 'Get more apps', "showView('store')"));
                 tiles.push(tile('📎', 'Upload anything', 'Files for this company', "showView('uploads')"));
                 tiles.push(tile('🤝', 'Chat with YantrAI', 'Raise a task', "showView('yantrai-chat')"));
+                if (window.__isSuperAdmin) tiles.push(tile('📊', 'Data Analyst', 'Platform usage & tokens', "showView('analytics')"));
                 tiles.push(tile('⚙️', 'Settings', 'Account, connectors & admin', "showView('settings')"));
                 window.__homeTiles = tiles;
                 _renderHomeGrid();
@@ -4195,6 +4302,10 @@
             // Sprint 55 — Upload anything view
             if (view === 'uploads') {
                 setTimeout(() => { if (typeof loadUploads === 'function') loadUploads(); }, 50);
+            }
+            // Sprint 76 — Data Analyst (super-agent platform analytics)
+            if (view === 'analytics') {
+                setTimeout(() => { if (typeof loadAnalytics === 'function') loadAnalytics(); }, 50);
             }
             
             if (!skipHashUpdate) {

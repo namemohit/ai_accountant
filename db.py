@@ -1584,6 +1584,133 @@ def list_catalog(org_id=None, include_all=False):
         cur.close(); conn.close()
 
 
+def platform_analytics(from_date=None, to_date=None):
+    """Sprint 76 — super-agent platform analytics across ALL workspaces/users for a
+    date range. Returns KPIs, by-user / by-agent / by-model / by-action breakdowns,
+    a daily trend, the token economy, and a per-workspace rollup."""
+    import datetime as _dt
+    today = _dt.date.today()
+    to_date = to_date or today.isoformat()
+    from_date = from_date or (today - _dt.timedelta(days=29)).isoformat()
+    lo, hi = from_date + ' 00:00:00', to_date + ' 23:59:59.999'
+    rng = (lo, hi)
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        out = {'from': from_date, 'to': to_date}
+
+        # ---- KPIs (ai_usage_log) ----
+        cur.execute("""SELECT COUNT(*) calls, COUNT(DISTINCT user_id) active_users,
+            COALESCE(SUM(total_tokens),0) tokens, COALESCE(SUM(tokens_charged),0) billed,
+            COALESCE(SUM(prompt_tokens),0) p, COALESCE(SUM(output_tokens),0) o
+          FROM ai_usage_log WHERE created_at BETWEEN %s AND %s""", rng)
+        k = cur.fetchone()
+        cur.execute("SELECT COUNT(*) c FROM chat_sessions WHERE created_at BETWEEN %s AND %s", rng); chats = cur.fetchone()['c']
+        cur.execute("SELECT COUNT(*) c FROM chat_messages WHERE created_at BETWEEN %s AND %s", rng); msgs = cur.fetchone()['c']
+        cur.execute("SELECT COUNT(*) c FROM tasks WHERE created_at BETWEEN %s AND %s", rng); tasks = cur.fetchone()['c']
+        cur.execute("SELECT COUNT(*) c FROM organizations WHERE created_at BETWEEN %s AND %s", rng); new_ws = cur.fetchone()['c']
+        cur.execute("SELECT COUNT(*) c FROM accounting_users WHERE created_at BETWEEN %s AND %s", rng); new_users = cur.fetchone()['c']
+        cur.execute("""SELECT COALESCE(SUM(tokens),0) tk, COALESCE(SUM(amount_inr),0) inr
+            FROM token_purchases WHERE status='paid' AND COALESCE(paid_at, created_at) BETWEEN %s AND %s""", rng)
+        pur = cur.fetchone()
+        cur.execute("SELECT reason, COALESCE(SUM(delta),0) d FROM token_ledger WHERE created_at BETWEEN %s AND %s GROUP BY reason", rng)
+        led = {r['reason']: int(r['d']) for r in cur.fetchall()}
+        out['kpis'] = {
+            'active_users': int(k['active_users'] or 0), 'ai_calls': int(k['calls'] or 0),
+            'tokens_consumed': int(k['tokens'] or 0), 'tokens_billed': int(k['billed'] or 0),
+            'prompt_tokens': int(k['p'] or 0), 'output_tokens': int(k['o'] or 0),
+            'chats': int(chats or 0), 'messages': int(msgs or 0), 'tasks': int(tasks or 0),
+            'new_workspaces': int(new_ws or 0), 'new_users': int(new_users or 0),
+            'tokens_purchased': int(pur['tk'] or 0), 'revenue_inr': float(pur['inr'] or 0),
+            'tokens_granted': int(led.get('grant', 0) + led.get('admin_adjust', 0)),
+        }
+
+        # ---- by user ----
+        cur.execute("""SELECT user_id, COUNT(*) calls, COALESCE(SUM(total_tokens),0) tokens,
+              COALESCE(SUM(tokens_charged),0) billed, MAX(created_at) last_active
+            FROM ai_usage_log WHERE created_at BETWEEN %s AND %s GROUP BY user_id""", rng)
+        usage_rows = cur.fetchall()
+        cur.execute("SELECT users_id, username, name, role, company_name FROM accounting_users WHERE users_id IS NOT NULL")
+        ident = {str(r['users_id']): r for r in cur.fetchall()}
+        cur.execute("""SELECT user_username un, COUNT(*) c FROM chat_sessions
+            WHERE created_at BETWEEN %s AND %s AND user_username IS NOT NULL GROUP BY user_username""", rng)
+        chats_by = {r['un']: int(r['c']) for r in cur.fetchall()}
+        cur.execute("""SELECT s.user_username un, COUNT(*) c FROM chat_messages m
+            JOIN chat_sessions s ON s.id=m.session_id
+            WHERE m.created_at BETWEEN %s AND %s AND s.user_username IS NOT NULL GROUP BY s.user_username""", rng)
+        msgs_by = {r['un']: int(r['c']) for r in cur.fetchall()}
+        by_user = []
+        for r in usage_rows:
+            uid = str(r['user_id']) if r['user_id'] else None
+            idn = ident.get(uid) if uid else None
+            uname = (idn['username'] if idn else None) or ('system' if not uid else uid[:8])
+            by_user.append({
+                'username': uname, 'name': (idn['name'] if idn else '') or '',
+                'role': (idn['role'] if idn else '') or '', 'workspace': (idn['company_name'] if idn else '') or '',
+                'calls': int(r['calls']), 'tokens': int(r['tokens']), 'billed': int(r['billed']),
+                'last_active': r['last_active'].isoformat() if r['last_active'] else None,
+                'chats': chats_by.get(uname, 0), 'messages': msgs_by.get(uname, 0),
+            })
+        by_user.sort(key=lambda x: x['tokens'], reverse=True)
+        out['by_user'] = by_user
+
+        # ---- by agent ----
+        cur.execute("""SELECT COALESCE(agent_slug,'ai-accountant') slug, COUNT(*) calls,
+              COALESCE(SUM(total_tokens),0) tokens, COUNT(DISTINCT user_id) users
+            FROM ai_usage_log WHERE created_at BETWEEN %s AND %s GROUP BY 1 ORDER BY tokens DESC""", rng)
+        agents = cur.fetchall()
+        cur.execute("SELECT slug, name FROM store_agents"); anames = {r['slug']: r['name'] for r in cur.fetchall()}
+        cur.execute("SELECT agent_slug, COUNT(*) c FROM org_agent_installs WHERE enabled GROUP BY 1")
+        installs = {r['agent_slug']: int(r['c']) for r in cur.fetchall()}
+        out['by_agent'] = [{'slug': a['slug'], 'name': anames.get(a['slug'], a['slug']),
+            'calls': int(a['calls']), 'tokens': int(a['tokens']), 'users': int(a['users']),
+            'installs': installs.get(a['slug'], 0)} for a in agents]
+
+        # ---- by model ----
+        cur.execute("""SELECT COALESCE(model,'?') model, COUNT(*) calls, COALESCE(SUM(prompt_tokens),0) p,
+              COALESCE(SUM(output_tokens),0) o, COALESCE(SUM(total_tokens),0) t, COALESCE(SUM(tokens_charged),0) billed
+            FROM ai_usage_log WHERE created_at BETWEEN %s AND %s GROUP BY 1 ORDER BY t DESC""", rng)
+        out['by_model'] = [{'model': m['model'], 'calls': int(m['calls']), 'prompt': int(m['p']),
+            'output': int(m['o']), 'total': int(m['t']), 'billed': int(m['billed'])} for m in cur.fetchall()]
+
+        # ---- by action ----
+        cur.execute("""SELECT COALESCE(action,'?') action, COUNT(*) calls, COALESCE(SUM(total_tokens),0) t
+            FROM ai_usage_log WHERE created_at BETWEEN %s AND %s GROUP BY 1 ORDER BY t DESC""", rng)
+        out['by_action'] = [{'action': a['action'], 'calls': int(a['calls']), 'tokens': int(a['t'])} for a in cur.fetchall()]
+
+        # ---- daily trend ----
+        cur.execute("""SELECT to_char(created_at::date,'YYYY-MM-DD') d, COUNT(*) calls,
+              COALESCE(SUM(total_tokens),0) tokens, COUNT(DISTINCT user_id) users
+            FROM ai_usage_log WHERE created_at BETWEEN %s AND %s GROUP BY 1 ORDER BY 1""", rng)
+        out['daily'] = [{'day': r['d'], 'calls': int(r['calls']), 'tokens': int(r['tokens']), 'users': int(r['users'])} for r in cur.fetchall()]
+
+        # ---- token economy ----
+        cur.execute("SELECT COALESCE(SUM(token_balance),0) bal FROM organizations WHERE archived_at IS NULL")
+        total_balance = int(cur.fetchone()['bal'] or 0)
+        out['token_economy'] = {
+            'granted': int(led.get('grant', 0) + led.get('admin_adjust', 0)),
+            'purchased': int(led.get('recharge', 0)),
+            'consumed': -int(led.get('ai_usage', 0)),   # ai_usage deltas are negative
+            'total_balance': total_balance,
+        }
+
+        # ---- workspaces ----
+        cur.execute("SELECT COUNT(*) c FROM organizations WHERE archived_at IS NULL"); ws_total = int(cur.fetchone()['c'] or 0)
+        cur.execute("""SELECT o.name, o.token_balance,
+              COALESCE(SUM(u.total_tokens),0) tokens, COUNT(u.id) calls
+            FROM organizations o
+            LEFT JOIN ai_usage_log u ON u.org_id=o.id AND u.created_at BETWEEN %s AND %s
+            WHERE o.archived_at IS NULL
+            GROUP BY o.id, o.name, o.token_balance ORDER BY tokens DESC""", rng)
+        wrows = cur.fetchall()
+        ws_active = sum(1 for r in wrows if int(r['tokens'] or 0) > 0 or int(r['calls'] or 0) > 0)
+        out['workspaces'] = {'total': ws_total, 'active': ws_active,
+            'list': [{'name': r['name'], 'balance': int(r['token_balance'] or 0),
+                      'tokens': int(r['tokens'] or 0), 'calls': int(r['calls'] or 0)} for r in wrows[:50]]}
+        return out
+    finally:
+        cur.close(); conn.close()
+
+
 def org_has_install_history(org_id):
     """True if the org has EVER had an install row (enabled or disabled). Lets the
     API distinguish 'pre-backfill, never installed' from 'deliberately removed all'."""
