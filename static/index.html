@@ -363,7 +363,7 @@
             <div class="nav-item" data-view="store" data-platform="1" onclick="showView('store')"><span>🛍️</span> Store</div>
             <div class="nav-item" data-view="uploads" data-platform="1" onclick="showView('uploads')"><span>📎</span> Upload anything</div>
             <div class="nav-item" data-view="yantrai-chat" data-platform="1" onclick="showView('yantrai-chat')"><span>📝</span> Create task</div>
-            <div class="nav-item" data-view="leadgen" data-platform="1" onclick="showView('leadgen')"><span>🎯</span> Lead Gen</div>
+            <div class="nav-item" data-view="leadgen" onclick="showView('leadgen')"><span>🎯</span> Lead Gen</div>
 
             <div class="nav-item active" data-view="chat" onclick="showView('chat')"><span>💬</span> Chat with Tally</div>
 
@@ -2381,7 +2381,7 @@
             <div class="mobile-drawer-item" data-view="store" data-platform="1" onclick="mobileNav('store')"><span>🛍️</span> Store</div>
             <div class="mobile-drawer-item" data-view="uploads" data-platform="1" onclick="mobileNav('uploads')"><span>📎</span> Upload anything</div>
             <div class="mobile-drawer-item" data-view="yantrai-chat" data-platform="1" onclick="mobileNav('yantrai-chat')"><span>📝</span> Create task</div>
-            <div class="mobile-drawer-item" data-view="leadgen" data-platform="1" onclick="mobileNav('leadgen')"><span>🎯</span> Lead Gen</div>
+            <div class="mobile-drawer-item" data-view="leadgen" onclick="mobileNav('leadgen')"><span>🎯</span> Lead Gen</div>
             <div class="mobile-drawer-item active" data-view="chat" onclick="mobileNav('chat')"><span>💬</span> Chat with Tally</div>
 
             <div class="mobile-drawer-item" data-view="vouchers" onclick="mobileNav('vouchers')"><span>📑</span> Vouchers</div>
@@ -2928,7 +2928,7 @@
         // ── Sprint 48b — Agentic store: TWO-LEVEL nav (Store home + agent menus) ──
         // Platform views are agent-agnostic and visible everywhere. Agent views
         // (chat, vouchers, …) show ONLY when their agent is the active one.
-        window.__PLATFORM_VIEWS = new Set(['home','store','uploads','yantrai-chat','leadgen','training','whatsapp','users','settings','analytics']);
+        window.__PLATFORM_VIEWS = new Set(['home','store','uploads','yantrai-chat','training','whatsapp','users','settings','analytics']);
         // Fallback agent (used if the installed-agents fetch fails) = today's full set.
         const _AGENT1_VIEWS = ['aiacc-home','chat','vouchers','schema','bank','gstr-reco','recon',
                                'gstr','tds','itr','audit','reports','tasks'];

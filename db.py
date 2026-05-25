@@ -1659,6 +1659,18 @@ AGENT_SEED = [
                     "GST/TDS/ITR filing, masters and audit — all powered by AI and synced to Tally.",
      "icon": "🧮", "category": "accounting", "status": "published", "publisher": "first-party",
      "token_policy": {"chargeable": True}, "manifest": AI_ACCOUNTANT_MANIFEST, "sort_order": 10},
+    {"slug": "lead-gen", "name": "Lead Gen",
+     "tagline": "Describe your ideal customer — get real, scored leads.",
+     "description": "Tell it who you want to reach and it finds real businesses (name, "
+                    "phone, website), scores each for fit, and lets you export to CSV or "
+                    "track status. Works for any field; data comes from real sources.",
+     "icon": "🎯", "category": "sales", "status": "published", "publisher": "first-party",
+     "token_policy": {"chargeable": True},
+     "manifest": {"version": 1, "agent_kind": "inapp",
+                  "api_prefixes": ["/api/leads"],
+                  "nav_groups": [{"label": "Lead Gen", "items": [
+                      {"view": "leadgen", "label": "Lead Gen", "icon": "🎯"}]}]},
+     "sort_order": 15},
     {"slug": "payroll", "name": "Payroll",
      "tagline": "Salaries, PF/ESI & payslips — coming soon.",
      "description": "Run payroll: salary structures, statutory deductions (PF/ESI/PT), "
