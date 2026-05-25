@@ -14,7 +14,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
-    <link rel="stylesheet" href="/static/style.css?v=90">
+    <link rel="stylesheet" href="/static/style.css?v=99">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;800&display=swap" rel="stylesheet">
     <!-- Sprint 72 — load FontAwesome non-render-blocking (swap media to 'all' onload). -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" media="print" onload="this.media='all'">
@@ -431,7 +431,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v98</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v99</div>
         </div>
     </div>
 
@@ -1337,26 +1337,29 @@
         <div id="yantrai-chat-view" class="dashboard-view" style="display: none;">
             <header>
                 <h1>📝 Create task</h1>
-                <p style="color:#94a3b8;">Describe any task you want the YantrAI team to deliver. We'll shape it into a clear brief together, then raise it with a tracking ID.</p>
+                <p style="color:#94a3b8;">Tell us what you need — each task becomes a trackable chat on the left. Edit the AI's brief, then Submit and watch its status.</p>
             </header>
-            <!-- Sprint 80 — single-column chat (like Chat with Tally) + My-tasks toggle -->
-            <div style="display:flex; align-items:center; gap:10px; margin:6px 0 12px;">
-                <button onclick="_ytToggleTasks()" style="display:inline-flex; align-items:center; gap:7px; background:rgba(255,255,255,0.05); border:1px solid var(--border); color:#cbd5e1; border-radius:10px; padding:7px 13px; font-size:0.82rem; font-weight:600; cursor:pointer;">📋 My tasks <span id="yt-tasks-count" style="background:var(--primary); color:#fff; border-radius:10px; padding:0 7px; font-size:0.72rem;">0</span></button>
+            <!-- Sprint 82 — Tally-style 2-pane: task list (each task = a chat) + conversation -->
+            <div style="display:flex; align-items:center; gap:10px; margin:6px 0 10px;">
+                <button id="yt-tasks-toggle" onclick="_ytToggleSidebar()" style="display:none; align-items:center; gap:7px; background:rgba(255,255,255,0.05); border:1px solid var(--border); color:#cbd5e1; border-radius:10px; padding:7px 13px; font-size:0.82rem; font-weight:600; cursor:pointer;">📋 Tasks <span id="yt-tasks-count" style="background:var(--primary); color:#fff; border-radius:10px; padding:0 7px; font-size:0.72rem;">0</span></button>
             </div>
-            <div id="yt-mytasks-panel" class="card" style="display:none; margin:0 0 12px;">
-                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
-                    <h3 style="margin:0; font-size:0.95rem;">🎫 Your tasks</h3>
-                    <button onclick="loadMyYantraiTasks()" style="background:none; border:1px solid var(--border); color:#94a3b8; border-radius:8px; padding:4px 10px; font-size:0.75rem; cursor:pointer;">Refresh</button>
+            <div id="yt-pane" style="display:flex; gap:14px; align-items:stretch; height:calc(100vh - 230px);">
+                <!-- task list sidebar -->
+                <div id="yt-sidebar" style="width:240px; flex-shrink:0; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:14px; overflow:hidden; background:var(--card-bg);">
+                    <div style="padding:10px; border-bottom:1px solid var(--border);">
+                        <button onclick="ytNewTask()" style="width:100%; padding:9px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:9px; font-weight:600; font-size:0.85rem; cursor:pointer;">+ New task</button>
+                    </div>
+                    <div id="yt-session-list" style="flex:1; overflow-y:auto; padding:8px; display:flex; flex-direction:column; gap:4px;"></div>
                 </div>
-                <div id="yt-my-tasks" style="font-size:0.82rem; color:#94a3b8;">Loading…</div>
-            </div>
-            <div style="display:flex; flex-direction:column; height:calc(100vh - 250px); border:1px solid var(--border); border-radius:14px; overflow:hidden; background:var(--card-bg);">
-                <div id="yt-thread" style="flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:12px;"></div>
-                <div style="border-top:1px solid var(--border); padding:12px; display:flex; gap:8px;">
-                    <textarea id="yt-input" rows="1" placeholder="Describe your task in a line or two…  (e.g. 'GST report export is slow')"
-                              onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();yantraiSend();}"
-                              style="flex:1; resize:none; max-height:120px; padding:10px 12px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:10px; font-size:0.9rem;"></textarea>
-                    <button id="yt-send" onclick="yantraiSend()" style="padding:0 18px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:10px; font-weight:600; cursor:pointer;">Send</button>
+                <!-- conversation -->
+                <div style="flex:1; min-width:0; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:14px; overflow:hidden; background:var(--card-bg);">
+                    <div id="yt-thread" style="flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:12px;"></div>
+                    <div style="border-top:1px solid var(--border); padding:12px; display:flex; gap:8px;">
+                        <textarea id="yt-input" rows="1" placeholder="Describe your task in a line or two…  (e.g. 'GST report export is slow')"
+                                  onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();yantraiSend();}"
+                                  style="flex:1; resize:none; max-height:120px; padding:10px 12px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:10px; font-size:0.9rem;"></textarea>
+                        <button id="yt-send" onclick="yantraiSend()" style="padding:0 18px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:10px; font-weight:600; cursor:pointer;">Send</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -2172,7 +2175,7 @@
             <div class="card" style="margin-top:24px;">
                 <h3 style="margin-bottom: 12px;">📦 About &amp; Updates</h3>
                 <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v98</strong></span>
+                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v99</strong></span>
                     <span id="settings-update-msg" style="font-size:0.82rem; color:#94a3b8;"></span>
                 </div>
                 <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
@@ -2372,7 +2375,7 @@
                     style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer; margin-bottom:10px;"></select>
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 6px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="exitToHome(); if(typeof closeMobileMenu==='function') closeMobileMenu();"><span>🏠</span> Home</div>
-            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v98</div>
+            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v99</div>
         </div>
     </div>
 
@@ -3360,17 +3363,102 @@
         const _YT_CATS = ['Accounting','Compliance','Data','Integration','Reporting','Other'];
         const _YT_PRIOS = ['Low','Normal','High','Urgent'];
         function _ytUser() { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } }
+        window.__ytSession = null;   // current task's chat-session id
+        const _YT_GREETING = "Hi! I'm YantrAI. Describe what you need in a line or two — I'll draft a complete brief you can tweak, then raise it as a trackable task on the left.";
+        function _ytStColor(s){ return ({ 'Requested':'#fbbf24','Acknowledged':'#8b5cf6','In Progress':'#3b82f6','Delivered':'#06b6d4','Completed':'#10b981' }[s]) || (s ? '#94a3b8' : '#64748b'); }
         function loadYantraiChat() {
-            if (!window.__ytMessages.length) {
-                window.__ytMessages = [{ role:'assistant', content:"Hi! I'm YantrAI. Describe what you need in a line or two — I'll draft a complete brief you can tweak, then raise it with one click and track it under My tasks." }];
+            ytNewTask();
+            loadTaskSessions();
+        }
+        function ytNewTask() {
+            window.__ytSession = null;
+            window.__ytMessages = [{ role:'assistant', content: _YT_GREETING }];
+            _renderYantraiThread();
+            document.querySelectorAll('#yt-session-list .yt-session-item').forEach(el => el.classList.remove('active'));
+            const inp = document.getElementById('yt-input'); if (inp) inp.focus();
+        }
+        function _ytToggleSidebar() {
+            const sb = document.getElementById('yt-sidebar'); if (sb) sb.classList.toggle('yt-show');
+        }
+        async function loadTaskSessions() {
+            const list = document.getElementById('yt-session-list');
+            const cnt = document.getElementById('yt-tasks-count');
+            const u = _ytUser();
+            try {
+                const r = await fetch(`${API}/api/yantrai/sessions?company_name=${encodeURIComponent(u.company_name||'')}&username=${encodeURIComponent(u.username||'')}`);
+                const d = await r.json();
+                const sess = (d && d.sessions) || [];
+                if (cnt) cnt.textContent = sess.length;
+                if (!list) return;
+                if (!sess.length) { list.innerHTML = '<div style="color:#64748b; font-size:0.8rem; padding:10px;">No tasks yet. Hit “+ New task”.</div>'; return; }
+                list.innerHTML = sess.map(s => {
+                    const st = s.status || 'Draft';
+                    const active = (s.id === window.__ytSession) ? ' active' : '';
+                    const title = escapeHtml((s.title && s.title !== 'New task') ? s.title : 'Untitled task').slice(0,60);
+                    return `<div class="yt-session-item${active}" onclick="ytOpenTask('${s.id}', ${JSON.stringify(s.task_code||'')}, ${JSON.stringify(s.status||'')})"
+                        style="padding:9px 10px; border-radius:9px; cursor:pointer; display:flex; flex-direction:column; gap:4px;">
+                        <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
+                            <span style="font-size:0.7rem; font-family:monospace; color:#94a3b8;">${escapeHtml(s.task_code||'draft')}</span>
+                            <span style="font-size:0.62rem; padding:1px 7px; border-radius:9px; background:${_ytStColor(s.status)}22; color:${_ytStColor(s.status)};">${escapeHtml(st)}</span>
+                        </div>
+                        <div style="font-size:0.82rem; color:#e2e8f0; line-height:1.25;">${title}</div>
+                    </div>`;
+                }).join('');
+            } catch(e) { if (list) list.innerHTML = '<div style="color:#f87171; font-size:0.8rem; padding:10px;">Could not load tasks.</div>'; }
+        }
+        async function ytOpenTask(id, code, status) {
+            const u = _ytUser();
+            window.__ytSession = id;
+            const t = document.getElementById('yt-thread'); if (t) t.innerHTML = '<div style="color:#64748b; padding:8px;">Loading…</div>';
+            try {
+                const r = await fetch(`${API}/api/yantrai/session/${id}?username=${encodeURIComponent(u.username||'')}`);
+                const d = await r.json();
+                const msgs = (d && d.messages) || [];
+                window.__ytMessages = msgs.map(m => {
+                    if (m.ui_type === 'pdcard') {
+                        const ud = m.ui_data || {};
+                        return { role:'pdcard', pd: ud.pd || {}, locked:false };
+                    }
+                    return { role: m.role, content: m.content || '' };
+                });
+                if (!window.__ytMessages.length) window.__ytMessages = [{ role:'assistant', content:_YT_GREETING }];
+                // Submitted task → lock every PD card read-only and stamp the code on the last one.
+                if (code) {
+                    let last = -1;
+                    window.__ytMessages.forEach((m,i)=>{ if(m.role==='pdcard'){ m.locked=true; last=i; } });
+                    if (last>=0) window.__ytMessages[last].code = code;
+                }
+                _renderYantraiThread();
+            } catch(e) {
+                window.__ytMessages = [{ role:'assistant', content:'Could not open this task.' }];
                 _renderYantraiThread();
             }
-            loadMyYantraiTasks();
+            loadTaskSessions();   // refresh active highlight
+            const sb = document.getElementById('yt-sidebar'); if (sb) sb.classList.remove('yt-show');
         }
-        function _ytToggleTasks() {
-            const p = document.getElementById('yt-mytasks-panel'); if (!p) return;
-            p.style.display = (p.style.display === 'none' || !p.style.display) ? 'block' : 'none';
-            if (p.style.display === 'block') loadMyYantraiTasks();
+        async function _ytEnsureSession() {
+            if (window.__ytSession) return window.__ytSession;
+            const u = _ytUser();
+            try {
+                const r = await fetch(`${API}/api/yantrai/session/new`, { method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({ company_name: u.company_name||'', username: u.username||'' }) });
+                const d = await r.json(); window.__ytSession = d.session_id;
+            } catch(_) {}
+            return window.__ytSession;
+        }
+        async function _ytSaveMsg(role, content, ui_type, ui_data) {
+            if (!window.__ytSession) return;
+            try {
+                await fetch(`${API}/api/yantrai/session/${window.__ytSession}/message`, {
+                    method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({ role, content, ui_type: ui_type||'text', ui_data: ui_data||null })
+                });
+            } catch(_) {}
+        }
+        async function _ytSetTitle(title) {
+            if (!window.__ytSession || !title) return;
+            try { await fetch(`${API}/chat/update-title`, { method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({ session_id: window.__ytSession, title }) }); } catch(_) {}
         }
         function _ytBubble(role, content) {
             const me = role === 'user';
@@ -3451,14 +3539,25 @@
             const input = document.getElementById('yt-input');
             const txt = (input.value || '').trim(); if (!txt) return;
             input.value = '';
+            await _ytEnsureSession();
             window.__ytMessages.push({ role:'user', content: txt });
             _renderYantraiThread(); _ytTyping(true);
+            _ytSaveMsg('user', txt);
+            const firstDraft = !window.__ytMessages.some(m => m.role === 'pdcard');
             try {
                 const d = await _ytCallPD(_ytApiMsgs());
                 _ytTyping(false);
-                window.__ytMessages.push({ role:'assistant', content: d.reply || 'Here\'s a draft — tweak any field, then Refine or Submit.' });
-                if (d.pd) { _ytLockCards(); window.__ytMessages.push({ role:'pdcard', pd:d.pd, ready:!!d.ready, locked:false }); }
+                const reply = d.reply || "Here's a draft — tweak any field, then Refine or Submit.";
+                window.__ytMessages.push({ role:'assistant', content: reply });
+                _ytSaveMsg('assistant', reply);
+                if (d.pd) {
+                    _ytLockCards();
+                    window.__ytMessages.push({ role:'pdcard', pd:d.pd, ready:!!d.ready, locked:false });
+                    _ytSaveMsg('assistant', d.pd.title || 'Problem Document', 'pdcard', { pd: d.pd });
+                    if (firstDraft && d.pd.title) { await _ytSetTitle(d.pd.title); }
+                }
                 _renderYantraiThread();
+                loadTaskSessions();
             } catch(e) {
                 _ytTyping(false);
                 window.__ytMessages.push({ role:'assistant', content: "Sorry — I couldn't process that. Please try again." });
@@ -3470,20 +3569,25 @@
             window.__ytMessages[idx].pd = edited; window.__ytMessages[idx].locked = true;
             window.__ytMessages.push({ role:'user', content:'✏️ Edited the brief — please polish it.' });
             _renderYantraiThread(); _ytTyping(true);
+            _ytSaveMsg('user', '✏️ Edited the brief — please polish it.');
             try {
                 const apiMsgs = _ytApiMsgs();
                 apiMsgs.push({ role:'user', content:'Here is my edited Problem Document as JSON. Polish and fill gaps but keep my edits:\n' + JSON.stringify(edited) });
                 const d = await _ytCallPD(apiMsgs);
                 _ytTyping(false);
-                window.__ytMessages.push({ role:'assistant', content: d.reply || 'Polished — review and Submit when ready.' });
+                const reply = d.reply || 'Polished — review and Submit when ready.';
+                const pd = d.pd || edited;
+                window.__ytMessages.push({ role:'assistant', content: reply });
+                _ytSaveMsg('assistant', reply);
                 _ytLockCards();
-                window.__ytMessages.push({ role:'pdcard', pd: d.pd || edited, ready:true, locked:false });
+                window.__ytMessages.push({ role:'pdcard', pd, ready:true, locked:false });
+                _ytSaveMsg('assistant', pd.title || 'Problem Document', 'pdcard', { pd });
                 _renderYantraiThread();
             } catch(e) {
                 _ytTyping(false);
                 window.__ytMessages.push({ role:'assistant', content:"Couldn't refine just now — you can still Submit your edited brief." });
-                // restore an editable card with the user's edits
                 window.__ytMessages.push({ role:'pdcard', pd: edited, ready:true, locked:false });
+                _ytSaveMsg('assistant', edited.title || 'Problem Document', 'pdcard', { pd: edited });
                 _renderYantraiThread();
             }
         }
@@ -3491,43 +3595,24 @@
             const edited = _ytGather(idx);
             if (!edited.title) { showChatToast && showChatToast('Add a title before submitting.', 'warn'); return; }
             window.__ytMessages[idx].pd = edited;
+            await _ytEnsureSession();
             const u = _ytUser();
             try {
                 const r = await fetch(`${API}/api/yantrai/pd/submit`, {
                     method:'POST', headers:{'Content-Type':'application/json'},
-                    body: JSON.stringify({ pd: edited, company_name: u.company_name||'', username: u.username||'' })
+                    body: JSON.stringify({ pd: edited, company_name: u.company_name||'', username: u.username||'', session_id: window.__ytSession })
                 });
                 const d = await r.json();
                 if (d.status !== 'success') throw new Error('failed');
                 window.__ytMessages[idx].locked = true; window.__ytMessages[idx].code = d.task_code;
-                window.__ytMessages.push({ role:'assistant', content: `✅ Raised! Your task is ${d.task_code}. The YantrAI team will pick it up — track status under 📋 My tasks.` });
+                const msg = `✅ Raised! Your task is ${d.task_code}. The YantrAI team will pick it up — watch its status on the left.`;
+                window.__ytMessages.push({ role:'assistant', content: msg });
+                _ytSaveMsg('assistant', msg);
                 _renderYantraiThread();
-                loadMyYantraiTasks();
+                loadTaskSessions();
             } catch(e) {
                 alert('Could not raise the task. Please try again.');
             }
-        }
-        async function loadMyYantraiTasks() {
-            const el = document.getElementById('yt-my-tasks');
-            const cnt = document.getElementById('yt-tasks-count');
-            const u = _ytUser();
-            try {
-                const r = await fetch(`${API}/api/yantrai/my-tasks?company_name=${encodeURIComponent(u.company_name||'')}`);
-                const d = await r.json();
-                const tasks = (d && d.tasks) || [];
-                if (cnt) cnt.textContent = tasks.length;
-                if (!el) return;
-                if (!tasks.length) { el.innerHTML = '<div style="color:#64748b;">No tasks raised yet.</div>'; return; }
-                const stColor = s => ({ 'Requested':'#fbbf24','Acknowledged':'#8b5cf6','In Progress':'#3b82f6','Delivered':'#06b6d4','Completed':'#10b981' }[s]||'#94a3b8');
-                el.innerHTML = tasks.map(t => `
-                    <div style="padding:9px 0; border-bottom:1px solid var(--border);">
-                        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
-                            <span style="font-weight:600; color:#e2e8f0; font-family:monospace;">${escapeHtml(t.task_code||'—')}</span>
-                            <span style="font-size:0.7rem; padding:2px 8px; border-radius:10px; background:${stColor(t.status)}22; color:${stColor(t.status)};">${escapeHtml(t.status||'')}</span>
-                        </div>
-                        <div style="color:#cbd5e1; font-size:0.8rem; margin-top:3px;">${escapeHtml(t.title || (t.description||'').split('\n')[2] || 'Task')}</div>
-                    </div>`).join('');
-            } catch(e) { if (el) el.innerHTML = '<div style="color:#f87171;">Could not load your tasks.</div>'; }
         }
 
         async function loadStore() {

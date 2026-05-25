@@ -2278,6 +2278,8 @@ def _ensure_chat_user_column():
         cursor = conn.cursor()
         cursor.execute("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS user_username TEXT")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_chat_sessions_user ON chat_sessions(user_username, company_name)")
+        # Sprint 82 — distinguish Tally chats ('chat') from Create-task sessions ('yantrai_task').
+        cursor.execute("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'chat'")
         conn.commit()
         cursor.close()
         conn.close()
@@ -2285,14 +2287,14 @@ def _ensure_chat_user_column():
         print(f"[_ensure_chat_user_column] {e}")
 
 
-def create_chat_session(title="New Chat", company_name=None, user_username=None):
+def create_chat_session(title="New Chat", company_name=None, user_username=None, kind='chat'):
     _ensure_chat_user_column()
     conn = get_conn()
     cursor = conn.cursor()
     session_id = str(uuid.uuid4())
     cursor.execute("""
-    INSERT INTO chat_sessions (id, title, company_name, user_username) VALUES (%s, %s, %s, %s)
-    """, (session_id, title, company_name, user_username))
+    INSERT INTO chat_sessions (id, title, company_name, user_username, kind) VALUES (%s, %s, %s, %s, %s)
+    """, (session_id, title, company_name, user_username, kind))
     conn.commit()
     cursor.close()
     conn.close()
@@ -2311,7 +2313,8 @@ def get_chat_sessions(company_name=None, user_username=None):
         LEFT JOIN (SELECT session_id, COUNT(*) as msg_count FROM chat_messages GROUP BY session_id) m
         ON s.id = m.session_id
     """
-    where = []
+    # Sprint 82 — keep Create-task sessions out of the Tally recent-chats list.
+    where = ["COALESCE(s.kind,'chat') <> 'yantrai_task'"]
     params = []
     if company_name:
         where.append("s.company_name = %s")
@@ -2322,14 +2325,43 @@ def get_chat_sessions(company_name=None, user_username=None):
         # — they remain visible to super_admin who passes user_username=None.
         where.append("s.user_username = %s")
         params.append(user_username)
-    if where:
-        query += " WHERE " + " AND ".join(where)
+    query += " WHERE " + " AND ".join(where)
     query += " ORDER BY s.updated_at DESC"
     cursor.execute(query, tuple(params))
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
     return rows
+
+
+def list_task_sessions(company_name=None, user_username=None):
+    """Sprint 82 — Create-task sessions for the sidebar: each task = one chat session,
+    with the linked task's status (NULL ⇒ 'Draft') for the progress badge."""
+    _ensure_chat_user_column()
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        where = ["COALESCE(s.kind,'chat') = 'yantrai_task'"]
+        params = []
+        if company_name: where.append("s.company_name = %s"); params.append(company_name)
+        if user_username: where.append("s.user_username = %s"); params.append(user_username)
+        cur.execute(f"""
+            SELECT s.id, s.title, s.updated_at,
+                   t.status, t.task_code,
+                   COALESCE(m.c, 0) AS message_count
+            FROM chat_sessions s
+            LEFT JOIN LATERAL (
+                SELECT status, task_code FROM tasks WHERE session_id = s.id
+                ORDER BY created_at DESC LIMIT 1
+            ) t ON TRUE
+            LEFT JOIN (SELECT session_id, COUNT(*) c FROM chat_messages GROUP BY session_id) m
+                   ON m.session_id = s.id
+            WHERE {' AND '.join(where)}
+            ORDER BY s.updated_at DESC
+        """, tuple(params))
+        return cur.fetchall()
+    finally:
+        cur.close(); conn.close()
 
 
 def get_chat_sessions_multi(company_names, user_username=None):

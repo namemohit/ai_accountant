@@ -607,6 +607,16 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
 .chat-session-icon { font-size: 0.85rem; }
 .chat-session-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Sprint 82 — Create task: task-list tiles (reuse the chat-session look) */
+.yt-session-item { border: 1px solid transparent; transition: all 0.15s; }
+.yt-session-item:hover { background: rgba(218,119,86,0.08); }
+.yt-session-item.active { background: rgba(218,119,86,0.15); border-color: rgba(218,119,86,0.35); }
+@media (max-width: 768px) {
+  #yt-tasks-toggle { display: inline-flex !important; }
+  #yt-sidebar { display: none; }
+  #yt-sidebar.yt-show { display: flex; position: absolute; z-index: 30; width: 240px; max-height: 60vh; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+}
+
 /* Chat Main Area — flex column where messages scroll but input is anchored */
 .chat-main {
   flex: 1;

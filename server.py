@@ -6531,6 +6531,10 @@ async def yantrai_pd_submit(payload: dict):
     created = db.create_task(session_id, company_name, full_desc, 'sadmin',
                              title=title, category=category, priority=priority,
                              created_by=username, source='yantrai_chat', pd=pd)
+    # Sprint 82 — name the task's chat session after the PD so the sidebar tile reads well.
+    if session_id:
+        try: db.update_chat_title(session_id, title)
+        except Exception: pass
     return {"status": "success", "task_code": created.get("task_code"),
             "task_id": created.get("task_id"), "title": title,
             "category": category, "priority": priority}
@@ -6540,6 +6544,36 @@ async def yantrai_my_tasks(company_name: str = ""):
     """Tasks raised by this workspace, so the requester can track them by code."""
     rows = db.get_tasks_for_company(company_name) if company_name else []
     return {"status": "success", "tasks": rows}
+
+# ── Sprint 82 — Create-task chat sessions (each task = a persisted, reopenable chat) ──
+@app.post("/api/yantrai/session/new")
+async def yantrai_session_new(payload: dict):
+    sid = db.create_chat_session(title="New task", company_name=payload.get("company_name"),
+                                 user_username=payload.get("username"), kind='yantrai_task')
+    return {"status": "success", "session_id": sid}
+
+@app.get("/api/yantrai/sessions")
+async def yantrai_sessions(company_name: str = "", username: str = None):
+    rows = db.list_task_sessions(company_name=company_name or None, user_username=username or None)
+    return {"status": "success", "sessions": rows}
+
+@app.get("/api/yantrai/session/{session_id}")
+async def yantrai_session_get(session_id: str, username: str = None):
+    """Transcript for one task session — owner-only (super_admin may pass through)."""
+    try:
+        owner = db.get_chat_session_owner(session_id)
+    except Exception:
+        owner = None
+    if owner and username and owner.get("user_username") not in (None, '__legacy__', username):
+        if not _is_super_admin(username):
+            raise HTTPException(status_code=403, detail="Not your task.")
+    return {"status": "success", "messages": db.get_chat_messages(session_id)}
+
+@app.post("/api/yantrai/session/{session_id}/message")
+async def yantrai_session_message(session_id: str, payload: dict):
+    db.save_chat_message(session_id, payload.get("role", "user"), payload.get("content", ""),
+                         payload.get("ui_type", "text"), payload.get("ui_data"))
+    return {"status": "success"}
 
 # ---- Parties (Party Master) Endpoints ----
 
