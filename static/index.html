@@ -431,7 +431,7 @@
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
             <div class="nav-item" onclick="handleLogout()" style="color: #ef4444;"><span>🚪</span> Logout</div>
             <!-- Build version — lets anyone verify they're on the latest build -->
-            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v99</div>
+            <div id="app-version" style="margin-top:6px; padding:6px 4px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v100</div>
         </div>
     </div>
 
@@ -1343,7 +1343,7 @@
             <div style="display:flex; align-items:center; gap:10px; margin:6px 0 10px;">
                 <button id="yt-tasks-toggle" onclick="_ytToggleSidebar()" style="display:none; align-items:center; gap:7px; background:rgba(255,255,255,0.05); border:1px solid var(--border); color:#cbd5e1; border-radius:10px; padding:7px 13px; font-size:0.82rem; font-weight:600; cursor:pointer;">📋 Tasks <span id="yt-tasks-count" style="background:var(--primary); color:#fff; border-radius:10px; padding:0 7px; font-size:0.72rem;">0</span></button>
             </div>
-            <div id="yt-pane" style="display:flex; gap:14px; align-items:stretch; height:calc(100vh - 230px);">
+            <div id="yt-pane" style="display:flex; gap:14px; align-items:stretch; height:calc(100vh - 175px);">
                 <!-- task list sidebar -->
                 <div id="yt-sidebar" style="width:240px; flex-shrink:0; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:14px; overflow:hidden; background:var(--card-bg);">
                     <div style="padding:10px; border-bottom:1px solid var(--border);">
@@ -2175,7 +2175,7 @@
             <div class="card" style="margin-top:24px;">
                 <h3 style="margin-bottom: 12px;">📦 About &amp; Updates</h3>
                 <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v99</strong></span>
+                    <span style="font-size:0.9rem; color:#e2e8f0;">Version: <strong>YantrAI Cloud · v100</strong></span>
                     <span id="settings-update-msg" style="font-size:0.82rem; color:#94a3b8;"></span>
                 </div>
                 <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
@@ -2375,7 +2375,7 @@
                     style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer; margin-bottom:10px;"></select>
             <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 6px;"><span>⚙️</span> Settings</div>
             <div class="mobile-drawer-item" onclick="exitToHome(); if(typeof closeMobileMenu==='function') closeMobileMenu();"><span>🏠</span> Home</div>
-            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v99</div>
+            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v100</div>
         </div>
     </div>
 
@@ -3464,12 +3464,14 @@
             const me = role === 'user';
             return `<div style="align-self:${me?'flex-end':'flex-start'}; max-width:82%; padding:10px 14px; border-radius:14px; ${me?'background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border-bottom-right-radius:4px;':'background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-bottom-left-radius:4px;'} font-size:0.9rem; line-height:1.5; white-space:pre-wrap;">${escapeHtml(content)}</div>`;
         }
+        function _ytAutoGrow(el) { if (!el) return; el.style.height = 'auto'; el.style.height = (el.scrollHeight + 2) + 'px'; }
         function _ytField(label, field, val, idx, multiline, ro) {
             const v = Array.isArray(val) ? val.join('\n') : (val || '');
             const dis = ro ? 'disabled' : '';
+            // Auto-growing textareas so every answer is fully visible (no inner scroll / cut-off).
             const ctl = multiline
-                ? `<textarea data-field="${field}" rows="2" ${dis} style="width:100%; resize:vertical; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; padding:7px 9px; font-size:0.84rem; ${ro?'opacity:0.7;':''}">${escapeHtml(v)}</textarea>`
-                : `<input type="text" data-field="${field}" value="${escapeHtml(v)}" ${dis} style="width:100%; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; padding:7px 9px; font-size:0.84rem; ${ro?'opacity:0.7;':''}">`;
+                ? `<textarea data-field="${field}" rows="1" oninput="_ytAutoGrow(this)" ${dis} style="width:100%; resize:none; overflow:hidden; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; padding:7px 9px; font-size:0.84rem; line-height:1.45; ${ro?'opacity:0.85;':''}">${escapeHtml(v)}</textarea>`
+                : `<input type="text" data-field="${field}" value="${escapeHtml(v)}" ${dis} style="width:100%; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; padding:7px 9px; font-size:0.84rem; ${ro?'opacity:0.85;':''}">`;
             return `<div style="margin-bottom:8px;"><div style="color:#94a3b8; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.03em; margin-bottom:3px;">${label}</div>${ctl}</div>`;
         }
         function _ytSelect(label, field, val, opts, ro) {
@@ -3503,6 +3505,8 @@
         function _renderYantraiThread() {
             const t = document.getElementById('yt-thread'); if (!t) return;
             t.innerHTML = window.__ytMessages.map((m, i) => m.role==='pdcard' ? _renderPDCard(m, i) : _ytBubble(m.role, m.content)).join('');
+            // Size every PD-card textarea to its content so answers are fully visible.
+            t.querySelectorAll('.yt-pd-card textarea').forEach(_ytAutoGrow);
             t.scrollTop = t.scrollHeight;
         }
         function _ytGather(idx) {
