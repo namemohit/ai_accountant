@@ -1475,7 +1475,7 @@ AI_ACCOUNTANT_MANIFEST = {
 }
 
 AGENT_SEED = [
-    {"slug": "ai-accountant", "name": "AI Accountant",
+    {"slug": "ai-accountant", "name": "Tally Agent",
      "tagline": "Books, GST, bank reco & filing on Tally — by chat.",
      "description": "Your full accounting back-office: voucher entry, bank reconciliation, "
                     "GST/TDS/ITR filing, masters and audit — all powered by AI and synced to Tally.",

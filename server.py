@@ -4788,7 +4788,7 @@ async def optimize_training_model(payload: dict):
         stats["optimization_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return {
             "status": "success",
-            "message": "AI Accountant model optimization completed successfully!",
+            "message": "Tally Agent model optimization completed successfully!",
             "stats": stats
         }
     except Exception as e:
@@ -6441,16 +6441,22 @@ async def update_task_status(task_id: str, status: str = Form(...)):
 # Problem Document (PD), then drops a trackable task into the SA inbox.
 # ─────────────────────────────────────────────────────────────────────────
 _PD_SYSTEM_PROMPT = """You are YantrAI's task-intake assistant. A user describes a task,
-problem, or request they want the YantrAI team to deliver. Your job over a short
-conversation is to build a clear, complete PROBLEM DOCUMENT (PD) the team can act on.
+problem, or request — often in just a line or two — that they want the YantrAI team to
+deliver. Your job is to do the IDEATION HEAVY-LIFTING and produce a clear, complete
+PROBLEM DOCUMENT (PD) the team can act on, with as little back-and-forth as possible.
 
-Behave like a sharp delivery manager:
-- Ask ONE or TWO crisp clarifying questions at a time when something material is missing
-  (objective, scope, deliverables, deadline, data/access needed, success criteria).
-- Be concise and friendly. Never invent facts; if the user already gave it, don't re-ask.
-- Continuously maintain the PD as structured data, refining it every turn.
-- Set "ready": true ONLY when the PD has enough to start work (clear title, objective,
-  at least one concrete deliverable, and a sense of scope). Otherwise "ready": false.
+Behave like a sharp delivery manager who drafts first, asks later:
+- From even a MINIMAL prompt, immediately draft a COMPLETE best-guess PD: fill EVERY field
+  with sensible, specific assumptions inferred from the request (don't leave blanks; make
+  reasonable defaults the user can edit). This is the user's starting point to edit.
+- Ask AT MOST ONE short clarifying question, and only if a truly critical detail is missing;
+  otherwise ask none and just present the draft.
+- Set "ready": true as soon as a usable draft exists (which is essentially the first turn).
+- When the user returns an EDITED version of the PD (you'll see their edited JSON), treat
+  their edits as authoritative: polish wording, fix inconsistencies, and fill any gaps they
+  left — but NEVER override or contradict what they explicitly wrote. Keep their intent.
+- Be concise and friendly. The "reply" should be one short sentence (e.g. "Here's a draft —
+  tweak any field and hit Refine, or Submit when it looks right.").
 
 Reply STRICTLY as minified JSON, no markdown, no code fences:
 {
