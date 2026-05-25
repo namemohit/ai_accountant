@@ -1512,25 +1512,7 @@ AGENT_SEED = [
                   "nav_groups": [{"label": "Developer", "items": [
                       {"view": "dev-portal", "label": "My Apps", "icon": "🛠️"}]}]},
      "sort_order": 40},
-    # Sprint 65 — dummy apps to exercise the iPhone-style swipeable Home pager.
-    {"slug": "demo-alpha", "name": "Demo Alpha",
-     "tagline": "Sample app for testing the launcher.",
-     "description": "A placeholder app used to demonstrate the swipeable Home pages.",
-     "icon": "🧪", "category": "developer", "status": "published", "publisher": "first-party",
-     "token_policy": {"chargeable": False},
-     "manifest": {"version": 1, "agent_kind": "remote", "remote_url": "/static/demo_agent.html",
-                  "nav_groups": [{"label": "App", "items": [
-                      {"view": "remote-demo-alpha", "label": "Open App", "icon": "🧪"}]}]},
-     "sort_order": 50},
-    {"slug": "demo-beta", "name": "Demo Beta",
-     "tagline": "Sample app for testing the launcher.",
-     "description": "A placeholder app used to demonstrate the swipeable Home pages.",
-     "icon": "🔬", "category": "developer", "status": "published", "publisher": "first-party",
-     "token_policy": {"chargeable": False},
-     "manifest": {"version": 1, "agent_kind": "remote", "remote_url": "/static/demo_agent.html",
-                  "nav_groups": [{"label": "App", "items": [
-                      {"view": "remote-demo-beta", "label": "Open App", "icon": "🔬"}]}]},
-     "sort_order": 60},
+    # Sprint 78 — Demo Alpha / Demo Beta (Sprint-65 dummy pager apps) removed.
 ]
 
 
