@@ -398,12 +398,12 @@
             <div class="nav-item" data-view="home" data-platform="1" onclick="showView('home')"><span>🏠</span> Home</div>
             <!-- Sprint 48 — Agentic store. data-view powers nav-from-installs. -->
             <div class="nav-item" data-view="store" data-platform="1" onclick="showView('store')"><span>🛍️</span> Store</div>
-            <div class="nav-item" data-view="uploads" data-platform="1" onclick="showView('uploads')"><span>📎</span> Upload anything</div>
+            <div class="nav-item" data-view="uploads" data-platform="1" onclick="showView('uploads')"><span>📎</span> Files</div>
             <div class="nav-item" data-view="yantrai-chat" data-platform="1" onclick="showView('yantrai-chat')"><span>📝</span> Create task</div>
             <div class="nav-item" data-view="training" data-platform="1" onclick="showView('training')"><span>🔌</span> Connectors</div>
             <div class="nav-item" data-view="leadgen" onclick="showView('leadgen')"><span>🎯</span> Lead Gen</div>
 
-            <div class="nav-item active" data-view="chat" onclick="showView('chat')"><span>💬</span> Chat with Tally</div>
+            <div class="nav-item active" data-view="chat" onclick="showView('chat')"><span>💬</span> Chat</div>
 
             <div class="nav-item" data-view="vouchers" onclick="showView('vouchers')"><span>📑</span> Vouchers</div>
 
@@ -1221,7 +1221,7 @@
                 <div class="feat-tile" onclick="_aiaccMaster('items')"><div class="feat-ic">📦</div><div class="feat-name">Item Master</div></div>
                 <div class="feat-tile" onclick="_aiaccMaster('parties')"><div class="feat-ic">👥</div><div class="feat-name">Party Master</div></div>
                 <div class="feat-tile" onclick="_aiaccMaster('actionlog')"><div class="feat-ic">📋</div><div class="feat-name">Action Log</div></div>
-                <div class="feat-tile" onclick="showView('chat')"><div class="feat-ic">💬</div><div class="feat-name">Chat with Tally</div></div>
+                <div class="feat-tile" onclick="showView('chat')"><div class="feat-ic">💬</div><div class="feat-name">Chat</div></div>
                 <!-- Sprint 73 — super_admin-only features (checkAuth hides these for non-SA). -->
                 <div class="feat-tile" data-role-gated="super_admin" onclick="showView('gstr-reco')"><div class="feat-ic">📊</div><div class="feat-name">GSTR Reco</div></div>
                 <div class="feat-tile" data-role-gated="super_admin" onclick="showView('gstr')"><div class="feat-ic">🧾</div><div class="feat-name">GST Filing</div></div>
@@ -1337,7 +1337,7 @@
         <!-- Sprint 55 — Upload anything: company-scoped file library -->
         <div id="uploads-view" class="dashboard-view" style="display: none;">
             <header>
-                <h1>📎 Upload anything</h1>
+                <h1>📎 Files</h1>
                 <p style="color:#94a3b8;">Drop any file — invoices, statements, photos, sheets. Files are saved to <strong id="uploads-co-label">this company</strong> and reusable anywhere (send to chat, download).</p>
             </header>
             <div id="uploads-drop" onclick="document.getElementById('uploads-file-input').click()"
@@ -3202,7 +3202,7 @@
         // Sprint 61 — universal top bar: mirrors the (hidden) sidebar's nav + footer
         // controls. On Home: just the logo. Inside an app: ‹ Home + app name + that
         // app's screens as tabs. On a platform view: ‹ Home + the view's title.
-        const _PLATFORM_TITLES = { store:'🛍️ Store', uploads:'📎 Upload anything',
+        const _PLATFORM_TITLES = { store:'🛍️ Store', uploads:'📎 Files',
             'yantrai-chat':'📝 Create task', settings:'⚙️ Settings',
             training:'🧠 Connectors', whatsapp:'📱 WhatsApp Setup', users:'👥 User Manager',
             analytics:'📊 Data Analyst' };
@@ -3361,8 +3361,14 @@
                 // Sprint 85 — agent tiles get data-agent-slug → long-press / right-click to uninstall.
                 (window.__installedAgents || []).forEach(a => tiles.push(
                     tile(a.icon || '🧩', a.name || a.slug, a.tagline || 'Open app', `enterAgent('${escapeHtml(a.slug)}')`, a.slug)));
+                // Quick-access Tally shortcuts (only when the Tally agent is installed).
+                if (window.__agentBySlug && window.__agentBySlug['ai-accountant']) {
+                    tiles.push(tile('🧾', 'Create voucher', 'New entry in Tally', "openVoucherChat()"));
+                    tiles.push(tile('📷', 'Scan voucher', 'Snap a bill → voucher', "_aiaccScan()"));
+                    tiles.push(tile('💬', 'Chat', 'Ask your Tally agent', "showView('chat')"));
+                }
                 tiles.push(tile('🛍️', 'Store', 'Get more apps', "showView('store')"));
-                tiles.push(tile('📎', 'Upload anything', 'Files for this company', "showView('uploads')"));
+                tiles.push(tile('📎', 'Files', 'Files for this company', "showView('uploads')"));
                 tiles.push(tile('🔌', 'Connectors', 'Tally, devices & data sources', "showView('training')"));
                 tiles.push(tile('⚡', 'Wallet', 'Tokens & recharge', "if(typeof openWalletModal==='function') openWalletModal()"));
                 if (window.__isSuperAdmin) tiles.push(tile('📊', 'Data Analyst', 'Platform usage & tokens', "showView('analytics')"));
