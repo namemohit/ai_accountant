@@ -4677,6 +4677,40 @@
         // --- Service Request Confirm/Dismiss ---
         window._pendingServiceRequests = {}; // Store SR data by ID to avoid inline JSON issues
 
+        // Submit the in-chat editable Problem-Document card → create a trackable task
+        // (reuses the Create-task PD submit endpoint).
+        window.submitChatTaskPD = async function(srId) {
+            const v = (id) => { const el = document.getElementById(srId + '-' + id); return el ? el.value.trim() : ''; };
+            const pd = {
+                title: v('title') || 'Task request',
+                objective: v('objective'),
+                category: v('category') || 'Other',
+                priority: v('priority') || 'Normal',
+                scope: v('scope'),
+                deliverables: v('deliverables'),
+            };
+            const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
+            const actionsEl = document.getElementById(srId + '-actions');
+            if (actionsEl) actionsEl.innerHTML = '<span style="color: var(--primary); font-weight:600;"><i class="fas fa-spinner fa-spin"></i> Creating task…</span>';
+            try {
+                const res = await fetch(`${API}/api/yantrai/pd/submit`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pd, company_name: u.company_name, username: u.username, session_id: currentSessionId })
+                });
+                const d = await res.json();
+                if (!res.ok || d.status !== 'success') throw new Error(d.detail || 'Could not create task');
+                const card = document.getElementById(srId);
+                if (card) { card.style.background = 'rgba(16,185,129,0.1)'; card.style.borderColor = 'rgba(16,185,129,0.3)'; }
+                if (actionsEl) actionsEl.innerHTML = `
+                    <div style="display:flex; flex-direction:column; gap:8px; width:100%;">
+                        <span style="color:#10b981; font-weight:700; font-size:0.9rem;"><i class="fas fa-check-circle"></i> Task created${d.task_code ? ' · ' + escapeHtml(d.task_code) : ''}</span>
+                        <span style="color:#94a3b8; font-size:0.8rem;">The YantrAI team will review this shortly.</span>
+                        <button onclick="showView('tasks'); if(typeof loadTasks==='function') loadTasks();" style="margin-top:4px; background:rgba(56,189,248,0.1); color:var(--primary); border:1px solid rgba(56,189,248,0.3); padding:6px 14px; border-radius:6px; cursor:pointer; font-weight:600; width:fit-content;">View Task Journey →</button>
+                    </div>`;
+            } catch (e) {
+                if (actionsEl) actionsEl.innerHTML = `<span style="color:#f87171; font-size:0.85rem;">${escapeHtml(e.message||'Error')}</span>`;
+            }
+        };
         window.confirmServiceRequest = async function(srId) {
             const srData = window._pendingServiceRequests[srId];
             if (!srData) { console.error('No SR data for', srId); return; }
@@ -8953,28 +8987,40 @@
                 // Store data in JS map — avoids inline JSON escaping issues in HTML attributes
                 window._pendingServiceRequests = window._pendingServiceRequests || {};
                 window._pendingServiceRequests[srId] = sr;
+                const _fld = (label, id, val, ph) =>
+                    `<label style="display:block; font-size:0.7rem; text-transform:uppercase; letter-spacing:.4px; color:#8a8178; margin:10px 0 4px;">${label}</label>
+                     <textarea id="${srId}-${id}" rows="2" placeholder="${ph||''}" style="width:100%; box-sizing:border-box; background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:0.85rem; resize:vertical; font-family:inherit;">${escapeHtml(val||'')}</textarea>`;
                 contentHtml += `
-                <div id="${srId}" style="background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 10px; padding: 20px; margin-top: 12px;">
-                    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 14px;">
-                        <span style="font-size: 1.6rem;">🎯</span>
-                        <h4 style="margin: 0; color: #60a5fa; font-size: 1rem;">New Service Request to YantrAI</h4>
+                <div id="${srId}" class="chat-task-card" style="background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 10px; padding: 18px; margin-top: 12px;">
+                    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 6px;">
+                        <span style="font-size: 1.4rem;">🎯</span>
+                        <h4 style="margin: 0; color: #60a5fa; font-size: 1rem;">Create a task for the YantrAI team</h4>
                     </div>
-                    <p style="margin: 0 0 14px 0; color: #cbd5e1; font-size: 0.9rem;">I understand you'd like:</p>
-                    <div style="background: rgba(15, 23, 42, 0.6); padding: 16px; border-radius: 8px; margin-bottom: 14px; border-left: 3px solid #60a5fa;">
-                        <div style="font-weight: 700; color: #f1f5f9; font-size: 0.95rem; margin-bottom: 8px;">"${sr.title}"</div>
-                        <div style="color: #94a3b8; font-size: 0.85rem; line-height: 1.5; margin-bottom: 10px;">${sr.description}</div>
-                        <div style="display: flex; gap: 12px; flex-wrap: wrap;">
-                            <span style="background: rgba(218, 119, 86, 0.15); color: #818cf8; padding: 3px 10px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">${sr.category}</span>
-                            <span style="background: ${priorityColor}18; color: ${priorityColor}; padding: 3px 10px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">${sr.priority}</span>
+                    <p style="margin: 0 0 6px 0; color: #94a3b8; font-size: 0.8rem;">I drafted this from your message — edit anything, then create it.</p>
+                    <label style="display:block; font-size:0.7rem; text-transform:uppercase; letter-spacing:.4px; color:#8a8178; margin:10px 0 4px;">Title</label>
+                    <input id="${srId}-title" value="${escapeHtml(sr.title||'')}" style="width:100%; box-sizing:border-box; background:rgba(15,23,42,0.6); color:#f1f5f9; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; font-weight:600;">
+                    ${_fld('Objective', 'objective', sr.description, 'What outcome do you want?')}
+                    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px;">
+                        <div style="flex:1; min-width:140px;">
+                            <label style="display:block; font-size:0.7rem; text-transform:uppercase; letter-spacing:.4px; color:#8a8178; margin-bottom:4px;">Category</label>
+                            <input id="${srId}-category" value="${escapeHtml(sr.category||'Other')}" style="width:100%; box-sizing:border-box; background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:0.85rem;">
+                        </div>
+                        <div style="width:130px;">
+                            <label style="display:block; font-size:0.7rem; text-transform:uppercase; letter-spacing:.4px; color:#8a8178; margin-bottom:4px;">Priority</label>
+                            <select id="${srId}-priority" style="width:100%; box-sizing:border-box; background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:0.85rem;">
+                                <option${sr.priority!=='Urgent'?' selected':''}>Normal</option>
+                                <option${sr.priority==='Urgent'?' selected':''}>Urgent</option>
+                            </select>
                         </div>
                     </div>
-                    <p style="margin: 0 0 14px 0; color: #94a3b8; font-size: 0.82rem;">Should I raise this as a service request to the YantrAI team?</p>
-                    <div style="display: flex; gap: 10px;" id="${srId}-actions">
-                        <button onclick="confirmServiceRequest('${srId}')" style="background: #10b981; color: white; border: none; padding: 10px 20px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 0.85rem; transition: all 0.2s; display: flex; align-items: center; gap: 6px;" onmouseover="this.style.background='#059669'" onmouseout="this.style.background='#10b981'">
-                            <i class="fas fa-check"></i> Yes, Raise Request
+                    ${_fld('Scope (optional)', 'scope', '', 'What\\'s in / out of scope?')}
+                    ${_fld('Deliverables (optional)', 'deliverables', '', 'What should be delivered?')}
+                    <div style="display: flex; gap: 10px; margin-top:14px;" id="${srId}-actions">
+                        <button onclick="submitChatTaskPD('${srId}')" style="background: #10b981; color: white; border: none; padding: 10px 20px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 0.85rem; display:flex; align-items:center; gap:6px;">
+                            <i class="fas fa-check"></i> Create task
                         </button>
-                        <button onclick="dismissServiceRequest('${srId}')" style="background: rgba(100, 116, 139, 0.2); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.3); padding: 10px 20px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 0.85rem; transition: all 0.2s;">
-                            No, Just a Question
+                        <button onclick="dismissServiceRequest('${srId}')" style="background: rgba(100, 116, 139, 0.2); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.3); padding: 10px 20px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 0.85rem;">
+                            Dismiss
                         </button>
                     </div>
                 </div>
