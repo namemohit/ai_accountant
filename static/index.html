@@ -4635,6 +4635,7 @@
             }
             // Sprint 60 — Home is a full-width Android launcher: hide the sidebar on Home.
             document.body.classList.toggle('home-active', view === 'home');
+            document.body.classList.toggle('chat-active', view === 'chat');   // hide bottom nav in chat (WhatsApp-style)
             window.__currentView = view;                       // Sprint 61 — top-bar highlight
             if (typeof _renderTopbar === 'function') _renderTopbar();
             document.querySelectorAll('.dashboard-view').forEach(el => el.style.display = 'none');

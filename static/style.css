@@ -1292,6 +1292,10 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
     border-top: 1px solid var(--border); }
   /* Hide the bar while the on-screen keyboard is up (set by JS on input focus). */
   body.kbd-open #bottom-nav { transform: translateY(130%); }
+  /* WhatsApp-style: hide the bottom nav inside the chat view so the composer owns
+     the bottom; reclaim the 60px the nav was reserving. Native back returns. */
+  body.chat-active #bottom-nav { display: none !important; }
+  body.chat-active .main-content { height: var(--app-height, 100dvh) !important; }
   /* Sprint 68/69 — phone: fixed 4-column app grid, larger icons */
   .feat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px 6px; }
   .feat-tile { width: auto; }
