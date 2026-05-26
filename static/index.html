@@ -14,7 +14,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
-    <link rel="stylesheet" href="/static/style.css?v=105">
+    <link rel="stylesheet" href="/static/style.css?v=106">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;800&display=swap" rel="stylesheet">
     <!-- Sprint 72 — load FontAwesome non-render-blocking (swap media to 'all' onload). -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" media="print" onload="this.media='all'">
@@ -2401,7 +2401,7 @@
         </nav>
         <!-- Bottom: Logout + app version -->
         <div class="mobile-drawer-footer">
-            <div class="mobile-drawer-logout" onclick="haptic(10); handleLogout();"><span>🚪</span> Logout</div>
+            <div class="mobile-drawer-logout" onclick="haptic(); handleLogout();"><span>🚪</span> Logout</div>
             <div class="mobile-drawer-version">YantrAI Cloud · v106</div>
         </div>
     </div>
@@ -3138,7 +3138,7 @@
                     if (el.style.display === 'none') return;     // respects _renderNav role-gating
                     if (active === 'ai-accountant' && _AIACC_LAUNCHER && _AIACC_LAUNCHER.has(v)) return;
                     const activeCls = (v === cur) ? ' active' : '';
-                    items.push(`<div class="mobile-drawer-item${activeCls}" data-view="${v}" onclick="haptic(8); mobileNav('${v}')">${el.innerHTML}</div>`);
+                    items.push(`<div class="mobile-drawer-item${activeCls}" data-view="${v}" onclick="haptic(); mobileNav('${v}')">${el.innerHTML}</div>`);
                 });
             }
             let html = '';
@@ -4745,7 +4745,7 @@
 
         // --- Mobile Hamburger Menu ---
         function toggleMobileMenu() {
-            if (typeof haptic === 'function') haptic(10);
+            if (typeof haptic === 'function') haptic();
             if (typeof _renderDrawer === 'function') _renderDrawer();
             document.getElementById('mobile-drawer').classList.toggle('open');
             document.getElementById('mobile-overlay').classList.toggle('open');
@@ -4761,9 +4761,33 @@
         }
 
         // ── Mobile bottom nav: haptics + workspace/notifications sheet ──────────
+        // iOS 17.4+ Safari has no Vibration API, but toggling a hidden
+        // <input switch> inside a user gesture fires the system haptic.
+        let _iosHapticEl = null;
+        function _ensureIosHaptic() {
+            if (_iosHapticEl) return _iosHapticEl;
+            try {
+                const lbl = document.createElement('label');
+                lbl.setAttribute('aria-hidden', 'true');
+                lbl.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;';
+                const inp = document.createElement('input');
+                inp.type = 'checkbox';
+                inp.setAttribute('switch', '');          // iOS-only attribute that carries haptic
+                inp.style.cssText = 'width:1px;height:1px;';
+                lbl.appendChild(inp);
+                document.body.appendChild(lbl);
+                _iosHapticEl = inp;
+            } catch (_) {}
+            return _iosHapticEl;
+        }
         function haptic(ms) {
-            // Key-tap feedback. Works on Android web; iOS Safari/PWA ignores it.
-            try { if (navigator.vibrate) navigator.vibrate(ms || 10); } catch (_) {}
+            // Android/most web: Vibration API. ~18ms is the floor many devices
+            // actually honor (10ms was often silently dropped).
+            try {
+                if (navigator.vibrate) { if (navigator.vibrate(ms || 18) !== false) return; }
+            } catch (_) {}
+            // iOS Safari/PWA fallback (17.4+): toggle the hidden switch.
+            try { const el = _ensureIosHaptic(); if (el) el.click(); } catch (_) {}
         }
         function _activeCompanyName() {
             const sel = document.getElementById('active-company-select') || document.getElementById('tb-company');
