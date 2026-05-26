@@ -93,6 +93,28 @@ def validate_agent_session(token):
     sess["expires_at"] = datetime.utcnow() + AGENT_SESSION_TTL
     return sess
 
+
+def _authorize_bridge(session_token=None, company_name=None, company_id=None, perm="edit"):
+    """Two-phase bridge-endpoint auth (#3). If the agent sends a valid session_token,
+    validate it and enforce company permission (secure path). Otherwise fall back to
+    the legacy company_name-only behaviour, LOGGED as deprecated, so already-deployed
+    agents keep working until everyone is on the token-sending build. Phase 2 will
+    drop the fallback and require the token. Returns the company_name to scope by."""
+    if session_token:
+        sess = validate_agent_session(session_token)
+        if not sess:
+            raise HTTPException(status_code=401,
+                detail="Session expired — re-open the YantrAI Tally Bridge to sign in again.")
+        cid = company_id or (_resolve_company_id_by_name(company_name) if company_name else None)
+        if not cid:
+            raise HTTPException(status_code=400, detail="company required")
+        if not db.user_can(sess["user_id"], perm, cid):
+            raise HTTPException(status_code=403, detail="No permission for this company.")
+        return company_name
+    print(f"[BRIDGE AUTH] DEPRECATED: bridge call without session_token "
+          f"(company_name={company_name!r}). Upgrade the Tally Bridge agent.", flush=True)
+    return company_name
+
 @app.websocket("/tally/ws")
 async def tally_websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -294,12 +316,15 @@ async def ledger_detail(company_name: str, name: str, limit: int = 50):
 
 
 @app.get("/api/tally/queue")
-async def tally_queue_claim(company_name: str, limit: int = 10):
+async def tally_queue_claim(company_name: str, limit: int = 10, session_token: str = None):
     """Bridge agent polls this. Atomically claims pending outbox rows and
     flips them to 'pushing'. Returns the payloads to push to Tally."""
     try:
+        company_name = _authorize_bridge(session_token, company_name)
         rows = db.claim_tally_outbox(company_name, limit=limit)
         return {"status": "success", "data": rows}
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback; traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -307,20 +332,30 @@ async def tally_queue_claim(company_name: str, limit: int = 10):
 
 @app.post("/api/tally/queue/{outbox_id}/ack")
 async def tally_queue_ack(outbox_id: str, payload: dict):
-    """Bridge agent confirms a successful push. Body: {tally_voucher_guid?}."""
+    """Bridge agent confirms a successful push. Body: {tally_voucher_guid?, session_token?}."""
     try:
+        st = (payload or {}).get("session_token")
+        if st and not validate_agent_session(st):
+            raise HTTPException(status_code=401, detail="Session expired.")
         guid = payload.get("tally_voucher_guid") if isinstance(payload, dict) else None
         return {"status": "success", **db.ack_tally_outbox(outbox_id, tally_voucher_guid=guid)}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/tally/queue/{outbox_id}/fail")
 async def tally_queue_fail(outbox_id: str, payload: dict):
-    """Bridge agent reports a failure. Body: {error}."""
+    """Bridge agent reports a failure. Body: {error, session_token?}."""
     try:
+        st = (payload or {}).get("session_token")
+        if st and not validate_agent_session(st):
+            raise HTTPException(status_code=401, detail="Session expired.")
         err = (payload or {}).get("error") or "Unknown error"
         return {"status": "success", **db.fail_tally_outbox(outbox_id, err)}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -332,6 +367,7 @@ async def tally_heartbeat(payload: dict):
         company_name = (payload or {}).get("company_name")
         if not company_name:
             raise HTTPException(status_code=400, detail="company_name required")
+        company_name = _authorize_bridge((payload or {}).get("session_token"), company_name)
         return {"status": "success", **db.upsert_tally_heartbeat(
             company_name,
             agent_version=(payload or {}).get("agent_version"),

@@ -699,7 +699,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.4.0"   # Sprint 42 — modern UI, tray, autostart, branding, Cloud-Run default
+AGENT_VERSION = "0.5.0"   # Sends session_token on queue/ack/fail/heartbeat (tenant-scoped bridge auth)
 
 
 def _post_json(url, body, timeout=15.0):
@@ -1281,13 +1281,14 @@ def push_voucher_to_tally(payload, tally_url, company_name, server_url=None):
     return False, last_info or "Push failed after 5 auto-create attempts"
 
 
-def heartbeat_loop(server_url, company_name, stop_event):
+def heartbeat_loop(server_url, company_name, stop_event, session_token=None):
     """Ping /api/tally/heartbeat every 30s so the web sidebar pill turns 🟢."""
     while not stop_event.is_set():
         try:
             _post_json(
                 f"{server_url}/api/tally/heartbeat",
-                {"company_name": company_name, "agent_version": AGENT_VERSION},
+                {"company_name": company_name, "agent_version": AGENT_VERSION,
+                 "session_token": session_token},
                 timeout=8.0,
             )
         except Exception:
@@ -1295,15 +1296,19 @@ def heartbeat_loop(server_url, company_name, stop_event):
         stop_event.wait(30)
 
 
-def outbox_poll_loop(server_url, tally_url, company_name, stop_event, log_fn=None):
+def outbox_poll_loop(server_url, tally_url, company_name, stop_event, log_fn=None,
+                     session_token=None):
     """Claim pending rows from /api/tally/queue, push each to Tally, ack/fail."""
     def log(msg):
         if log_fn: log_fn(msg)
         else: print(f"[outbox] {msg}", flush=True)
     while not stop_event.is_set():
         try:
+            _qs = f"company_name={urllib.parse.quote(company_name)}&limit=10"
+            if session_token:
+                _qs += f"&session_token={urllib.parse.quote(session_token)}"
             res = _get_json(
-                f"{server_url}/api/tally/queue?company_name={urllib.parse.quote(company_name)}&limit=10",
+                f"{server_url}/api/tally/queue?{_qs}",
                 timeout=10.0,
             )
             rows = (res or {}).get("data") or []
@@ -1327,12 +1332,12 @@ def outbox_poll_loop(server_url, tally_url, company_name, stop_event, log_fn=Non
                 if ok:
                     log(f"  ✓ Pushed outbox row {oid[:8]}… — Tally GUID {info[:20] if info else 'ok'}")
                     _post_json(f"{server_url}/api/tally/queue/{oid}/ack",
-                               {"tally_voucher_guid": info},
+                               {"tally_voucher_guid": info, "session_token": session_token},
                                timeout=10.0)
                 else:
                     log(f"  ✗ Failed outbox row {oid[:8]}… — {info}")
                     _post_json(f"{server_url}/api/tally/queue/{oid}/fail",
-                               {"error": str(info)[:1000]},
+                               {"error": str(info)[:1000], "session_token": session_token},
                                timeout=10.0)
         except Exception as e:
             log(f"poll error: {e}")
@@ -1782,13 +1787,15 @@ class TallyBridgeApp:
             self._outbox_stop_event = threading.Event()
             threading.Thread(
                 target=heartbeat_loop,
-                args=(server_url, self.selected_company_name, self._outbox_stop_event),
+                args=(server_url, self.selected_company_name, self._outbox_stop_event,
+                      getattr(self, "session_token", None)),
                 daemon=True, name="yantrai-heartbeat",
             ).start()
             threading.Thread(
                 target=outbox_poll_loop,
                 args=(server_url, tally_url, self.selected_company_name,
-                      self._outbox_stop_event, getattr(self, "log", None)),
+                      self._outbox_stop_event, getattr(self, "log", None),
+                      getattr(self, "session_token", None)),
                 daemon=True, name="yantrai-outbox-poll",
             ).start()
 
