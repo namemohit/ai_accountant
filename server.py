@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "142"
+APP_VERSION = "143"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -1279,6 +1279,18 @@ async def chat_with_tally(
                 buffer.write(file_content)
             with open(persistent_path, "wb") as buffer:
                 buffer.write(file_content)
+
+            # Register the upload in the company Files library so chat-uploaded
+            # bills/statements also show up under Files (not just in the chat).
+            try:
+                if company_name:
+                    db.save_company_file(company_name, file_url,
+                                         original_name=file.filename,
+                                         file_type=(file.content_type or None),
+                                         size_bytes=len(file_content),
+                                         uploaded_by=username)
+            except Exception as _cf_err:
+                print(f"[chat] save_company_file error: {_cf_err}", flush=True)
 
             try:
                 # Analyze the document first to get context
