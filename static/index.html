@@ -14,7 +14,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
-    <link rel="stylesheet" href="/static/style.css?v=111">
+    <link rel="stylesheet" href="/static/style.css?v=112">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;800&display=swap" rel="stylesheet">
     <!-- Sprint 72 — load FontAwesome non-render-blocking (swap media to 'all' onload). -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" media="print" onload="this.media='all'">
@@ -1175,15 +1175,16 @@
                 <p style="color:#94a3b8;">Pick a skill to get started.</p>
             </header>
             <div class="feat-grid" style="margin-top:18px;">
-                <div class="feat-tile" onclick="showView('chat')"><div class="feat-ic">💬</div><div class="feat-name">Chat with Tally</div></div>
+                <!-- Sprint — Tally skills in the user's preferred sequence. -->
+                <div class="feat-tile" onclick="if(typeof openVoucherChat==='function') openVoucherChat()"><div class="feat-ic">🧾</div><div class="feat-name">Create voucher</div></div>
+                <div class="feat-tile" onclick="_aiaccScan()"><div class="feat-ic">📷</div><div class="feat-name">Scan Voucher</div></div>
                 <div class="feat-tile" onclick="showView('vouchers')"><div class="feat-ic">📑</div><div class="feat-name">Vouchers</div></div>
                 <div class="feat-tile" onclick="showView('bank')"><div class="feat-ic">🏦</div><div class="feat-name">Bank Reco</div></div>
+                <div class="feat-tile" onclick="_aiaccMaster('coa')"><div class="feat-ic">📒</div><div class="feat-name">Ledgers</div></div>
                 <div class="feat-tile" onclick="_aiaccMaster('items')"><div class="feat-ic">📦</div><div class="feat-name">Item Master</div></div>
                 <div class="feat-tile" onclick="_aiaccMaster('parties')"><div class="feat-ic">👥</div><div class="feat-name">Party Master</div></div>
-                <div class="feat-tile" onclick="_aiaccMaster('coa')"><div class="feat-ic">📒</div><div class="feat-name">Ledgers</div></div>
                 <div class="feat-tile" onclick="_aiaccMaster('actionlog')"><div class="feat-ic">📋</div><div class="feat-name">Action Log</div></div>
-                <div class="feat-tile" onclick="if(typeof openVoucherChat==='function') openVoucherChat()"><div class="feat-ic">🧾</div><div class="feat-name">Create invoice</div></div>
-                <div class="feat-tile" onclick="_aiaccScan()"><div class="feat-ic">📷</div><div class="feat-name">Scan Voucher</div></div>
+                <div class="feat-tile" onclick="showView('chat')"><div class="feat-ic">💬</div><div class="feat-name">Chat with Tally</div></div>
                 <!-- Sprint 73 — super_admin-only features (checkAuth hides these for non-SA). -->
                 <div class="feat-tile" data-role-gated="super_admin" onclick="showView('gstr-reco')"><div class="feat-ic">📊</div><div class="feat-name">GSTR Reco</div></div>
                 <div class="feat-tile" data-role-gated="super_admin" onclick="showView('gstr')"><div class="feat-ic">🧾</div><div class="feat-name">GST Filing</div></div>
