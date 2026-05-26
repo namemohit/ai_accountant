@@ -769,25 +769,10 @@
                 <button class="schema-tab-btn active" id="schema-tab-coa" onclick="switchSchemaSubView('coa')" style="background: none; border: none; color: var(--primary); font-weight: 600; font-size: 0.95rem; cursor: pointer; padding: 10px 20px; border-bottom: 2px solid var(--accent); transition: all 0.2s;">📋 Chart of Accounts</button>
                 <button class="schema-tab-btn" id="schema-tab-parties" onclick="switchSchemaSubView('parties')" style="background: none; border: none; color: #94a3b8; font-weight: 600; font-size: 0.95rem; cursor: pointer; padding: 10px 20px; transition: all 0.2s;">👥 Party Master Directory</button>
                 <button class="schema-tab-btn" id="schema-tab-items" onclick="switchSchemaSubView('items')" style="background: none; border: none; color: #94a3b8; font-weight: 600; font-size: 0.95rem; cursor: pointer; padding: 10px 20px; transition: all 0.2s;">📦 Item Master Directory</button>
-                <button class="schema-tab-btn" id="schema-tab-actionlog" onclick="switchSchemaSubView('actionlog')" style="background: none; border: none; color: #94a3b8; font-weight: 600; font-size: 0.95rem; cursor: pointer; padding: 10px 20px; transition: all 0.2s;">📋 Action Log</button>
+                <!-- Action Log tab retired — master AI gaps now show inline as per-record chips
+                     on the Party + Item rows (Run AI Master Gap Scan above to detect). -->
             </div>
-            <!-- Sprint 34 — Masters Action / Event Log -->
-            <div id="schema-subview-actionlog" class="card" style="display: none;">
-                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:14px;">
-                    <div>
-                        <h3 style="margin-bottom:4px;">📋 Master Action Log</h3>
-                        <p style="color:#94a3b8; font-size:0.85rem;">Every AI-detected gap and master change — what needs your attention and what's already been actioned.</p>
-                    </div>
-                    <select id="masterlog-filter" onchange="loadMasterActionLog()" style="padding:6px 10px; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:6px; font-size:0.82rem;">
-                        <option value="pending">🔥 Action needed</option>
-                        <option value="accepted">✅ Applied</option>
-                        <option value="rejected">✖ Dismissed</option>
-                        <option value="all">All</option>
-                    </select>
-                </div>
-                <div id="masterlog-body" style="color:#94a3b8; font-size:0.85rem;">Loading…</div>
-            </div>
-            
+
             <div id="schema-subview-coa" class="card">
                 <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:8px;">
                     <h3 style="margin:0;">📋 Chart of Accounts</h3>
@@ -1219,7 +1204,6 @@
                 <div class="feat-tile" onclick="_aiaccMaster('coa')"><div class="feat-ic">📒</div><div class="feat-name">Ledgers</div></div>
                 <div class="feat-tile" onclick="_aiaccMaster('items')"><div class="feat-ic">📦</div><div class="feat-name">Item Master</div></div>
                 <div class="feat-tile" onclick="_aiaccMaster('parties')"><div class="feat-ic">👥</div><div class="feat-name">Party Master</div></div>
-                <div class="feat-tile" onclick="_aiaccMaster('actionlog')"><div class="feat-ic">📋</div><div class="feat-name">Action Log</div></div>
                 <div class="feat-tile" onclick="showView('chat')"><div class="feat-ic">💬</div><div class="feat-name">Chat</div></div>
                 <!-- Sprint 73 — super_admin-only features (checkAuth hides these for non-SA). -->
                 <div class="feat-tile" data-role-gated="super_admin" onclick="showView('gstr-reco')"><div class="feat-ic">📊</div><div class="feat-name">GSTR Reco</div></div>
@@ -3564,7 +3548,6 @@
             coa:       { icon: '📒', title: 'Ledgers',      sub: 'Your complete Tally chart of accounts — every ledger grouped by its account group. Read-only mirror of Tally Prime.', gap: false },
             parties:   { icon: '👥', title: 'Party Master', sub: 'Sundry debtors & creditors — GSTIN, PAN, place of supply. Keep them complete for GST & TDS.', gap: true },
             items:     { icon: '📦', title: 'Item Master',  sub: 'Stock items — HSN, GST rate, unit. Powers GSTR-1/3B HSN summaries.', gap: true },
-            actionlog: { icon: '📋', title: 'Action Log',   sub: "Every AI-detected gap and master change — what needs your attention and what's already been actioned.", gap: true },
         };
         function _renderMastersSection(sub) {
             const meta = _MASTER_SECTIONS[sub] || _MASTER_SECTIONS.coa;
@@ -12849,15 +12832,6 @@
                 }
                 document.getElementById('schema-subview-items').style.display = 'block';
                 loadItemMaster();
-            } else if (subview === 'actionlog') {
-                const btn = document.getElementById('schema-tab-actionlog');
-                if (btn) {
-                    btn.classList.add('active');
-                    btn.style.borderBottom = '2px solid var(--accent)';
-                    btn.style.color = 'var(--accent)';
-                }
-                document.getElementById('schema-subview-actionlog').style.display = 'block';
-                loadMasterActionLog();
             }
         }
 
