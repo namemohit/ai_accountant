@@ -1600,6 +1600,22 @@ def _ensure_billing_schema():
                 actor_user_id UUID,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );""")
+        # Per-voucher sync events — the DOWNLOAD side of the Vouchers "Event Logs"
+        # (upload side already comes from tally_outbox). direction: download|upload.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS voucher_sync_events (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                company_name TEXT,
+                voucher_number TEXT,
+                tally_master_id TEXT,
+                direction TEXT,                       -- download | upload
+                action TEXT,                          -- created | updated | pushed | failed
+                party TEXT,
+                amount NUMERIC,
+                detail TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_vse_company ON voucher_sync_events(company_name, created_at DESC)")
         # Sprint 51 — Supabase Auth: link our identity rows to the auth user (auth.users.id).
         cur.execute("ALTER TABLE users            ADD COLUMN IF NOT EXISTS auth_uid UUID")
         cur.execute("ALTER TABLE accounting_users ADD COLUMN IF NOT EXISTS auth_uid UUID")
@@ -6565,18 +6581,25 @@ def tds_quarterly_summary(company_id, fy):
     return rows
 
 
-def save_tally_vouchers(company_name, vouchers):
+def save_tally_vouchers(company_name, vouchers, source=None):
     """
     UPSERT vouchers by (company_name, tally_master_id || voucher_number).
     Critical fix: previously did DELETE-then-INSERT which wiped all history every sync.
     Now incremental-safe — existing vouchers are updated, new ones appended.
+
+    `source` (e.g. 'tally_pull'): when set, log a per-voucher DOWNLOAD event into
+    voucher_sync_events (created/updated) so the Vouchers Event Log shows what came
+    in from Tally. Local create paths leave source=None (they have their own logging).
     """
     if not vouchers:
-        return {"upserted": 0, "skipped": 0}
+        return {"upserted": 0, "skipped": 0, "created": 0, "updated": 0}
     conn = get_conn()
     cursor = conn.cursor()
     upserted = 0
     skipped = 0
+    created = 0
+    updated = 0
+    sync_events = []   # (voucher_number, tally_master_id, action, party, amount)
     try:
         for v in vouchers:
             date_raw = str(v.get("date", ""))
@@ -6670,14 +6693,56 @@ def save_tally_vouchers(company_name, vouchers):
                     tally_master_id, raw_xml, v.get("created_by")
                 ))
             upserted += 1
+            if existing_id:
+                updated += 1
+            else:
+                created += 1
+            if source:
+                sync_events.append((v_num, tally_master_id,
+                                    "updated" if existing_id else "created", party, amount))
         conn.commit()
+        # Per-voucher DOWNLOAD events (only on a real Tally pull). Best-effort.
+        if source and sync_events:
+            try:
+                for vn, mid, act, pty, amt in sync_events:
+                    cursor.execute("""
+                        INSERT INTO voucher_sync_events
+                            (company_name, voucher_number, tally_master_id, direction,
+                             action, party, amount, detail)
+                        VALUES (%s,%s,%s,'download',%s,%s,%s,%s)
+                    """, (company_name, vn, mid, act, pty, amt, source))
+                conn.commit()
+            except Exception as _ee:
+                print(f"[voucher_sync_events] {_ee}"); conn.rollback()
     except Exception as e:
         print(f"Error saving tally vouchers: {e}")
         conn.rollback()
     finally:
         cursor.close()
         conn.close()
-    return {"upserted": upserted, "skipped": skipped}
+    return {"upserted": upserted, "skipped": skipped, "created": created, "updated": updated}
+
+
+def list_voucher_sync_events(company_name, limit=50):
+    """Recent per-voucher sync events (the download side of the Event Log)."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT voucher_number, tally_master_id, direction, action, party,
+                   amount, detail, created_at
+            FROM voucher_sync_events
+            WHERE company_name = %s
+            ORDER BY created_at DESC LIMIT %s
+        """, (company_name, limit))
+        rows = cur.fetchall()
+        for r in rows:
+            if r.get("amount") is not None: r["amount"] = float(r["amount"])
+            if r.get("created_at"): r["created_at"] = str(r["created_at"])
+        return rows
+    except Exception as e:
+        print(f"[list_voucher_sync_events] {e}"); return []
+    finally:
+        cur.close(); conn.close()
 
 
 def get_tally_voucher(voucher_id):

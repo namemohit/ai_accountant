@@ -4293,6 +4293,27 @@ async def voucher_events_endpoint(company_name: str, company_id: str = None, lim
         except Exception as ce:
             print(f"[voucher_events] cleanup fetch failed: {ce}", flush=True)
 
+        # DOWNLOAD side — per-voucher events from Tally pulls (created/updated).
+        try:
+            for ev in db.list_voucher_sync_events(company_name, limit=limit):
+                act = ev.get("action")
+                rows.append({
+                    "id": None,
+                    "event_source": "tally_download",
+                    "status": f"tally_{act}",          # tally_created | tally_updated
+                    "direction": ev.get("direction"),
+                    "voucher_type": None,
+                    "source_file_name": ev.get("voucher_number") or "(tally voucher)",
+                    "source_file_type": "tally_pull",
+                    "tally_voucher_guid": ev.get("tally_master_id"),
+                    "parsed_payload": {"party": ev.get("party"), "total_amount": ev.get("amount")},
+                    "reviewed_payload": {"party": ev.get("party"), "total_amount": ev.get("amount")},
+                    "created_at": ev.get("created_at"),
+                    "updated_at": ev.get("created_at"),
+                })
+        except Exception as de:
+            print(f"[voucher_events] download fetch failed: {de}", flush=True)
+
         # Sort merged stream by updated_at desc, cap at limit
         rows.sort(key=lambda x: (x.get("updated_at") or x.get("created_at") or ""), reverse=True)
         rows = rows[:limit]
@@ -5404,7 +5425,7 @@ async def ingest_tally_data(payload: dict):
         import asyncio as _aio
         _loop = _aio.get_event_loop()
         try:
-            v_result = await _loop.run_in_executor(None, db.save_tally_vouchers, tally_company, vouchers)
+            v_result = await _loop.run_in_executor(None, db.save_tally_vouchers, tally_company, vouchers, 'tally_pull')
             ledger_count = await _loop.run_in_executor(None, db.save_tally_ledgers, tally_company, rich_ledgers)
             group_count = await _loop.run_in_executor(None, db.save_tally_groups, tally_company, groups)
             stock_count = await _loop.run_in_executor(None, db.save_tally_stock_items, tally_company, stock_items)
