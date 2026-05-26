@@ -146,6 +146,22 @@
                         </div>
                     </div>
                     <button class="btn confirm-btn" onclick="handleLogin()" id="login-btn" style="width: 100%; margin-top: 12px; padding: 12px; font-weight: bold; font-size: 1rem;">Sign In</button>
+                    <div style="text-align:right; margin-top:10px;">
+                        <a href="#" onclick="handleForgot(); return false;" style="color:#94a3b8; font-size:0.8rem; text-decoration:none;">Forgot password?</a>
+                    </div>
+                </div>
+
+                <!-- Set-new-password (shown when arriving from a Supabase recovery link) -->
+                <div id="form-recovery" style="display: none;">
+                    <p style="text-align:left; color:#94a3b8; font-size:0.85rem; margin:0 0 14px;">Set a new password for your account.</p>
+                    <div class="form-group" style="text-align: left;">
+                        <label>New Password *</label>
+                        <div class="pw-wrap">
+                            <input type="password" id="rec-password" autocomplete="new-password" placeholder="••••••••">
+                            <button type="button" class="toggle" title="Show/hide" onclick="togglePw('rec-password', this)">👁</button>
+                        </div>
+                    </div>
+                    <button class="btn confirm-btn" onclick="handleSetNewPassword()" id="rec-btn" style="width: 100%; margin-top: 12px; padding: 12px; font-weight: bold; font-size: 1rem; background:#10b981;">Update password</button>
                 </div>
 
                 <!-- Create-account Form (uniform signup — your own workspace) -->
@@ -182,15 +198,15 @@
                         </div>
                     </div>
                     <div class="form-group" style="text-align: left;">
-                        <label>Email Address</label>
-                        <input type="email" id="reg-email" autocomplete="email" placeholder="rohit@enterprises.com">
+                        <label>Email Address *</label>
+                        <input type="email" id="reg-email" autocomplete="email" placeholder="rohit@enterprises.com" required>
                     </div>
                     <button class="btn confirm-btn" onclick="handleRegister()" id="register-btn" style="width: 100%; margin-top: 12px; padding: 12px; font-weight: bold; font-size: 1rem; background: #10b981;">Create account</button>
                 </div>
 
                 <p id="error-msg" style="color: #f87171; margin-top: 18px; font-size: 0.875rem; display: none;"></p>
                 <p id="success-msg" style="color: #4ade80; margin-top: 18px; font-size: 0.875rem; display: none;"></p>
-                <div style="margin-top: 18px; text-align:center; font-size:0.7rem; color:#6b6259; user-select:all;">YantrAI Cloud · v102</div>
+                <div style="margin-top: 18px; text-align:center; font-size:0.7rem; color:#6b6259; user-select:all;">YantrAI Cloud · v105</div>
             </div>
         </div>
     </div>
@@ -267,8 +283,8 @@
             const email = document.getElementById('reg-email').value.trim();
             const btn = document.getElementById('register-btn');
             _clearMsgs();
-            if (!username || !password || !company_name) { _err('Username, password, and company / workspace name are required.'); return; }
-            if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { _err('Please enter a valid email address.'); return; }
+            if (!username || !password || !company_name || !email) { _err('Email, username, password, and company / workspace name are required.'); return; }
+            if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { _err('Please enter a valid email address.'); return; }
             btn.disabled = true; btn.innerText = 'Creating account…';
             try {
                 const res = await fetch('/api/onboard', {
@@ -301,9 +317,49 @@
                 if (!c.enabled || !c.anon_key) { document.getElementById('google-btn').style.display = 'none'; return; }
                 _sb = supabase.createClient(c.supabase_url, c.anon_key,
                     { auth: { persistSession: false, detectSessionInUrl: true, autoRefreshToken: false } });
-                const { data } = await _sb.auth.getSession();   // populated if returning from Google
+                const { data } = await _sb.auth.getSession();   // populated from Google OR a recovery link
+                // Password-reset link lands here with ?recovery=1 (and a recovery token in the hash).
+                const isRecovery = location.search.includes('recovery=1') || (location.hash || '').includes('type=recovery');
+                if (isRecovery) { _showRecovery(); return; }
                 if (data && data.session) { await _completeGoogle(data.session); }
             } catch (e) { console.log('supabase init', e); document.getElementById('google-btn').style.display = 'none'; }
+        }
+
+        // ── Password reset ──────────────────────────────────────────────
+        async function handleForgot() {
+            _clearMsgs();
+            const email = (prompt('Enter your account email to receive a password-reset link:') || '').trim();
+            if (!email) return;
+            try {
+                await fetch('/api/auth/forgot-password', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email })
+                });
+            } catch (e) { /* ignore — we always show the same message */ }
+            const s = document.getElementById('success-msg');
+            s.innerText = 'If an account exists for that email, a reset link has been sent. Check your inbox.';
+            s.style.display = 'block';
+        }
+        function _showRecovery() {
+            ['form-login', 'form-register'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+            const tabs = document.getElementById('tab-login'); if (tabs && tabs.parentElement) tabs.parentElement.style.display = 'none';
+            const g = document.getElementById('google-btn'); if (g) g.style.display = 'none';
+            const rec = document.getElementById('form-recovery'); if (rec) rec.style.display = 'block';
+        }
+        async function handleSetNewPassword() {
+            const pw = document.getElementById('rec-password').value;
+            _clearMsgs();
+            if (!pw || pw.length < 6) { _err('Password must be at least 6 characters.'); return; }
+            const btn = document.getElementById('rec-btn'); btn.disabled = true; btn.innerText = 'Updating…';
+            try {
+                if (!_sb) throw new Error('Reset session not ready — open the reset link again.');
+                const { error } = await _sb.auth.updateUser({ password: pw });
+                if (error) throw new Error(error.message);
+                history.replaceState(null, '', location.pathname);   // strip the recovery #hash
+                const s = document.getElementById('success-msg');
+                s.innerText = 'Password updated — you can sign in now.'; s.style.display = 'block';
+                setTimeout(() => { document.getElementById('form-recovery').style.display = 'none'; location.href = '/login'; }, 1300);
+            } catch (e) { _err(e.message); btn.disabled = false; btn.innerText = 'Update password'; }
         }
         async function googleSignIn() {
             if (!_sb) { _err('Google sign-in isn’t available yet — use username & password.'); return; }

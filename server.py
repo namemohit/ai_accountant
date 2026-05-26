@@ -800,6 +800,17 @@ def _supabase_refresh(refresh_token):
         raise ValueError(f"refresh {r.status_code}: {r.text[:200]}")
     return r.json()
 
+def _supabase_recover(email, redirect_to=None):
+    """Trigger a Supabase password-reset (recovery) email. Returns True on accept.
+    Delivery depends on SMTP being configured in the Supabase project."""
+    import requests as _rq, urllib.parse as _up
+    url = f"{SUPABASE_URL}/auth/v1/recover"
+    if redirect_to:
+        url += "?redirect_to=" + _up.quote(redirect_to, safe="")
+    r = _rq.post(url, headers={"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"},
+                 json={"email": email}, timeout=15)
+    return r.status_code in (200, 204)
+
 def _supabase_admin_create_user(email, password):
     """Create a Supabase auth user (service role). Returns the auth user id, or None."""
     import requests as _rq
@@ -6023,6 +6034,15 @@ async def api_onboard(payload: dict):
     """Sprint 46 — uniform self-onboarding. Creates the user's own workspace
     (org + first company + owner membership). No type picker; relationships are
     formed later via handshake codes (/api/connect/*)."""
+    # A real, unique email is now REQUIRED so the account is recoverable + verifiable
+    # (Supabase uses email as the login identity). New signups only.
+    import re as _re
+    email = (payload.get("email") or "").strip()
+    if not email or not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        raise HTTPException(status_code=400, detail="A valid email address is required.")
+    if db.get_user_by_email(email):
+        raise HTTPException(status_code=409, detail="An account with this email already exists. Try signing in or resetting your password.")
+    payload["email"] = email
     res = db.onboard_user(
         username=payload.get("username"), password=payload.get("password"),
         name=payload.get("name"), email=payload.get("email"), phone=payload.get("phone"),
@@ -6127,6 +6147,22 @@ async def api_auth_refresh(payload: dict):
         raise HTTPException(status_code=401, detail="Could not refresh session.")
     return {"status": "success", "access_token": g.get("access_token"),
             "refresh_token": g.get("refresh_token")}
+
+
+@app.post("/api/auth/forgot-password")
+async def api_forgot_password(payload: dict):
+    """Send a Supabase password-reset email. Always returns a generic success so the
+    response never reveals whether an email is registered (no account enumeration).
+    Email delivery requires SMTP configured in the Supabase project."""
+    email = ((payload or {}).get("email") or "").strip()
+    if email and SUPABASE_AUTH_ENABLED:
+        try:
+            site = os.getenv("PUBLIC_SITE_URL", "https://workspace.yantrailabs.com").rstrip("/")
+            _supabase_recover(email, redirect_to=f"{site}/login.html?recovery=1")
+        except Exception as e:
+            print(f"[forgot-password] {e}", flush=True)
+    return {"status": "success",
+            "message": "If an account exists for that email, a password-reset link has been sent."}
 
 
 @app.get("/api/auth/config")
