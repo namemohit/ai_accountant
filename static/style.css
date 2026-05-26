@@ -1226,6 +1226,9 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
 .mobile-drawer-footer {
   padding: 12px;
   border-top: 1px solid var(--border);
+  /* Clear the fixed bottom-nav (60px) + iOS home indicator so Logout/version
+     are never hidden behind it on mobile. */
+  padding-bottom: calc(12px + 60px + env(safe-area-inset-bottom));
 }
 
 /* Sprint — clean 3-section drawer: logo / agent items / logout + version */

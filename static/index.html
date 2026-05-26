@@ -14,7 +14,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
-    <link rel="stylesheet" href="/static/style.css?v=102">
+    <link rel="stylesheet" href="/static/style.css?v=103">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;800&display=swap" rel="stylesheet">
     <!-- Sprint 72 — load FontAwesome non-render-blocking (swap media to 'all' onload). -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" media="print" onload="this.media='all'">
@@ -3128,10 +3128,8 @@
             const active = window.__activeAgent;
             const meta = active ? (window.__agentBySlug || {})[active] : null;
             const cur = window.__currentView || '';
-            let html = '<div class="drawer-sep" style="border-top:1px solid var(--border); margin:0 0 8px;"></div>';
             const items = [];
             if (meta) {
-                html += `<div class="drawer-agent-title"><span>${meta.icon || '🤖'}</span> ${escapeHtml(meta.name || active)}</div>`;
                 // Pull canonical icon+label from the (hidden) sidebar nav items that
                 // belong to this agent and aren't role-gated away.
                 document.querySelectorAll('nav .nav-item[data-view]').forEach(el => {
@@ -3143,12 +3141,16 @@
                     items.push(`<div class="mobile-drawer-item${activeCls}" data-view="${v}" onclick="haptic(8); mobileNav('${v}')">${el.innerHTML}</div>`);
                 });
             }
+            let html = '';
             if (items.length) {
-                html += items.join('');
+                // Separators only frame real agent items.
+                const sep = '<div class="drawer-sep" style="border-top:1px solid var(--border); margin:0;"></div>';
+                if (meta) html += `<div class="drawer-agent-title"><span>${meta.icon || '🤖'}</span> ${escapeHtml(meta.name || active)}</div>`;
+                html += sep + items.join('') + sep;
             } else {
+                // No agent menu → just the placeholder, no surrounding lines.
                 html += '<div class="drawer-empty">Agent menu items appear here</div>';
             }
-            html += '<div class="drawer-sep" style="border-top:1px solid var(--border); margin:10px 0 0;"></div>';
             nav.innerHTML = html;
         }
 
