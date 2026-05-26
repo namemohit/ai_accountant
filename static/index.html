@@ -587,6 +587,9 @@
         </div>
     </div>
 
+    <!-- Slim mobile-only bar showing the open skill (agent › skill). Desktop uses #app-topbar. -->
+    <div id="m-skill-bar"></div>
+
     <main class="main-content">
         <!-- Sprint 61 — universal top bar (replaces the left sidebar on desktop) -->
         <div id="app-topbar">
@@ -887,7 +890,7 @@
                         <div style="flex: 1;"></div>
                         <input type="file" id="ai-bank-input" accept=".csv,.xlsx,.xls,.pdf" style="display:none" onchange="handleBankUpload(this)">
                         <button onclick="document.getElementById('ai-bank-input').click()" style="background: linear-gradient(135deg, #38bdf8 0%, #a855f7 100%); color: white; font-weight: bold; padding: 6px 14px; border-radius: 6px; border: none; cursor: pointer; font-size: 0.8rem; margin-bottom: 6px;">📤 Upload Statement</button>
-                        <button onclick="runBankSync()" style="background: rgba(56, 189, 248, 0.15); color: var(--primary); border: 1px solid var(--primary); padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; margin-bottom: 6px;">🔄 Sync Now</button>
+                        <!-- Sync Now removed — all Tally sync now lives in Vouchers ▸ Import/Export. -->
                     </div>
                 </div>
 
@@ -3127,12 +3130,15 @@
             const active = window.__activeAgent;
             const meta = active ? (window.__agentBySlug || {})[active] : null;
             const cur = window.__currentView || '';
+            const curTitle = _curViewTitle();   // label of the open skill (blank on agent home)
             let html = '';   // brand now lives at the far right of the bar (Sprint 62)
             if (meta) {
                 html += `<span class="tb-tab" onclick="exitToHome()">‹ Home</span>`;
                 html += `<span class="tb-divider"></span>`;
                 // App name → return to the agent's own launcher (its first view).
                 html += `<span class="tb-appname" style="cursor:pointer" title="Apps" onclick="showView('${_firstViewOf(active)}')">${meta.icon || '🤖'} ${escapeHtml(meta.name || active)}</span>`;
+                // Current skill name (breadcrumb) so it's clear which screen is open.
+                if (curTitle) html += `<span class="tb-crumb">› ${curTitle}</span>`;
                 html += `<span class="tb-divider"></span>`;
                 // Tabs from the hidden sidebar nav items that belong to this agent.
                 document.querySelectorAll('nav .nav-item[data-view]').forEach(el => {
@@ -3147,6 +3153,30 @@
                 html += `<span class="tb-appname">${_PLATFORM_TITLES[cur] || ''}</span>`;
             }
             left.innerHTML = html;
+            _renderMobileSkillBar(meta, curTitle);
+        }
+
+        // Title of the currently open skill/view (blank on Home or an agent's launcher).
+        function _curViewTitle() {
+            const cur = window.__currentView || '';
+            if (!cur || cur === 'home') return '';
+            if (_PLATFORM_TITLES[cur]) return _PLATFORM_TITLES[cur];
+            const active = window.__activeAgent;
+            if (active && cur === _firstViewOf(active)) return '';   // agent's own launcher
+            const el = document.querySelector(`nav .nav-item[data-view="${cur}"]`);
+            return el ? el.textContent.trim() : '';
+        }
+
+        // Slim mobile top bar showing where you are (agent › skill) — mobile has no #app-topbar.
+        function _renderMobileSkillBar(meta, curTitle) {
+            const bar = document.getElementById('m-skill-bar'); if (!bar) return;
+            const cur = window.__currentView || '';
+            let txt = '';
+            if (meta) txt = `${meta.icon || '🤖'} ${escapeHtml(meta.name || window.__activeAgent)}${curTitle ? ' › ' + curTitle : ''}`;
+            else if (cur && cur !== 'home') txt = _PLATFORM_TITLES[cur] || curTitle || '';
+            bar.innerHTML = txt;
+            bar.dataset.show = txt ? '1' : '';
+            document.body.classList.toggle('mskill', !!txt);
         }
 
         // ── Sprint 76 — Data Analyst (super-agent platform analytics) ──
@@ -11746,7 +11776,7 @@
             countEl.innerText = `(last ${rows.length})`;
             if (tabCount) tabCount.innerText = rows.length > 0 ? `(${rows.length})` : '';
             if (!rows.length) {
-                bodyEl.innerHTML = '<span style="color:#64748b;">No syncs recorded yet. Click "Sync Now" or upload a statement.</span>';
+                bodyEl.innerHTML = '<span style="color:#64748b;">No syncs recorded yet. Upload a statement above, or pull from Tally via Vouchers ▸ Import.</span>';
                 return;
             }
             const typeMap = {
@@ -11877,7 +11907,7 @@
             setStat('bank-stat-posted',        s.posted);
 
             if (!rows || !rows.length) {
-                tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; padding:20px; color:#64748b;">No bank transactions found. Click "Sync Now" or "Upload Statement" to populate.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; padding:20px; color:#64748b;">No bank transactions found. Click "Upload Statement" above, or pull from Tally via Vouchers ▸ Import.</td></tr>';
                 return;
             }
 

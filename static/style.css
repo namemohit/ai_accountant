@@ -402,6 +402,9 @@ body {
 #app-topbar .ht-btn:hover { border-color: var(--primary); color: #f4f4f5; }
 #app-topbar .ht-wallet { color: #38bdf8; border-color: rgba(56,189,248,0.3); background: rgba(56,189,248,0.08); }
 @media (max-width: 768px) { #app-topbar { display: none; } }   /* mobile keeps its own header/drawer */
+/* Mobile-only skill bar — hidden on desktop (desktop uses #app-topbar). */
+#m-skill-bar { display: none; }
+
 .app-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 16px; margin-top: 18px;
@@ -1338,6 +1341,16 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
      the bottom; reclaim the 60px the nav was reserving. Native back returns. */
   body.chat-active #bottom-nav { display: none !important; }
   body.chat-active .main-content { height: var(--app-height, 100dvh) !important; }
+  /* Slim top bar (mobile) showing the open skill — only when inside an agent/skill.
+     Reserves 40px at the top, symmetric to the bottom-nav reservation. */
+  body.mskill #m-skill-bar {
+    display: flex; align-items: center; gap: 6px; position: fixed; top: 0; left: 0; right: 0;
+    height: 40px; z-index: 590; padding: 0 14px; color: #f4f4f5; font-weight: 600; font-size: 0.9rem;
+    background: rgba(42,38,35,0.98); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  body.mskill .main-content { margin-top: 40px; height: calc(var(--app-height, 100dvh) - 60px - 40px - env(safe-area-inset-bottom)); }
+  body.mskill.chat-active .main-content { margin-top: 40px; height: calc(var(--app-height, 100dvh) - 40px) !important; }
   /* Edit-mode "Done" button must clear the fixed bottom nav on mobile. */
   #apps-edit-done { bottom: calc(16px + 60px + env(safe-area-inset-bottom)); }
   /* Sprint 68/69 — phone: fixed 4-column app grid, larger icons */
