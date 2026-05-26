@@ -403,6 +403,10 @@
             <div class="nav-item" data-view="training" data-platform="1" onclick="showView('training')"><span>🔌</span> Connectors</div>
             <div class="nav-item" data-view="training-progress" data-platform="1" onclick="showView('training-progress')"><span>📚</span> Training</div>
             <div class="nav-item" data-view="leadgen" onclick="showView('leadgen')"><span>🎯</span> Lead Gen</div>
+            <!-- Network agent views (agent-scoped; shown only inside the Network app) -->
+            <div class="nav-item" data-view="network-home" onclick="showView('network-home')"><span>🔗</span> Connect</div>
+            <div class="nav-item" data-view="network-list" onclick="showView('network-list')"><span>👥</span> My Network</div>
+            <div class="nav-item" data-view="network-requests" onclick="showView('network-requests')"><span>📨</span> Requests</div>
 
             <div class="nav-item active" data-view="chat" onclick="showView('chat')"><span>💬</span> Chat</div>
 
@@ -1303,6 +1307,70 @@
 
             <h3 style="margin-top:26px; margin-bottom:12px; font-size:1rem; color:#e2e8f0;">My apps</h3>
             <div id="dev-apps-list"><div style="color:#64748b; font-size:0.85rem;">Loading…</div></div>
+        </div>
+
+        <!-- ===================== Network agent ===================== -->
+        <!-- Connect: your Workspace ID + connect-to-someone + relationship picker -->
+        <div id="network-home-view" class="dashboard-view" style="display:none;">
+            <header>
+                <h1>🔗 Connect</h1>
+                <p style="color:#94a3b8;">Link your workspace with your CA, accountant, auditor, staff or clients — like adding a contact. Share your Workspace ID, or connect to theirs.</p>
+            </header>
+
+            <div class="card" style="margin-top:18px; max-width:560px;">
+                <div style="font-size:0.78rem; color:#94a3b8; margin-bottom:6px;">Your Workspace ID</div>
+                <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+                    <span id="nw-my-id" style="font-size:1.6rem; font-weight:700; letter-spacing:1px; color:#fff; font-family:ui-monospace,Menlo,monospace;">—</span>
+                    <button onclick="nwCopyId()" style="padding:7px 14px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; cursor:pointer; font-size:0.82rem;">📋 Copy</button>
+                </div>
+                <div id="nw-my-name" style="font-size:0.82rem; color:#64748b; margin-top:6px;"></div>
+                <div style="font-size:0.78rem; color:#64748b; margin-top:10px;">Share this ID with someone you want to give access to your books. They enter it and pick how you’re related; you approve.</div>
+            </div>
+
+            <div class="card" style="margin-top:18px; max-width:560px;">
+                <h3 style="margin:0 0 12px; font-size:1rem; color:#e2e8f0;">Connect to a workspace</h3>
+                <label style="font-size:0.78rem; color:#94a3b8;">Their Workspace ID
+                    <input id="nw-target-id" placeholder="YTR-123-456" autocomplete="off" style="width:100%; margin-top:4px; padding:9px 11px; background:var(--bg-light); color:#fff; border:1px solid var(--border); border-radius:8px; font-family:ui-monospace,monospace; letter-spacing:1px;">
+                </label>
+                <label style="font-size:0.78rem; color:#94a3b8; display:block; margin-top:12px;">How are they related to you?
+                    <select id="nw-rel-type" style="width:100%; margin-top:4px; padding:9px 11px; background:var(--bg-light); color:#fff; border:1px solid var(--border); border-radius:8px;">
+                        <option value="ca">They are my CA / accounting firm — manage my books</option>
+                        <option value="accountant">They are my Accountant — enter & edit vouchers</option>
+                        <option value="auditor">They are my Auditor — view only</option>
+                        <option value="staff">They are my Staff / Junior — limited entry</option>
+                        <option value="other">Other — they decide the access</option>
+                    </select>
+                </label>
+                <div id="nw-rel-hint" style="font-size:0.76rem; color:#64748b; margin-top:8px;"></div>
+                <button onclick="nwSendRequest()" style="margin-top:14px; padding:9px 18px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer;">Send connection request</button>
+                <div id="nw-req-msg" style="font-size:0.82rem; margin-top:10px;"></div>
+            </div>
+
+            <div style="margin-top:18px; max-width:560px;">
+                <span style="font-size:0.82rem; color:#94a3b8;">Prefer a one-time code instead of a Workspace ID?</span>
+                <button onclick="if(typeof openConnectionsModal==='function')openConnectionsModal()" style="margin-left:8px; padding:6px 12px; background:transparent; color:var(--primary-light); border:1px solid var(--border); border-radius:8px; cursor:pointer; font-size:0.8rem;">Invite a teammate by code</button>
+            </div>
+        </div>
+
+        <!-- My Network: active connections (both directions) -->
+        <div id="network-list-view" class="dashboard-view" style="display:none;">
+            <header>
+                <h1>👥 My Network</h1>
+                <p style="color:#94a3b8;">Workspaces and people you’re connected with, and the access each side has.</p>
+            </header>
+            <div id="nw-connections" style="margin-top:16px;"><div style="color:#64748b; font-size:0.85rem;">Loading…</div></div>
+        </div>
+
+        <!-- Requests: incoming (approve/decline) + outgoing (pending) -->
+        <div id="network-requests-view" class="dashboard-view" style="display:none;">
+            <header>
+                <h1>📨 Requests</h1>
+                <p style="color:#94a3b8;">People asking to connect with your workspace, and your pending outgoing requests.</p>
+            </header>
+            <h3 style="margin-top:18px; margin-bottom:10px; font-size:0.95rem; color:#e2e8f0;">Incoming</h3>
+            <div id="nw-incoming"><div style="color:#64748b; font-size:0.85rem;">Loading…</div></div>
+            <h3 style="margin-top:24px; margin-bottom:10px; font-size:0.95rem; color:#e2e8f0;">Outgoing (awaiting their approval)</h3>
+            <div id="nw-outgoing"><div style="color:#64748b; font-size:0.85rem;">Loading…</div></div>
         </div>
 
         <!-- Sprint 49 — host for remote (embedded) agents loaded from outside the SPA -->
@@ -4131,6 +4199,169 @@
             } catch(e) {}
         }
 
+        // ───────────────────── Network agent ─────────────────────
+        function _nwUser() { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } }
+        window.__nwMyId = window.__nwMyId || '';
+        const _NW_REL_LABELS = {
+            ca:'CA / accounting firm', accountant:'Accountant', auditor:'Auditor',
+            staff:'Staff / Junior', manager:'Manager', other:'Other' };
+        const _NW_ROLE_HINTS = {
+            ca:'They’ll get manager access — full books management.',
+            accountant:'They’ll get accountant access — enter & edit vouchers.',
+            auditor:'They’ll get view-only access.',
+            staff:'They’ll get junior access — limited entry.',
+            other:'You’ll choose what access to grant when they accept.' };
+
+        async function loadNetworkHome() {
+            const u = _nwUser();
+            const hint = document.getElementById('nw-rel-hint');
+            const sel = document.getElementById('nw-rel-type');
+            if (sel && hint && !sel.__wired) {
+                const upd = () => { hint.textContent = _NW_ROLE_HINTS[sel.value] || ''; };
+                sel.addEventListener('change', upd); sel.__wired = true; upd();
+            }
+            try {
+                const r = await fetch(`${API}/api/network/me?username=${encodeURIComponent(u.username||'')}`);
+                const d = await r.json();
+                if (r.ok && d.connect_id) {
+                    window.__nwMyId = d.connect_id;
+                    const idEl = document.getElementById('nw-my-id'); if (idEl) idEl.textContent = d.connect_id;
+                    const nm = document.getElementById('nw-my-name'); if (nm) nm.textContent = d.org_name ? `(${d.org_name})` : '';
+                }
+            } catch(_) {}
+            nwRefreshBadge();
+        }
+        function nwCopyId() {
+            const id = window.__nwMyId || (document.getElementById('nw-my-id')||{}).textContent || '';
+            if (!id || id === '—') return;
+            try { navigator.clipboard.writeText(id); } catch(_) {}
+            try { showChatToast && showChatToast('Workspace ID copied'); } catch(_) {}
+        }
+        async function nwSendRequest() {
+            const u = _nwUser();
+            const tgt = (document.getElementById('nw-target-id')||{}).value || '';
+            const rel = (document.getElementById('nw-rel-type')||{}).value || 'other';
+            const msg = document.getElementById('nw-req-msg');
+            if (!tgt.trim()) { if (msg){ msg.style.color='#f87171'; msg.textContent='Enter the Workspace ID you want to connect to.'; } return; }
+            if (msg) { msg.style.color='#94a3b8'; msg.textContent='Sending…'; }
+            try {
+                const r = await fetch(`${API}/api/network/request`, { method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({ username:u.username, target_connect_id:tgt.trim(), relationship_type:rel }) });
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || 'Could not send request.');
+                if (msg) { msg.style.color='#4ade80'; msg.textContent=`Request sent to ${d.target_name||'that workspace'}. They’ll see it under Requests.`; }
+                const ti = document.getElementById('nw-target-id'); if (ti) ti.value='';
+            } catch(e) { if (msg) { msg.style.color='#f87171'; msg.textContent=e.message; } }
+        }
+
+        async function loadNetworkRequests() {
+            const u = _nwUser();
+            const inc = document.getElementById('nw-incoming'), out = document.getElementById('nw-outgoing');
+            try {
+                const r = await fetch(`${API}/api/network/requests?username=${encodeURIComponent(u.username||'')}`);
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || 'Could not load requests.');
+                if (inc) inc.innerHTML = (d.incoming||[]).length ? d.incoming.map(_nwIncomingCard).join('')
+                    : '<div style="color:#64748b; font-size:0.85rem;">No incoming requests.</div>';
+                if (out) out.innerHTML = (d.outgoing||[]).length ? d.outgoing.map(_nwOutgoingCard).join('')
+                    : '<div style="color:#64748b; font-size:0.85rem;">No pending outgoing requests.</div>';
+            } catch(e) {
+                if (inc) inc.innerHTML = `<div style="color:#f87171; font-size:0.85rem;">${escapeHtml(e.message)}</div>`;
+            }
+            nwRefreshBadge();
+        }
+        function _nwIncomingCard(x) {
+            const who = escapeHtml(x.requester_name || x.requester_connect_id || 'A workspace');
+            const rel = _NW_REL_LABELS[x.relationship_type] || x.relationship_type;
+            return `<div class="card" style="max-width:620px; margin-bottom:10px;">
+                <div style="font-weight:600; color:#f4f4f5;">${who}</div>
+                <div style="font-size:0.8rem; color:#94a3b8; margin-top:3px;">Wants to connect as your <b>${escapeHtml(rel)}</b> — will get <b>${escapeHtml(x.granted_role)}</b> access to your workspace.</div>
+                <div style="display:flex; gap:8px; margin-top:12px;">
+                    <button onclick="nwApprove('${x.id}')" style="padding:7px 14px; background:rgba(74,222,128,0.14); color:#4ade80; border:1px solid rgba(74,222,128,0.35); border-radius:8px; font-weight:600; cursor:pointer;">Approve</button>
+                    <button onclick="nwDecline('${x.id}')" style="padding:7px 12px; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.25); border-radius:8px; cursor:pointer;">Decline</button>
+                </div>
+            </div>`;
+        }
+        function _nwOutgoingCard(x) {
+            const who = escapeHtml(x.target_name || x.target_connect_id || 'A workspace');
+            const rel = _NW_REL_LABELS[x.relationship_type] || x.relationship_type;
+            return `<div class="card" style="max-width:620px; margin-bottom:10px;">
+                <div style="font-weight:600; color:#f4f4f5;">${who}</div>
+                <div style="font-size:0.8rem; color:#94a3b8; margin-top:3px;">You asked to connect as their <b>${escapeHtml(rel)}</b> — awaiting their approval.</div>
+            </div>`;
+        }
+        async function nwApprove(id) {
+            const u = _nwUser();
+            try {
+                const r = await fetch(`${API}/api/network/approve`, { method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({ username:u.username, request_id:id }) });
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || 'Could not approve.');
+                try { showChatToast && showChatToast('Connected.'); } catch(_) {}
+            } catch(e) { alert(e.message); }
+            loadNetworkRequests();
+        }
+        async function nwDecline(id) {
+            const u = _nwUser();
+            try {
+                const r = await fetch(`${API}/api/network/decline`, { method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({ username:u.username, request_id:id }) });
+                if (!r.ok) { const d = await r.json(); throw new Error(d.detail || 'Could not decline.'); }
+            } catch(e) { alert(e.message); }
+            loadNetworkRequests();
+        }
+
+        async function loadNetworkList() {
+            const u = _nwUser();
+            const box = document.getElementById('nw-connections');
+            try {
+                const r = await fetch(`${API}/api/network/connections?username=${encodeURIComponent(u.username||'')}`);
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || 'Could not load connections.');
+                const cs = d.connections || [];
+                box.innerHTML = cs.length ? cs.map(_nwConnCard).join('')
+                    : '<div style="color:#64748b; font-size:0.85rem;">No connections yet. Use <b>Connect</b> to link with your CA, accountant or clients.</div>';
+            } catch(e) { box.innerHTML = `<div style="color:#f87171; font-size:0.85rem;">${escapeHtml(e.message)}</div>`; }
+        }
+        function _nwConnCard(x) {
+            const rel = _NW_REL_LABELS[x.relationship_type] || x.relationship_type;
+            const dir = x.direction === 'they access mine'
+                ? `They access your workspace (${escapeHtml(x.granted_role)})`
+                : `You access their workspace (${escapeHtml(x.granted_role)})`;
+            return `<div class="card" style="max-width:620px; margin-bottom:10px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+                    <div>
+                        <div style="font-weight:600; color:#f4f4f5;">${escapeHtml(x.other_name||'Workspace')}</div>
+                        <div style="font-size:0.78rem; color:#94a3b8; margin-top:3px;">${escapeHtml(rel)} · ${dir}</div>
+                    </div>
+                    <button onclick="nwRevoke('${x.id}')" style="padding:6px 12px; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.25); border-radius:8px; cursor:pointer; font-size:0.8rem;">Revoke</button>
+                </div>
+            </div>`;
+        }
+        async function nwRevoke(id) {
+            if (!confirm('Revoke this connection? Access will be removed immediately.')) return;
+            const u = _nwUser();
+            try {
+                const r = await fetch(`${API}/api/network/revoke`, { method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({ username:u.username, relationship_id:id }) });
+                if (!r.ok) { const d = await r.json(); throw new Error(d.detail || 'Could not revoke.'); }
+            } catch(e) { alert(e.message); }
+            loadNetworkList();
+        }
+        // Pending-incoming count → Home widget + (future) badges.
+        async function nwRefreshBadge() {
+            const u = _nwUser();
+            try {
+                const r = await fetch(`${API}/api/network/requests?username=${encodeURIComponent(u.username||'')}`);
+                const d = await r.json();
+                if (r.ok) {
+                    window.__nwPending = (d.incoming||[]).length;
+                    const b = document.getElementById('nw-home-badge');
+                    if (b) { b.textContent = window.__nwPending || ''; b.style.display = window.__nwPending ? 'inline-flex' : 'none'; }
+                }
+            } catch(_) {}
+        }
+
         // ── Sprint 50 — Developer Portal: register + manage your own remote apps ──
         function _devUser() { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } }
         async function loadDevPortal() {
@@ -4822,6 +5053,17 @@
             // Sprint 50 — Developer Portal view
             if (view === 'dev-portal') {
                 setTimeout(() => { if (typeof loadDevPortal === 'function') loadDevPortal(); }, 50);
+            }
+
+            // Network agent views
+            if (view === 'network-home') {
+                setTimeout(() => { if (typeof loadNetworkHome === 'function') loadNetworkHome(); }, 50);
+            }
+            if (view === 'network-list') {
+                setTimeout(() => { if (typeof loadNetworkList === 'function') loadNetworkList(); }, 50);
+            }
+            if (view === 'network-requests') {
+                setTimeout(() => { if (typeof loadNetworkRequests === 'function') loadNetworkRequests(); }, 50);
             }
 
             // Sprint 55 — Upload anything view
