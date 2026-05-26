@@ -401,6 +401,7 @@
             <div class="nav-item" data-view="uploads" data-platform="1" onclick="showView('uploads')"><span>📎</span> Files</div>
             <div class="nav-item" data-view="yantrai-chat" data-platform="1" onclick="showView('yantrai-chat')"><span>📝</span> Create task</div>
             <div class="nav-item" data-view="training" data-platform="1" onclick="showView('training')"><span>🔌</span> Connectors</div>
+            <div class="nav-item" data-view="training-progress" data-platform="1" onclick="showView('training-progress')"><span>📚</span> Training</div>
             <div class="nav-item" data-view="leadgen" onclick="showView('leadgen')"><span>🎯</span> Lead Gen</div>
 
             <div class="nav-item active" data-view="chat" onclick="showView('chat')"><span>💬</span> Chat</div>
@@ -1436,6 +1437,17 @@
                         <button id="yt-send" onclick="yantraiSend()" style="padding:0 18px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:10px; font-weight:600; cursor:pointer;">Send</button>
                     </div>
                 </div>
+            </div>
+        </div>
+
+        <!-- Training Progress (workspace-scoped AI learning) -->
+        <div id="training-progress-view" class="dashboard-view" style="display: none;">
+            <header>
+                <h1>📚 Training Progress</h1>
+                <p style="color:#94a3b8;">How much your AI has learned for <strong id="tp-company">this workspace</strong> — corrections, masters and patterns it now recognises.</p>
+            </header>
+            <div id="tp-body" style="margin-top:18px;">
+                <div style="color:#64748b; font-size:0.9rem;">Loading…</div>
             </div>
         </div>
 
@@ -2968,7 +2980,7 @@
         // ── Sprint 48b — Agentic store: TWO-LEVEL nav (Store home + agent menus) ──
         // Platform views are agent-agnostic and visible everywhere. Agent views
         // (chat, vouchers, …) show ONLY when their agent is the active one.
-        window.__PLATFORM_VIEWS = new Set(['home','store','uploads','yantrai-chat','training','whatsapp','users','settings','analytics']);
+        window.__PLATFORM_VIEWS = new Set(['home','store','uploads','yantrai-chat','training','training-progress','whatsapp','users','settings','analytics']);
         // Fallback agent (used if the installed-agents fetch fails) = today's full set.
         const _AGENT1_VIEWS = ['aiacc-home','chat','vouchers','schema','bank','gstr-reco','recon',
                                'gstr','tds','itr','audit','reports','tasks'];
@@ -3202,7 +3214,7 @@
         // Sprint 61 — universal top bar: mirrors the (hidden) sidebar's nav + footer
         // controls. On Home: just the logo. Inside an app: ‹ Home + app name + that
         // app's screens as tabs. On a platform view: ‹ Home + the view's title.
-        const _PLATFORM_TITLES = { store:'🛍️ Store', uploads:'📎 Files',
+        const _PLATFORM_TITLES = { store:'🛍️ Store', uploads:'📎 Files', 'training-progress':'📚 Training',
             'yantrai-chat':'📝 Create task', settings:'⚙️ Settings',
             training:'🧠 Connectors', whatsapp:'📱 WhatsApp Setup', users:'👥 User Manager',
             analytics:'📊 Data Analyst' };
@@ -3373,6 +3385,7 @@
                 tiles.push(tile('🛍️', 'Store', 'Get more apps', "showView('store')"));
                 tiles.push(tile('📎', 'Files', 'Files for this company', "showView('uploads')"));
                 tiles.push(tile('🔌', 'Connectors', 'Tally, devices & data sources', "showView('training')"));
+                tiles.push(tile('📚', 'Training', 'How much your AI has learned', "showView('training-progress')"));
                 tiles.push(tile('⚡', 'Wallet', 'Tokens & recharge', "if(typeof openWalletModal==='function') openWalletModal()"));
                 if (window.__isSuperAdmin) tiles.push(tile('📊', 'Data Analyst', 'Platform usage & tokens', "showView('analytics')"));
                 tiles.push(tile('⚙️', 'Settings', 'Account & admin', "showView('settings')"));
@@ -3498,6 +3511,105 @@
             if (m) m.innerText = `${(s.total_mappings||0).toLocaleString('en-IN')} Mapped`;
             if (c) c.innerText = `${s.confidence_score != null ? s.confidence_score : 0}%`;
             if (st) st.innerText = s.status || '—';
+        }
+        // ── Training Progress (workspace-scoped AI learning) ───────────────
+        const _TP_TYPES = {
+            correction:          { icon:'✏️', label:'Corrections you taught' },
+            tally_master_ledger: { icon:'📒', label:'Ledgers learned' },
+            tally_master_party:  { icon:'👥', label:'Parties learned' },
+            tally_master_item:   { icon:'📦', label:'Items learned' },
+            tally_master_narration:{ icon:'📝', label:'Narrations learned' },
+            bank_reconciliation: { icon:'🏦', label:'Bank-reco patterns' },
+        };
+        function _tpAgo(iso) {
+            if (!iso) return '';
+            const t = new Date(iso).getTime(); if (isNaN(t)) return '';
+            const s = Math.max(1, Math.floor((Date.now() - t) / 1000));
+            if (s < 60) return s + 's ago'; if (s < 3600) return Math.floor(s/60) + 'm ago';
+            if (s < 86400) return Math.floor(s/3600) + 'h ago'; return Math.floor(s/86400) + 'd ago';
+        }
+        async function loadTrainingProgress() {
+            const co = (typeof _activeCompanyName === 'function' && _activeCompanyName()) ||
+                       (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}').company_name||''; } catch(_) { return ''; } })();
+            const coEl = document.getElementById('tp-company'); if (coEl) coEl.textContent = co || 'this workspace';
+            const body = document.getElementById('tp-body'); if (!body) return;
+            body.innerHTML = '<div style="color:#64748b; font-size:0.9rem;">Loading…</div>';
+            try {
+                const r = await fetch(`${API}/api/training/progress?company_name=${encodeURIComponent(co)}&scope=all`);
+                const d = await r.json();
+                if (!r.ok || d.status !== 'success') throw new Error(d.detail || 'Failed to load training progress');
+                body.innerHTML = _renderTrainingProgress(d);
+            } catch (e) {
+                body.innerHTML = `<div style="color:#f87171; font-size:0.9rem;">${escapeHtml(e.message||'Error')}</div>`;
+            }
+        }
+        function _renderTrainingProgress(d) {
+            const s = d.stats || {}; const pct = s.confidence_score || 0;
+            const learned = s.total_mappings || 0;
+            const statusColor = { Untrained:'#94a3b8', Pending:'#fbbf24', Training:'#38bdf8', Vectorized:'#4ade80' }[s.status] || '#94a3b8';
+            // Headline
+            let h = `<div class="card" style="margin-bottom:16px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;">
+                    <div>
+                        <div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:.5px; color:#94a3b8;">Trained level</div>
+                        <div style="font-size:2rem; font-weight:800; color:#f5f1ec;">${pct}%</div>
+                        <div style="font-size:0.8rem; color:#94a3b8;">${learned.toLocaleString('en-IN')} things learned ·
+                            <span style="color:${statusColor}; font-weight:600;">${escapeHtml(s.status||'—')}</span></div>
+                    </div>
+                </div>
+                <div style="height:8px; background:rgba(255,255,255,0.08); border-radius:6px; margin-top:14px; overflow:hidden;">
+                    <div style="height:100%; width:${Math.max(2,pct)}%; background:linear-gradient(90deg,#da7756,#e8a87c); border-radius:6px;"></div>
+                </div>
+            </div>`;
+            // Breakdown
+            const bd = d.breakdown || {};
+            const cells = Object.keys(_TP_TYPES).map(t => {
+                const meta = _TP_TYPES[t]; const n = bd[t] || 0;
+                return `<div style="background:var(--bg-light); border:1px solid var(--border); border-radius:10px; padding:12px 14px;">
+                    <div style="font-size:1.3rem;">${meta.icon}</div>
+                    <div style="font-size:1.25rem; font-weight:700; color:#f5f1ec; margin-top:4px;">${n.toLocaleString('en-IN')}</div>
+                    <div style="font-size:0.72rem; color:#94a3b8;">${meta.label}</div>
+                </div>`;
+            }).join('');
+            h += `<h3 style="margin:18px 0 10px; font-size:1rem;">Learning breakdown</h3>
+                <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px;">${cells}</div>`;
+            // Per-company (CA)
+            const pc = d.per_company || [];
+            if (pc.length > 1) {
+                const rows = pc.map(c => `<tr>
+                    <td style="padding:8px 10px; font-size:0.85rem; color:#cbd5e1; border-bottom:1px solid rgba(255,255,255,0.05);">${escapeHtml(c.company)}</td>
+                    <td style="padding:8px 10px; font-size:0.85rem; text-align:right; color:#cbd5e1; border-bottom:1px solid rgba(255,255,255,0.05);">${(c.stats&&c.stats.total_mappings)||0}</td>
+                    <td style="padding:8px 10px; font-size:0.85rem; text-align:right; font-weight:600; color:#f5f1ec; border-bottom:1px solid rgba(255,255,255,0.05);">${(c.stats&&c.stats.confidence_score)||0}%</td>
+                </tr>`).join('');
+                h += `<h3 style="margin:22px 0 10px; font-size:1rem;">Across your workspaces</h3>
+                    <div class="card" style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse;">
+                    <thead><tr>
+                        <th style="text-align:left; padding:6px 10px; font-size:0.7rem; text-transform:uppercase; color:#94a3b8;">Workspace</th>
+                        <th style="text-align:right; padding:6px 10px; font-size:0.7rem; text-transform:uppercase; color:#94a3b8;">Learned</th>
+                        <th style="text-align:right; padding:6px 10px; font-size:0.7rem; text-transform:uppercase; color:#94a3b8;">Trained</th>
+                    </tr></thead><tbody>${rows}</tbody></table></div>`;
+            }
+            // Recent log
+            const rec = d.recent || [];
+            if (rec.length) {
+                const items = rec.map(r => {
+                    const meta = _TP_TYPES[r.type] || { icon:'•', label:r.type||'learned' };
+                    let detail = meta.label;
+                    if (r.type === 'correction' && (r.original || r.corrected))
+                        detail = `Correction: ${escapeHtml(r.original||'—')} → ${escapeHtml(r.corrected||'—')}`;
+                    else if (r.party) detail = `${meta.label}: ${escapeHtml(r.party)}`;
+                    return `<div style="display:flex; align-items:center; gap:10px; padding:9px 0; border-bottom:1px solid rgba(255,255,255,0.05);">
+                        <span style="font-size:1.05rem;">${meta.icon}</span>
+                        <span style="flex:1; font-size:0.84rem; color:#cbd5e1;">${detail}</span>
+                        <span style="font-size:0.72rem; color:#64748b; white-space:nowrap;">${_tpAgo(r.created_at)}</span>
+                    </div>`;
+                }).join('');
+                h += `<h3 style="margin:22px 0 6px; font-size:1rem;">Recent training</h3><div class="card">${items}</div>`;
+            } else {
+                h += `<h3 style="margin:22px 0 6px; font-size:1rem;">Recent training</h3>
+                    <div class="card" style="color:#64748b; font-size:0.85rem;">Nothing learned yet — correct an AI extraction (the “Learn ✨” button) or sync your Tally masters to start training.</div>`;
+            }
+            return h;
         }
         function homeNewChat() {
             if (typeof enterAgent === 'function') enterAgent('ai-accountant');
@@ -4825,6 +4937,7 @@
             if (view === 'history') { showView('vouchers'); return; }
             if (view === 'chat') loadChatSessions();
             if (view === 'training') { fetchTrainingStats(); fetchTallySummary(); }
+            if (view === 'training-progress') { if (typeof loadTrainingProgress === 'function') loadTrainingProgress(); }
             if (view === 'tasks') loadTasks();
             if (view === 'recon') { if (typeof loadReconStudio === 'function') loadReconStudio(); }
             if (view === 'gstr') { if (typeof loadGstrDashboard === 'function') loadGstrDashboard(); }

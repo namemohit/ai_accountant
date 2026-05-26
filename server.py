@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "129"
+APP_VERSION = "130"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -5261,6 +5261,40 @@ async def get_training_stats(company_name: str = "Acme Corp"):
         return {"status": "success", "stats": db.training_stats(company_name)}
     except Exception as e:
         print(f"Error fetching training stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/training/progress")
+async def get_training_progress(request: Request, company_name: str = "Acme Corp", scope: str = ""):
+    """Workspace-level training progress: headline stats + per-type breakdown + a recent
+    training-log timeline for `company_name`. With scope=all, also returns per-company stats
+    for every workspace the caller belongs to (CA comparison)."""
+    try:
+        out = {
+            "status": "success",
+            "company_name": company_name,
+            "stats": db.training_stats(company_name),
+            "breakdown": db.training_breakdown(company_name),
+            "recent": db.recent_training(company_name, limit=25),
+        }
+        if scope == "all":
+            companies = []
+            row = getattr(request.state, "user_row", None) or {}
+            comps = row.get("companies") or []
+            if isinstance(comps, str):
+                try: comps = json.loads(comps)
+                except Exception: comps = []
+            if not comps and row.get("company_name"):
+                comps = [row.get("company_name")]
+            seen = set()
+            for c in comps:
+                if not c or c in seen:
+                    continue
+                seen.add(c)
+                companies.append({"company": c, "stats": db.training_stats(c)})
+            out["per_company"] = companies
+        return out
+    except Exception as e:
+        print(f"[training/progress] {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/training/optimize")

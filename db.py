@@ -3283,6 +3283,48 @@ def training_stats(company_name="Acme Corp"):
     return {"total_mappings": total, "vectorized": vectorized,
             "confidence_score": confidence, "status": status}
 
+def training_breakdown(company_name="Acme Corp"):
+    """Count of learned items per knowledge_base type for a company (corrections +
+    synced Tally masters + bank-reco patterns). Powers the Training Progress breakdown."""
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT type, COUNT(*) FROM knowledge_base "
+            "WHERE data->>'company_name' = %s GROUP BY type",
+            (company_name,))
+        rows = cursor.fetchall() or []
+    except Exception as e:
+        print(f"[training_breakdown] {e}"); rows = []
+    finally:
+        cursor.close(); conn.close()
+    return {str(t): int(c or 0) for (t, c) in rows}
+
+def recent_training(company_name="Acme Corp", limit=25):
+    """Most-recent learning events for a company → a training-log timeline."""
+    conn = get_conn()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute(
+            "SELECT type, data, created_at FROM knowledge_base "
+            "WHERE data->>'company_name' = %s ORDER BY created_at DESC LIMIT %s",
+            (company_name, int(limit)))
+        rows = cursor.fetchall() or []
+    except Exception as e:
+        print(f"[recent_training] {e}"); rows = []
+    finally:
+        cursor.close(); conn.close()
+    out = []
+    for r in rows:
+        d = r.get("data") or {}
+        out.append({
+            "type": r.get("type"),
+            "field": d.get("field"), "original": d.get("original"),
+            "corrected": d.get("corrected"), "party": d.get("party_name") or d.get("party") or d.get("name"),
+            "created_at": (r.get("created_at").isoformat() if r.get("created_at") else None),
+        })
+    return out
+
 def get_relevant_corrections(query_embedding, company_name="Acme Corp", limit=5):
     if not query_embedding:
         return []
