@@ -14,7 +14,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
-    <link rel="stylesheet" href="/static/style.css?v=100">
+    <link rel="stylesheet" href="/static/style.css?v=101">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;800&display=swap" rel="stylesheet">
     <!-- Sprint 72 — load FontAwesome non-render-blocking (swap media to 'all' onload). -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" media="print" onload="this.media='all'">
@@ -2390,53 +2390,19 @@
     <!-- Mobile Slide-Out Drawer -->
     <div class="mobile-overlay" id="mobile-overlay" onclick="closeMobileMenu()"></div>
     <div class="mobile-drawer" id="mobile-drawer">
+        <!-- Top: YantrAI logo -->
         <div class="mobile-drawer-header">
-            <div class="mobile-drawer-logo">YantrAI Accounting</div>
+            <div class="mobile-drawer-logo">YantrAI</div>
             <button class="mobile-drawer-close" onclick="closeMobileMenu()"><i class="fas fa-times"></i></button>
         </div>
-        <nav class="mobile-drawer-nav">
-            <!-- Sprint 48b — agent header (shown only when inside an agent) -->
-            <div id="agent-drawer-header" style="display:none; padding:6px 16px 10px; margin-bottom:6px; border-bottom:1px solid var(--border);">
-                <div onclick="exitToHome()" style="display:flex; align-items:center; gap:6px; color:#94a3b8; font-size:0.74rem; cursor:pointer; margin-bottom:6px;">
-                    <span>‹</span> <span>Home</span>
-                </div>
-                <div style="display:flex; align-items:center; gap:8px;">
-                    <span id="agent-drawer-icon" style="font-size:1.15rem;">🧮</span>
-                    <span id="agent-drawer-name" style="font-weight:600; color:#f4f4f5; font-size:0.95rem;">Agent</span>
-                </div>
-            </div>
-            <div class="mobile-drawer-item" data-view="home" data-platform="1" onclick="mobileNav('home')"><span>🏠</span> Home</div>
-            <div class="mobile-drawer-item" data-view="store" data-platform="1" onclick="mobileNav('store')"><span>🛍️</span> Store</div>
-            <div class="mobile-drawer-item" data-view="uploads" data-platform="1" onclick="mobileNav('uploads')"><span>📎</span> Upload anything</div>
-            <div class="mobile-drawer-item" data-view="yantrai-chat" data-platform="1" onclick="mobileNav('yantrai-chat')"><span>📝</span> Create task</div>
-            <div class="mobile-drawer-item" data-view="training" data-platform="1" onclick="mobileNav('training')"><span>🔌</span> Connectors</div>
-            <div class="mobile-drawer-item" data-view="leadgen" onclick="mobileNav('leadgen')"><span>🎯</span> Lead Gen</div>
-            <div class="mobile-drawer-item active" data-view="chat" onclick="mobileNav('chat')"><span>💬</span> Chat with Tally</div>
-
-            <div class="mobile-drawer-item" data-view="vouchers" onclick="mobileNav('vouchers')"><span>📑</span> Vouchers</div>
-
-            <div class="mobile-drawer-item" data-view="bank" onclick="mobileNav('bank')"><span>🏦</span> Bank Reco</div>
-            <div class="mobile-drawer-item" data-view="gstr-reco" data-role-gated="super_admin" onclick="mobileNav('gstr-reco')"><span>📊</span> GSTR Reco</div>
-            <div class="mobile-drawer-item" data-view="gstr" data-role-gated="super_admin" onclick="mobileNav('gstr')"><span>🧾</span> GST Filing</div>
-            <div class="mobile-drawer-item" data-view="tds" data-role-gated="super_admin" onclick="mobileNav('tds')"><span>🧑‍💼</span> TDS Filing</div>
-            <div class="mobile-drawer-item" data-view="itr" data-role-gated="super_admin" onclick="mobileNav('itr')"><span>📋</span> ITR Filing</div>
-            <div class="mobile-drawer-item" data-view="audit" data-role-gated="super_admin" onclick="mobileNav('audit')"><span>🛡️</span> Audit &amp; Compliance</div>
-            <div class="mobile-drawer-item" data-view="recon" data-role-gated="super_admin" onclick="mobileNav('recon')"><span>🔄</span> Reconciliation Studio</div>
-
-            <div class="mobile-drawer-item" data-view="reports" data-role-gated="super_admin" onclick="mobileNav('reports')"><span>📈</span> Financial Reports</div>
-            <div class="mobile-drawer-item" data-view="schema" onclick="mobileNav('schema')"><span>📋</span> Masters</div>
-            <div class="mobile-drawer-item" data-view="tasks" data-role-gated="super_admin" onclick="mobileNav('tasks')"><span>🎯</span> YantrAI Tasks</div>
-            <!-- Sprint 60 — Connectors / WhatsApp / User Manager moved into the Settings app. -->
-            <!-- Sprint 64 — Settings + company switcher now live in the footer (mirrors desktop top-right). -->
+        <!-- Middle: active agent's own menu items (dynamic). Separators top & bottom. -->
+        <nav class="mobile-drawer-nav" id="drawer-agent-nav">
+            <!-- populated by _renderDrawer() -->
         </nav>
+        <!-- Bottom: Logout + app version -->
         <div class="mobile-drawer-footer">
-            <!-- Sprint 64 — desktop top-right items (company · Settings · brand) at the bottom -->
-            <label style="display:block; font-size:0.68rem; text-transform:uppercase; letter-spacing:0.06em; color:#8a8178; margin-bottom:5px;">Active company</label>
-            <select id="active-company-select-mobile" onchange="switchCompany(this.value)"
-                    style="width:100%; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:0.9rem; outline:none; cursor:pointer; margin-bottom:10px;"></select>
-            <div class="mobile-drawer-item" onclick="mobileNav('settings')" style="margin-bottom: 6px;"><span>⚙️</span> Settings</div>
-            <div class="mobile-drawer-item" onclick="exitToHome(); if(typeof closeMobileMenu==='function') closeMobileMenu();"><span>🏠</span> Home</div>
-            <div style="margin-top:8px; font-size:0.68rem; color:#6b6259; text-align:center; user-select:all;">YantrAI Cloud · v105</div>
+            <div class="mobile-drawer-logout" onclick="haptic(10); handleLogout();"><span>🚪</span> Logout</div>
+            <div class="mobile-drawer-version">YantrAI Cloud · v105</div>
         </div>
     </div>
 
@@ -3150,6 +3116,40 @@
             });
             if (typeof _renderTopbar === 'function') _renderTopbar();
             if (typeof _refreshBottomNav === 'function') _refreshBottomNav();
+            if (typeof _renderDrawer === 'function') _renderDrawer();
+        }
+
+        // Clean drawer (Sprint) — middle section shows ONLY the active agent's own
+        // menu items, between two separators (logo above, Logout/version below).
+        // When no agent is active, show an italic placeholder.
+        function _renderDrawer() {
+            const nav = document.getElementById('drawer-agent-nav');
+            if (!nav) return;
+            const active = window.__activeAgent;
+            const meta = active ? (window.__agentBySlug || {})[active] : null;
+            const cur = window.__currentView || '';
+            let html = '<div class="drawer-sep" style="border-top:1px solid var(--border); margin:0 0 8px;"></div>';
+            const items = [];
+            if (meta) {
+                html += `<div class="drawer-agent-title"><span>${meta.icon || '🤖'}</span> ${escapeHtml(meta.name || active)}</div>`;
+                // Pull canonical icon+label from the (hidden) sidebar nav items that
+                // belong to this agent and aren't role-gated away.
+                document.querySelectorAll('nav .nav-item[data-view]').forEach(el => {
+                    const v = el.getAttribute('data-view');
+                    if (!meta.views || !meta.views.includes(v)) return;
+                    if (el.style.display === 'none') return;     // respects _renderNav role-gating
+                    if (active === 'ai-accountant' && _AIACC_LAUNCHER && _AIACC_LAUNCHER.has(v)) return;
+                    const activeCls = (v === cur) ? ' active' : '';
+                    items.push(`<div class="mobile-drawer-item${activeCls}" data-view="${v}" onclick="haptic(8); mobileNav('${v}')">${el.innerHTML}</div>`);
+                });
+            }
+            if (items.length) {
+                html += items.join('');
+            } else {
+                html += '<div class="drawer-empty">Agent menu items appear here</div>';
+            }
+            html += '<div class="drawer-sep" style="border-top:1px solid var(--border); margin:10px 0 0;"></div>';
+            nav.innerHTML = html;
         }
 
         // Sprint 61 — universal top bar: mirrors the (hidden) sidebar's nav + footer
@@ -4743,6 +4743,8 @@
 
         // --- Mobile Hamburger Menu ---
         function toggleMobileMenu() {
+            if (typeof haptic === 'function') haptic(10);
+            if (typeof _renderDrawer === 'function') _renderDrawer();
             document.getElementById('mobile-drawer').classList.toggle('open');
             document.getElementById('mobile-overlay').classList.toggle('open');
         }
