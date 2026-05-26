@@ -1310,18 +1310,15 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
   .app-pager { display: flex; flex: 1; min-height: 0; width: 100%; overflow-x: auto;
     scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
   .app-pager::-webkit-scrollbar { display: none; }
-  /* Each page = exactly the viewport width (no bleed), 2 columns × 3 fixed rows.
-     repeat(3,1fr) makes a full page (6 tiles) fill the height in 3 equal rows;
-     a partial page (e.g. 2 tiles) lands its row in the TOP track (lower tracks
-     stay empty) so every page anchors at the top — not centered. Equal gap +
-     padding give identical spacing between tiles AND from all edges. */
+  /* Each page = exactly the viewport width (no bleed), 2 columns. Tiles are a
+     FIXED, modest height and TOP-anchored (align-content:start) — they do NOT
+     stretch to fill, so the grid never reaches the nav and there is always room
+     for the dots below it. Equal gap + padding give identical spacing between
+     tiles AND from every edge. Every page (full or partial) starts at the top. */
   .app-page { flex: 0 0 100%; width: 100%; height: 100%; box-sizing: border-box;
     scroll-snap-align: start; display: grid; grid-template-columns: repeat(2, 1fr);
-    /* minmax(0,1fr) lets the 3 rows SHRINK below their content height on short
-       viewports — plain 1fr has an implicit min-content floor that made the
-       grid overflow under the nav and pushed the dots strip out of view. */
-    grid-template-rows: repeat(3, minmax(0, 1fr)); gap: 16px; padding: 16px; }
-  .app-page .app-tile { height: auto; padding: 12px 10px; }
+    grid-auto-rows: 128px; align-content: start; gap: 16px; padding: 16px; }
+  .app-page .app-tile { height: 128px; padding: 12px 10px; }
   /* Reserved strip so the dots are never clipped by #home-view overflow:hidden. */
   .app-dots { display: flex; flex: 0 0 28px; height: 28px; align-items: center;
     justify-content: center; gap: 7px; margin-top: 0; }
