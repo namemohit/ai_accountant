@@ -1310,16 +1310,18 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
   .app-pager { display: flex; flex: 1; min-height: 0; width: 100%; overflow-x: auto;
     scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
   .app-pager::-webkit-scrollbar { display: none; }
-  /* Each page = exactly the viewport width (no bleed), 2 columns. Tiles are a
-     FIXED size; rows are spread evenly across the full page height (space-evenly)
-     so the screen fills with balanced gaps — no empty band — on both a full
-     page (6 tiles / 3 rows) and a partial page (fewer rows). */
+  /* Each page = exactly the viewport width (no bleed), 2 columns × 3 fixed rows.
+     repeat(3,1fr) makes a full page (6 tiles) fill the height in 3 equal rows;
+     a partial page (e.g. 2 tiles) lands its row in the TOP track (lower tracks
+     stay empty) so every page anchors at the top — not centered. Equal gap +
+     padding give identical spacing between tiles AND from all edges. */
   .app-page { flex: 0 0 100%; width: 100%; height: 100%; box-sizing: border-box;
     scroll-snap-align: start; display: grid; grid-template-columns: repeat(2, 1fr);
-    grid-auto-rows: 150px; align-content: space-evenly; gap: 14px; padding: 6px 4px; }
-  .app-page .app-tile { height: 150px; padding: 12px 10px; }
-  .app-dots { display: flex; flex: 0 0 auto; align-items: center; justify-content: center;
-    gap: 7px; margin-top: 10px; }
+    grid-template-rows: repeat(3, 1fr); gap: 16px; padding: 16px; }
+  .app-page .app-tile { height: auto; padding: 12px 10px; }
+  /* Reserved strip so the dots are never clipped by #home-view overflow:hidden. */
+  .app-dots { display: flex; flex: 0 0 28px; height: 28px; align-items: center;
+    justify-content: center; gap: 7px; margin-top: 0; }
   .app-dot { flex: 0 0 auto; width: 7px; height: 7px; min-width: 7px; min-height: 7px;
     border-radius: 50%; aspect-ratio: 1; background: rgba(255,255,255,0.25);
     border: none; padding: 0; line-height: 0; cursor: pointer; }
