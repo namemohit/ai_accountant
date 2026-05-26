@@ -1,4 +1,4 @@
-const CACHE_NAME = 'yantrai-accounting-v106';
+const CACHE_NAME = 'yantrai-accounting-v107';
 const ASSETS = [
   '/',
   '/login',

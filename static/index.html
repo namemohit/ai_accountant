@@ -363,6 +363,7 @@
             <div class="nav-item" data-view="store" data-platform="1" onclick="showView('store')"><span>🛍️</span> Store</div>
             <div class="nav-item" data-view="uploads" data-platform="1" onclick="showView('uploads')"><span>📎</span> Upload anything</div>
             <div class="nav-item" data-view="yantrai-chat" data-platform="1" onclick="showView('yantrai-chat')"><span>📝</span> Create task</div>
+            <div class="nav-item" data-view="training" data-platform="1" onclick="showView('training')"><span>🔌</span> Connectors</div>
             <div class="nav-item" data-view="leadgen" onclick="showView('leadgen')"><span>🎯</span> Lead Gen</div>
 
             <div class="nav-item active" data-view="chat" onclick="showView('chat')"><span>💬</span> Chat with Tally</div>
@@ -1201,7 +1202,7 @@
             <!-- Sprint 60/61 — Android-style launcher (chrome lives in #app-topbar) -->
             <header style="margin-top:4px;">
                 <h1 id="home-greeting">Good to see you</h1>
-                <p style="color: #94a3b8;">Your apps — tap to open. Manage connections, AI training & admin in Settings.</p>
+                <p style="color: #94a3b8;">Your apps — tap to open. Manage AI training & admin in Settings.</p>
             </header>
 
             <!-- App-icon grid (built by loadHome: installed agents + system apps) -->
@@ -2266,11 +2267,6 @@
             <div class="card" style="margin-top:24px;">
                 <h3 style="margin-bottom: 14px;">⚙️ Platform</h3>
                 <div class="connector-grid">
-                    <div class="connector-card" style="cursor:pointer;" onclick="showView('training')">
-                        <div class="connector-icon">🧠</div>
-                        <div class="connector-name">Connectors</div>
-                        <div class="connector-desc">Tally bridge, devices & data sources</div>
-                    </div>
                     <div class="connector-card" data-role-gated="super_admin" style="cursor:pointer;" onclick="showView('whatsapp')">
                         <div class="connector-icon">📱</div>
                         <div class="connector-name">WhatsApp Setup</div>
@@ -2387,6 +2383,7 @@
             <div class="mobile-drawer-item" data-view="store" data-platform="1" onclick="mobileNav('store')"><span>🛍️</span> Store</div>
             <div class="mobile-drawer-item" data-view="uploads" data-platform="1" onclick="mobileNav('uploads')"><span>📎</span> Upload anything</div>
             <div class="mobile-drawer-item" data-view="yantrai-chat" data-platform="1" onclick="mobileNav('yantrai-chat')"><span>📝</span> Create task</div>
+            <div class="mobile-drawer-item" data-view="training" data-platform="1" onclick="mobileNav('training')"><span>🔌</span> Connectors</div>
             <div class="mobile-drawer-item" data-view="leadgen" onclick="mobileNav('leadgen')"><span>🎯</span> Lead Gen</div>
             <div class="mobile-drawer-item active" data-view="chat" onclick="mobileNav('chat')"><span>💬</span> Chat with Tally</div>
 
@@ -3292,9 +3289,10 @@
                     tile(a.icon || '🧩', a.name || a.slug, a.tagline || 'Open app', `enterAgent('${escapeHtml(a.slug)}')`, a.slug)));
                 tiles.push(tile('🛍️', 'Store', 'Get more apps', "showView('store')"));
                 tiles.push(tile('📎', 'Upload anything', 'Files for this company', "showView('uploads')"));
+                tiles.push(tile('🔌', 'Connectors', 'Tally, devices & data sources', "showView('training')"));
                 tiles.push(tile('⚡', 'Wallet', 'Tokens & recharge', "if(typeof openWalletModal==='function') openWalletModal()"));
                 if (window.__isSuperAdmin) tiles.push(tile('📊', 'Data Analyst', 'Platform usage & tokens', "showView('analytics')"));
-                tiles.push(tile('⚙️', 'Settings', 'Account, connectors & admin', "showView('settings')"));
+                tiles.push(tile('⚙️', 'Settings', 'Account & admin', "showView('settings')"));
                 window.__homeTiles = tiles;
                 _renderHomeGrid();
             }
