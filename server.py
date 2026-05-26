@@ -2874,12 +2874,17 @@ async def bank_confirm_reconciliation(payload: dict):
                 ]
                 voucher_party = party or head
 
+            # P0 FIX: deterministic number from the transaction's own id/content so a
+            # re-confirm reuses the same voucher number (dedupes instead of doubling).
+            import hashlib as _hl
+            _idem = str(bt.get("id") or "")[:8] or _hl.sha1(
+                f"{tx_date}|{amount}|{desc}|{ref}".encode()).hexdigest()[:8]
             voucher = {
                 "date": date_compact,
                 "type": vtype,
                 "voucher_type": vtype,
                 "party": voucher_party,
-                "number": ref or f"BANK-{tx_date}-{posted+1:03d}",
+                "number": ref or f"BANK-{_idem}",
                 "amount": amount,
                 "narration": desc,
                 "ledger_entries": ledger_entries,
@@ -2888,6 +2893,10 @@ async def bank_confirm_reconciliation(payload: dict):
                 "currency": "INR",
                 "tally_master_id": None,  # not from Tally — we created it
             }
+            ok_v, err_v = db.validate_voucher_for_post(voucher)
+            if not ok_v:
+                print(f"[BANK CONFIRM] skip unbalanced txn: {err_v}")
+                continue
 
             try:
                 save_res = db.save_tally_vouchers(company_name, [voucher])
@@ -3132,12 +3141,17 @@ async def post_bank_transactions_to_tally(payload: dict):
         learned = 0
         skipped = 0
 
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
         conn = db.get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
+        # P0 FIX: scope by company so a guessed tx_id can't post another tenant's row.
+        # Rows already 'posted' are excluded by the status filter (re-post guard).
         cur.execute("""
             SELECT * FROM bank_transactions
             WHERE id = ANY(%s::uuid[]) AND status IN ('ai_filled', 'matched', 'unmatched')
-        """, (tx_ids,))
+              AND company_name = %s
+        """, (tx_ids, company_name))
         rows = cur.fetchall()
         cur.close()
         conn.close()
@@ -3171,12 +3185,19 @@ async def post_bank_transactions_to_tally(payload: dict):
             voucher = {
                 "date": date_compact, "type": vtype, "voucher_type": vtype,
                 "party": voucher_party,
-                "number": ref or f"BANK-{r['date']}-{posted+1:03d}",
+                # P0 FIX: deterministic number from the bank row id so re-posting the
+                # same row reuses the same voucher number (dedupes instead of doubling).
+                "number": ref or f"BANK-{str(r['id'])[:8]}",
                 "amount": amount, "narration": desc,
                 "ledger_entries": ledger_entries,
                 "reference_no": ref, "instrument_number": ref,
                 "currency": "INR", "tally_master_id": None,
             }
+            ok_v, err_v = db.validate_voucher_for_post(voucher)
+            if not ok_v:
+                print(f"[POST-TO-TALLY] skip unbalanced row {r['id']}: {err_v}")
+                skipped += 1
+                continue
             try:
                 save_res = db.save_tally_vouchers(company_name, [voucher])
                 if save_res.get("upserted"):
@@ -3187,6 +3208,7 @@ async def post_bank_transactions_to_tally(payload: dict):
                     db.update_bank_transaction(
                         r["id"],
                         {"status": "posted", "human_touched": True},
+                        company_id=company_id,
                     )
             except Exception as ve:
                 print(f"[POST-TO-TALLY] voucher save error: {ve}")

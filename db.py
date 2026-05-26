@@ -5554,6 +5554,29 @@ def discard_voucher_draft(draft_id, company_id=None):
     return update_voucher_draft(draft_id, status='discarded', company_id=company_id)
 
 
+def validate_voucher_for_post(voucher):
+    """P0 FIX: gate before a voucher reaches Tally. Returns (ok, error_message).
+    Checks double-entry balance (sum of debits == sum of credits) and GST math
+    (taxable + cgst + sgst + igst == total). Lenient by ₹1 for rounding. Trusted
+    Tally→YantrAI ingest does NOT call this — only human/AI-originated posts do."""
+    def _f(x):
+        try: return abs(float(x or 0))
+        except (TypeError, ValueError): return 0.0
+    entries = voucher.get("ledger_entries") or []
+    if entries:
+        dr = sum(_f(e.get("amount")) for e in entries if e.get("is_debit"))
+        cr = sum(_f(e.get("amount")) for e in entries if not e.get("is_debit"))
+        if abs(dr - cr) > 1.0:
+            return False, f"Voucher is unbalanced — debit {dr:.2f} ≠ credit {cr:.2f}."
+    total = _f(voucher.get("amount"))
+    taxable = _f(voucher.get("taxable_value"))
+    tax = _f(voucher.get("cgst_amount")) + _f(voucher.get("sgst_amount")) + _f(voucher.get("igst_amount"))
+    if taxable and total and abs((taxable + tax) - total) > 1.0:
+        return False, (f"GST math doesn't add up — taxable {taxable:.2f} + tax {tax:.2f} "
+                       f"= {taxable + tax:.2f}, but total is {total:.2f}.")
+    return True, None
+
+
 def post_voucher_from_draft(draft_id, company_id=None):
     """Take a draft's reviewed_payload (or parsed_payload), insert into
     tally_vouchers, mark draft 'posted', return the voucher row."""
@@ -5584,6 +5607,9 @@ def post_voucher_from_draft(draft_id, company_id=None):
         "igst_amount": float(payload.get("igst_amount") or 0),
         "tally_master_id": None,
     }
+    ok, err = validate_voucher_for_post(voucher)
+    if not ok:
+        return {"error": err, "status": "validation_failed"}
     save_res = save_tally_vouchers(draft["company_name"], [voucher])
     if save_res.get("upserted"):
         # Backfill company_id
@@ -5644,8 +5670,19 @@ def check_voucher_duplicate(company_name, invoice_number=None, party=None, amoun
     return row
 
 
+_VCOUNTER_READY = False
+
+
 def next_voucher_number(company_name, voucher_type):
-    """Suggest next voucher number e.g. 'SAL-2026-042' by counting existing rows."""
+    """Suggest the next voucher number e.g. 'SAL-2026-042'.
+
+    P0 FIX: was a COUNT(*)+1 keyed on the *calendar* year, which (a) raced — two
+    concurrent requests minted the SAME number — and (b) used Jan-Dec, not India's
+    Apr-Mar financial year. Now uses an atomic per-(company,type,FY) counter
+    (INSERT ... ON CONFLICT DO UPDATE ... RETURNING) so concurrent callers always
+    get distinct numbers, seeded once from any pre-existing rows for that FY.
+    """
+    global _VCOUNTER_READY
     if not company_name or not voucher_type:
         return None
     type_prefix = {
@@ -5653,18 +5690,43 @@ def next_voucher_number(company_name, voucher_type):
         "Receipt": "REC", "Journal": "JNL", "Contra": "CON",
     }.get(voucher_type, voucher_type[:3].upper())
     from datetime import date as _d
-    fy_year = _d.today().year
+    today = _d.today()
+    fy_start = today.year if today.month >= 4 else today.year - 1   # India FY: Apr–Mar
+    fy_from = _d(fy_start, 4, 1)
+    fy_to = _d(fy_start + 1, 4, 1)
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
-        SELECT COUNT(*) FROM tally_vouchers
-        WHERE company_name = %s AND voucher_type = %s
-              AND EXTRACT(YEAR FROM date) = %s
-    """, (company_name, voucher_type, fy_year))
-    n = cur.fetchone()[0]
-    cur.close()
-    conn.close()
-    return f"{type_prefix}-{fy_year}-{n + 1:03d}"
+    try:
+        if not _VCOUNTER_READY:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS voucher_counters (
+                    company_name TEXT, voucher_type TEXT, fy_start INT,
+                    counter INT NOT NULL DEFAULT 0,
+                    PRIMARY KEY (company_name, voucher_type, fy_start)
+                )""")
+            _VCOUNTER_READY = True
+        # Atomic: seed from existing rows on first use, then increment-and-return.
+        cur.execute("""
+            INSERT INTO voucher_counters (company_name, voucher_type, fy_start, counter)
+            VALUES (%s, %s, %s,
+                    (SELECT COUNT(*) + 1 FROM tally_vouchers
+                       WHERE company_name = %s AND voucher_type = %s
+                         AND date >= %s AND date < %s))
+            ON CONFLICT (company_name, voucher_type, fy_start)
+            DO UPDATE SET counter = voucher_counters.counter + 1
+            RETURNING counter
+        """, (company_name, voucher_type, fy_start,
+              company_name, voucher_type, fy_from, fy_to))
+        n = cur.fetchone()[0]
+        conn.commit()
+    except Exception as e:
+        conn.rollback(); print(f"[next_voucher_number] {e}")
+        n = None
+    finally:
+        cur.close(); conn.close()
+    if n is None:
+        return None
+    return f"{type_prefix}-{fy_start}-{n:03d}"
 
 
 def lookup_party_by_gstin(gstin, company_id=None, company_name=None):
