@@ -6460,18 +6460,8 @@ def run_audit_checks(company_id, company_name):
     except Exception:
         pass
 
-    # 3. Sales/Purchase missing GSTIN
-    try:
-        cur.execute("""
-            SELECT COUNT(*) AS n FROM tally_vouchers
-            WHERE company_name = %s AND voucher_type IN ('Sales', 'Purchase')
-                  AND (party_gstin IS NULL OR party_gstin = '')
-        """, (company_name,))
-        n = (cur.fetchone() or {}).get("n", 0)
-        out.append({"check_id": "missing_gstin", "category": "GST",
-                    "name": "Sales/Purchase missing GSTIN", "status": "pass" if n == 0 else "warn",
-                    "count": n, "message": f"{n} vouchers missing party GSTIN" if n else "All Sales/Purchase have GSTIN"})
-    except Exception: pass
+    # 3. Sales/Purchase missing GSTIN — handled by Vouchers ▸ AI Gaps (which also
+    #    proposes fills), so it's NOT duplicated here in the Health Check.
 
     # 4. Invoice serial gaps (Sales)
     try:
