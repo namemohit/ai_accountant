@@ -10634,6 +10634,7 @@
             formData.append('company_name', companyName);
             formData.append('job_id', jobId);
             if (companyId) formData.append('company_id', companyId);
+            if (window.__currentUsername) formData.append('username', window.__currentUsername);
 
             document.getElementById('bank-results').style.display = 'none';
             document.getElementById('bank-loading').style.display = 'block';

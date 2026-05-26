@@ -2513,6 +2513,7 @@ async def bank_auto_reconcile(
     company_name: str = Form("Acme Corp"),
     company_id: str = Form(None),
     job_id: str = Form(None),
+    username: str = Form(None),
 ):
     """Sprint 2 — AI bank reconciliation. Parses bank statement and uses vector
     embeddings + Gemini reasoning to suggest party + expense/revenue head + bank ledger
@@ -2523,6 +2524,8 @@ async def bank_auto_reconcile(
         # event-log insertion, and cross-source linking all silently fail with NULL.
         if not company_id and company_name:
             company_id = _resolve_company_id_by_name(company_name)
+        # P0 FIX (#8): bank-statement AI parse used to be free. Gate on balance here.
+        _ensure_tokens(username, company_name)
         suffix = _os.path.splitext(file.filename)[1] if file.filename else ".csv"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             content = await file.read()
@@ -2695,6 +2698,9 @@ Return ONLY the JSON array, no explanation."""
 
         if not transactions:
             return {"status": "error", "message": "Could not parse bank statement."}
+        # Charge for the parse (best-effort; estimated from parsed output size).
+        _charge_ai(username, company_name, "bank_statement_parse",
+                   est_text=json.dumps(transactions)[:50000])
 
         from utils.reconciler import ai_reconcile_statement
 
@@ -2824,6 +2830,8 @@ Return ONLY the JSON array, no explanation."""
                 "file_name": file.filename,
             }
         }
+    except HTTPException:
+        raise  # surface 402 out-of-tokens etc. as-is
     except Exception as e:
         import traceback; traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -3534,6 +3542,7 @@ async def upload_voucher_file(
     file: UploadFile = File(...),
     company_name: str = Form("Acme Corp"),
     company_id: str = Form(None),
+    username: str = Form(None),
 ):
     """Accept ONE invoice file (PDF/image/XLSX/CSV), parse via Gemini,
     save to voucher_drafts, return the draft_id for review."""
@@ -3541,6 +3550,8 @@ async def upload_voucher_file(
         import tempfile, os as _os, uuid as _u, shutil
         if not company_id and company_name:
             company_id = _resolve_company_id_by_name(company_name)
+        # P0 FIX (#8): this AI parse used to be free. Gate on balance, then charge.
+        _ensure_tokens(username, company_name)
 
         suffix = _os.path.splitext(file.filename or "")[1].lower() or ".bin"
         content = await file.read()
@@ -3578,6 +3589,8 @@ Return ONLY a JSON object."""
         except Exception as parse_err:
             print(f"[voucher upload] parser error: {parse_err}")
             raw_text = ""
+        # Charge for the parse (best-effort; est. from output since parser returns text).
+        _charge_ai(username, company_name, "invoice_parse", est_text=raw_text or "")
 
         # Extract JSON object from response
         parsed = {}
@@ -3612,6 +3625,8 @@ Return ONLY a JSON object."""
             "file_type": file_type,
             "parsed": parsed,
         }
+    except HTTPException:
+        raise  # surface 402 out-of-tokens etc. as-is
     except Exception as e:
         import traceback; traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
