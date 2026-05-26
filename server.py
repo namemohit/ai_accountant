@@ -2596,9 +2596,11 @@ Return ONLY the JSON array, no explanation."""
                     body = body.dropna(how='all')
 
                     # Detect column roles
-                    def find_col(*needles):
+                    def find_col(*needles, exclude=()):
                         for h in headers:
                             hl = h.lower()
+                            if any(x in hl for x in exclude):
+                                continue
                             if any(n in hl for n in needles): return h
                         return None
 
@@ -2607,17 +2609,41 @@ Return ONLY the JSON array, no explanation."""
                     col_party = find_col('party')
                     col_details = find_col('details', 'remark')
                     col_ref = find_col('reference', 'ref no', 'utr', 'chq', 'cheque')
-                    col_drcr = find_col('cr/dr', 'dr/cr', 'type')
-                    col_amount = find_col('amount', 'transaction amount')
-                    col_debit = find_col('withdrawal', 'debit') if not col_amount else None
-                    col_credit = find_col('deposit', 'credit') if not col_amount else None
+                    # P1 FIX: 'type' alone matched "Transaction Type"/"Instrument Type" and
+                    # mis-signed rows — only treat a real Dr/Cr indicator column as drcr.
+                    col_drcr = (find_col('cr/dr', 'dr/cr', 'drcr')
+                                or find_col('type', exclude=('transaction', 'instrument',
+                                                             'payment', 'txn', 'mode')))
+                    # P1 FIX: 'amount' alone matched "Balance Amount"/"Available Amount" and
+                    # posted the running balance — exclude balance-like columns.
+                    _amt_excl = ('balance', 'available', 'closing', 'opening', 'running')
+                    col_amount = find_col('transaction amount', 'txn amount', 'amount',
+                                          exclude=_amt_excl)
+                    col_debit = find_col('withdrawal', 'debit', exclude=_amt_excl) if not col_amount else None
+                    col_credit = find_col('deposit', 'credit', exclude=_amt_excl) if not col_amount else None
+
+                    # P1 FIX: detect day/month orientation for slash dates by scanning the
+                    # whole column (e.g. a '13/04' proves DD/MM; '04/13' proves MM/DD) so
+                    # we don't silently mis-date a US-format statement. India default = DD/MM.
+                    import re as _re_d
+                    _p1max = _p2max = 0
+                    if col_date:
+                        for _v in body[col_date].astype(str):
+                            _m = _re_d.match(r'^(\d{1,2})[/-](\d{1,2})[/-]\d{2,4}', _v.strip())
+                            if _m:
+                                _p1max = max(_p1max, int(_m.group(1)))
+                                _p2max = max(_p2max, int(_m.group(2)))
+                    if _p2max > 12 and _p1max <= 12:
+                        _date_fmts = ('%m/%d/%Y', '%m/%d/%y', '%Y-%m-%d', '%d-%m-%Y')
+                    else:
+                        _date_fmts = ('%d/%m/%Y', '%d/%m/%y', '%Y-%m-%d', '%d-%m-%Y', '%m/%d/%Y')
 
                     for _, row in body.iterrows():
                         # date
                         raw_date = str(row.get(col_date, '') if col_date else '').strip()
                         if not raw_date or raw_date == 'nan': continue
                         date_str = None
-                        for fmt in ('%d/%m/%Y', '%Y-%m-%d', '%d-%m-%Y', '%d/%m/%y', '%m/%d/%Y'):
+                        for fmt in _date_fmts:
                             try:
                                 date_str = datetime.strptime(raw_date.split()[0], fmt).strftime('%Y-%m-%d')
                                 break
@@ -3527,7 +3553,8 @@ async def resync_voucher_endpoint(voucher_id: str):
             payload=payload, voucher_id=voucher_id,
             company_name=v.get("company_name"), enqueued_by="web-edit",
         )
-        db.mark_voucher_resynced(voucher_id)
+        # P1 FIX: do NOT clear needs_resync here — ack_tally_outbox clears it only
+        # once the bridge agent CONFIRMS the push (a failed push stays flagged).
         return {"status": "success", "outbox": q,
                 "action": payload["tally_action"]}
     except HTTPException:
@@ -4888,16 +4915,23 @@ async def bulk_excel_voucher_import(payload: dict):
                 dr = float(r.get("debit") or 0)
                 cr = float(r.get("credit") or 0)
                 amount = max(dr, cr)
-                # Build a minimal 2-leg entry: party + opposite (cash/other)
+                if amount <= 0:
+                    errors.append({"row": idx, "error": "no debit/credit amount"})
+                    continue
+                # P1 FIX: use the row's specified contra ledger instead of always 'Cash'
+                # (a Sales/Purchase row got a bogus Cash leg). Fall back to Cash only if
+                # the import didn't map a counter ledger.
+                contra = (r.get("counter_ledger") or r.get("payment_mode") or "").strip() or "Cash"
+                main_leg = r.get("ledger_name") or r.get("party")
                 ledger_entries = []
                 if dr > 0:
-                    ledger_entries.append({"ledger_name": r.get("ledger_name") or r.get("party"), "amount": dr, "is_debit": True})
-                    ledger_entries.append({"ledger_name": "Cash", "amount": -dr, "is_debit": False})
-                elif cr > 0:
-                    ledger_entries.append({"ledger_name": "Cash", "amount": cr, "is_debit": True})
-                    ledger_entries.append({"ledger_name": r.get("ledger_name") or r.get("party"), "amount": -cr, "is_debit": False})
+                    ledger_entries.append({"ledger_name": main_leg, "amount": dr, "is_debit": True})
+                    ledger_entries.append({"ledger_name": contra, "amount": -dr, "is_debit": False})
+                else:
+                    ledger_entries.append({"ledger_name": contra, "amount": cr, "is_debit": True})
+                    ledger_entries.append({"ledger_name": main_leg, "amount": -cr, "is_debit": False})
 
-                vouchers.append({
+                voucher = {
                     "date": date_compact,
                     "type": r.get("voucher_type") or "Journal",
                     "voucher_type": r.get("voucher_type") or "Journal",
@@ -4909,7 +4943,13 @@ async def bulk_excel_voucher_import(payload: dict):
                     "reference_no": r.get("reference_no") or "",
                     "currency": "INR",
                     "tally_master_id": None,
-                })
+                }
+                # P1 FIX: validate balance/GST before importing (was unchecked).
+                ok_v, err_v = db.validate_voucher_for_post(voucher)
+                if not ok_v:
+                    errors.append({"row": idx, "error": err_v})
+                    continue
+                vouchers.append(voucher)
             except Exception as row_err:
                 errors.append({"row": idx, "error": str(row_err)})
 

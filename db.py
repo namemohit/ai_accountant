@@ -5051,9 +5051,25 @@ def ack_tally_outbox(outbox_id, tally_voucher_guid=None):
                 pushed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP,
                 last_error = NULL
             WHERE id = %s
+            RETURNING voucher_id
         """, (tally_voucher_guid, outbox_id))
+        row = cur.fetchone()
+        ok = row is not None
+        # P1 FIX: on a CONFIRMED push, record Tally's GUID on the voucher so a later
+        # edit ALTERs the same Tally voucher instead of creating a duplicate, and clear
+        # needs_resync only now (not at enqueue time). COALESCE keeps any existing id.
+        if row and row[0]:
+            if tally_voucher_guid:
+                cur.execute("""UPDATE tally_vouchers
+                    SET tally_master_id = COALESCE(tally_master_id, %s),
+                        needs_resync = FALSE, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s""", (tally_voucher_guid, row[0]))
+            else:
+                cur.execute("""UPDATE tally_vouchers
+                    SET needs_resync = FALSE, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s""", (row[0],))
         conn.commit()
-        return {"ok": cur.rowcount > 0}
+        return {"ok": ok}
     finally:
         cur.close(); conn.close()
 
