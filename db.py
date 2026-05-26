@@ -5023,7 +5023,14 @@ def claim_tally_outbox(company_name, limit=10, agent_id=None):
             SET state = 'pushing', attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP
             WHERE id IN (
                 SELECT id FROM tally_outbox
-                WHERE company_name = %s AND state = 'pending'
+                WHERE company_name = %s
+                  AND attempts < 5
+                  -- P1 FIX: also reclaim rows stuck in 'pushing' (agent died/ack lost)
+                  -- after a 5-min lease. Safe now that re-pushes are idempotent
+                  -- (deterministic voucher numbers + Alter-by-master-id).
+                  AND (state = 'pending'
+                       OR (state = 'pushing'
+                           AND updated_at < CURRENT_TIMESTAMP - INTERVAL '5 minutes'))
                 ORDER BY enqueued_at ASC
                 LIMIT %s
                 FOR UPDATE SKIP LOCKED
@@ -5132,9 +5139,12 @@ def fail_tally_outbox(outbox_id, error):
     """Bridge agent reports a failed push."""
     conn = get_conn(); cur = conn.cursor()
     try:
+        # P1 FIX: retry transient failures (back to 'pending') up to the attempt cap,
+        # then mark terminal 'error'. Previously every failure was terminal with no retry.
         cur.execute("""
             UPDATE tally_outbox
-            SET state = 'error', last_error = %s, updated_at = CURRENT_TIMESTAMP
+            SET state = CASE WHEN attempts < 5 THEN 'pending' ELSE 'error' END,
+                last_error = %s, updated_at = CURRENT_TIMESTAMP
             WHERE id = %s
         """, (str(error)[:2000], outbox_id))
         conn.commit()
@@ -5603,6 +5613,11 @@ def post_voucher_from_draft(draft_id, company_id=None):
     if draft.get("status") in ("posted", "discarded"):
         return {"error": f"draft already {draft.get('status')}"}
     payload = draft.get("reviewed_payload") or draft.get("parsed_payload") or {}
+    # P1 FIX: don't post a draft the AI couldn't read — make the user fill it in
+    # (editing sets reviewed_payload, which clears this flag).
+    if payload.get("_parse_failed"):
+        return {"error": "This document couldn't be read automatically — open the draft "
+                         "and enter the details before posting."}
     voucher = {
         "date": payload.get("date") or "",
         "type": payload.get("voucher_type") or draft.get("voucher_type") or "Purchase",

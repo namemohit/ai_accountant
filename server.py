@@ -3632,7 +3632,8 @@ Return ONLY a JSON object."""
         if not parsed:
             parsed = {"_parse_failed": True, "raw_text": raw_text[:500] if raw_text else ""}
 
-        # Save the draft
+        # P1 FIX: surface a real failure instead of a fake "success" + hardcoded 0.85.
+        parse_failed = bool(parsed.get("_parse_failed"))
         draft_id = db.save_voucher_draft(
             company_id=company_id, company_name=company_name,
             parsed_payload=parsed,
@@ -3640,12 +3641,16 @@ Return ONLY a JSON object."""
             source_file_name=file.filename,
             source_file_type=file_type,
             voucher_type=parsed.get("voucher_type"),
-            ai_confidence=0.85 if parsed and not parsed.get("_parse_failed") else 0.0,
+            ai_confidence=0.0 if parse_failed else 0.85,
             created_by="user_upload",
         )
 
         return {
-            "status": "success",
+            "status": "parse_failed" if parse_failed else "success",
+            "parse_ok": not parse_failed,
+            "message": ("Couldn't read this document automatically — open the draft and "
+                        "enter the details manually, or try a clearer file.")
+                       if parse_failed else None,
             "draft_id": draft_id,
             "file_url": file_url,
             "file_name": file.filename,
