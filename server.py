@@ -180,11 +180,8 @@ async def dispatch_tally_command(token: str, cmd_type: str, data: dict = None) -
     ws = None
     if token in tally_connections:
         ws = tally_connections[token]
-    elif tally_connections:
-        # Fallback to the first available active connection!
-        ws = list(tally_connections.values())[0]
-        print(f"[WS DISPATCH FALLBACK] Token '{token}' not found, using active connection.", flush=True)
-        
+    # P0 FIX: no "first available connection" fallback — routing a command to a
+    # different company's agent would pull the WRONG tenant's Tally data.
     if not ws:
         print(f"[WS DISPATCH ERROR] No active Tally WebSocket connections available for token '{token}'.", flush=True)
         return None
@@ -3003,9 +3000,13 @@ async def patch_bank_transaction(tx_id: str, payload: dict):
             payload.setdefault("confidence", 1.0)
             payload.setdefault("status", "ai_filled")
             payload.setdefault("rationale", "Manual override by user")
-        row = db.update_bank_transaction(tx_id, payload)
+        # P0 FIX: scope the edit to the caller's company (tenant isolation).
+        _cid = payload.get("company_id")
+        if not _cid and payload.get("company_name"):
+            _cid = _resolve_company_id_by_name(payload.get("company_name"))
+        row = db.update_bank_transaction(tx_id, payload, company_id=_cid)
         if not row:
-            raise HTTPException(status_code=404, detail="bank_transaction not found")
+            raise HTTPException(status_code=404, detail="bank_transaction not found (or not in your company)")
         # JSON-friendly
         for k in ("date", "value_date", "created_at", "updated_at"):
             if row.get(k) is not None: row[k] = str(row[k])
@@ -3680,10 +3681,20 @@ async def list_drafts_endpoint(company_id: str = None, company_name: str = None,
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _draft_company_id(company_id=None, company_name=None):
+    """Resolve a company_id for tenant-scoping draft access."""
+    if company_id:
+        return company_id
+    if company_name:
+        return _resolve_company_id_by_name(company_name)
+    return None
+
+
 @app.get("/api/vouchers/draft/{draft_id}")
-async def get_draft_endpoint(draft_id: str):
+async def get_draft_endpoint(draft_id: str, company_name: str = None, company_id: str = None):
     try:
-        row = db.get_voucher_draft(draft_id)
+        cid = _draft_company_id(company_id, company_name)
+        row = db.get_voucher_draft(draft_id, company_id=cid)
         if not row:
             raise HTTPException(status_code=404, detail="draft not found")
         return {"status": "success", "data": _draft_jsonify(row)}
@@ -3696,11 +3707,13 @@ async def get_draft_endpoint(draft_id: str):
 @app.patch("/api/vouchers/draft/{draft_id}")
 async def patch_draft_endpoint(draft_id: str, payload: dict):
     try:
+        cid = _draft_company_id(payload.get("company_id"), payload.get("company_name"))
         row = db.update_voucher_draft(
             draft_id,
             reviewed_payload=payload.get("reviewed_payload"),
             voucher_type=payload.get("voucher_type"),
             status=payload.get("status"),
+            company_id=cid,
         )
         if not row:
             raise HTTPException(status_code=404, detail="draft not found")
@@ -3712,9 +3725,11 @@ async def patch_draft_endpoint(draft_id: str, payload: dict):
 
 
 @app.post("/api/vouchers/draft/{draft_id}/post")
-async def post_draft_endpoint(draft_id: str):
+async def post_draft_endpoint(draft_id: str, payload: dict = None):
     try:
-        res = db.post_voucher_from_draft(draft_id)
+        payload = payload or {}
+        cid = _draft_company_id(payload.get("company_id"), payload.get("company_name"))
+        res = db.post_voucher_from_draft(draft_id, company_id=cid)
         if res.get("error"):
             raise HTTPException(status_code=400, detail=res["error"])
         return {"status": "success", **res}
@@ -3726,9 +3741,11 @@ async def post_draft_endpoint(draft_id: str):
 
 
 @app.post("/api/vouchers/draft/{draft_id}/discard")
-async def discard_draft_endpoint(draft_id: str):
+async def discard_draft_endpoint(draft_id: str, payload: dict = None):
     try:
-        row = db.discard_voucher_draft(draft_id)
+        payload = payload or {}
+        cid = _draft_company_id(payload.get("company_id"), payload.get("company_name"))
+        row = db.discard_voucher_draft(draft_id, company_id=cid)
         if not row:
             raise HTTPException(status_code=404, detail="draft not found")
         return {"status": "success", "data": _draft_jsonify(row)}
@@ -5128,7 +5145,18 @@ async def ingest_tally_data(payload: dict):
         ws_response = await dispatch_tally_command(conn_key, "seed_baseline")
         
         if not ws_response or ws_response.get("status") != "success":
-            # Fallback simulator data — rich format mirrors what the upgraded bridge agent sends.
+            # P0 FIX: never fabricate a customer's books. If the bridge gave us no
+            # real data, fail loudly and change nothing — do NOT seed simulator data.
+            try:
+                import asyncio as _aio
+                await _aio.get_event_loop().run_in_executor(
+                    None, db.log_tally_sync, company, 'baseline', 0, 0, 'failed')
+            except Exception:
+                pass
+            raise HTTPException(status_code=502, detail=(
+                "Tally bridge unavailable — open Tally and start the YantrAI Tally "
+                "Bridge agent on that machine, then retry. Nothing was changed."))
+        if False:  # DISABLED simulator fallback — retained out of the data path only.
             ws_response = {
                 "status": "success",
                 "tally_company_name": company,
@@ -5600,6 +5628,8 @@ async def ingest_tally_data(payload: dict):
             "group_count": len(groups)
         }
                 
+    except HTTPException:
+        raise  # surface explicit errors (e.g. 502 bridge-unavailable) as-is
     except Exception as e:
         import traceback
         tb = traceback.format_exc()

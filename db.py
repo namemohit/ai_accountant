@@ -3875,7 +3875,9 @@ def list_bank_transactions(company_id=None, company_name=None, source=None, stat
         where.append("(bt.company_id = %s OR (bt.company_id IS NULL AND bt.company_name = %s))")
         params.extend([company_id, company_name])
     elif company_id:
-        where.append("(bt.company_id = %s OR bt.company_id IS NULL)")
+        # P0 FIX: do NOT return company_id IS NULL rows here — that leaked every
+        # orphan row to every tenant. Strict company_id scoping only.
+        where.append("bt.company_id = %s")
         params.append(company_id)
     elif company_name:
         where.append("bt.company_name = %s"); params.append(company_name)
@@ -5198,7 +5200,7 @@ def tally_status_summary(company_name):
         cur.close(); conn.close()
 
 
-def update_bank_transaction(tx_id, updates, user_id=None):
+def update_bank_transaction(tx_id, updates, user_id=None, company_id=None):
     """Inline-edit one bank_transactions row. updates is a dict of fields → values.
     Allowed fields: party, head, bank_ledger, voucher_type, status, confidence,
     rationale, ai_touched, human_touched.
@@ -5224,11 +5226,17 @@ def update_bank_transaction(tx_id, updates, user_id=None):
             sets.append("human_touched = %s")
             params.append(True)
     params.append(tx_id)
+    # P0 FIX: scope the update to the caller's company so a guessed tx_id can't
+    # mutate another tenant's row.
+    scope = "WHERE id = %s"
+    if company_id:
+        scope += " AND company_id = %s"
+        params.append(company_id)
     conn = get_conn()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     cur.execute(f"""
         UPDATE bank_transactions SET {', '.join(sets)}
-        WHERE id = %s RETURNING *
+        {scope} RETURNING *
     """, params)
     row = cur.fetchone()
     conn.commit()
@@ -5469,10 +5477,15 @@ def save_voucher_draft(company_id, company_name, parsed_payload, source_file_url
     return new_id
 
 
-def get_voucher_draft(draft_id):
+def get_voucher_draft(draft_id, company_id=None):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("SELECT * FROM voucher_drafts WHERE id = %s", (draft_id,))
+    # P0 FIX: scope by company so a guessed draft_id can't read another tenant's draft.
+    if company_id:
+        cur.execute("SELECT * FROM voucher_drafts WHERE id = %s AND company_id = %s",
+                    (draft_id, company_id))
+    else:
+        cur.execute("SELECT * FROM voucher_drafts WHERE id = %s", (draft_id,))
     row = cur.fetchone()
     cur.close()
     conn.close()
@@ -5506,7 +5519,8 @@ def list_voucher_drafts(company_id, status=None, limit=200):
     return rows
 
 
-def update_voucher_draft(draft_id, reviewed_payload=None, voucher_type=None, status=None):
+def update_voucher_draft(draft_id, reviewed_payload=None, voucher_type=None, status=None,
+                         company_id=None):
     sets, params = [], []
     if reviewed_payload is not None:
         sets.append("reviewed_payload = %s::jsonb")
@@ -5522,9 +5536,13 @@ def update_voucher_draft(draft_id, reviewed_payload=None, voucher_type=None, sta
         return None
     sets.append("updated_at = CURRENT_TIMESTAMP")
     params.append(draft_id)
+    scope = "WHERE id = %s"
+    if company_id:
+        scope += " AND company_id = %s"
+        params.append(company_id)
     conn = get_conn()
     cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute(f"UPDATE voucher_drafts SET {', '.join(sets)} WHERE id = %s RETURNING *", params)
+    cur.execute(f"UPDATE voucher_drafts SET {', '.join(sets)} {scope} RETURNING *", params)
     row = cur.fetchone()
     conn.commit()
     cur.close()
@@ -5532,16 +5550,19 @@ def update_voucher_draft(draft_id, reviewed_payload=None, voucher_type=None, sta
     return row
 
 
-def discard_voucher_draft(draft_id):
-    return update_voucher_draft(draft_id, status='discarded')
+def discard_voucher_draft(draft_id, company_id=None):
+    return update_voucher_draft(draft_id, status='discarded', company_id=company_id)
 
 
-def post_voucher_from_draft(draft_id):
+def post_voucher_from_draft(draft_id, company_id=None):
     """Take a draft's reviewed_payload (or parsed_payload), insert into
     tally_vouchers, mark draft 'posted', return the voucher row."""
-    draft = get_voucher_draft(draft_id)
+    draft = get_voucher_draft(draft_id, company_id=company_id)
     if not draft:
         return {"error": "draft not found"}
+    # P0 FIX: never double-post the same draft.
+    if draft.get("status") in ("posted", "discarded"):
+        return {"error": f"draft already {draft.get('status')}"}
     payload = draft.get("reviewed_payload") or draft.get("parsed_payload") or {}
     voucher = {
         "date": payload.get("date") or "",
@@ -5576,7 +5597,7 @@ def post_voucher_from_draft(draft_id):
             conn.commit()
             cur.close()
             conn.close()
-        update_voucher_draft(draft_id, status='posted')
+        update_voucher_draft(draft_id, status='posted', company_id=company_id)
         return {"status": "posted", "voucher": voucher, "upserted": save_res["upserted"]}
     return {"status": "error", "message": "save_tally_vouchers did not upsert"}
 
