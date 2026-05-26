@@ -660,7 +660,7 @@
                 <div style="background: rgba(11, 18, 32, 0.95); padding: 22px 30px; border-radius: 12px; border: 1px solid var(--primary); text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
                     <div style="font-size: 2.4rem; margin-bottom: 6px;">📥</div>
                     <div style="color: var(--primary); font-size: 1.15rem; font-weight: 700;">Drop your invoice / file here</div>
-                    <div style="color: #94a3b8; font-size: 0.78rem; margin-top: 4px;">PDF · PNG · JPG · XLSX · CSV — one file at a time</div>
+                    <div style="color: #94a3b8; font-size: 0.78rem; margin-top: 4px;">PDF · PNG · JPG · XLSX · CSV — drop one or several (processed in order)</div>
                 </div>
             </div>
             <!-- Sprint 9: lightweight toast container (warnings about multi-file etc.) -->
@@ -8042,14 +8042,11 @@
             if (overlay) overlay.style.display = 'none';
             const files = e.dataTransfer && e.dataTransfer.files;
             if (!files || files.length === 0) return;
-            attachFileToChat(files[0]);
-            if (files.length > 1) {
-                showChatToast(
-                    `Only the first file (${files[0].name}) was attached. ` +
-                    `Drop one at a time, or use 📊 Bulk Excel for 100+ files.`,
-                    'warn'
-                );
-            }
+            // Single file → attach to the composer (user can add a note then send).
+            // Multiple files → process each in drop order, one reply per file.
+            if (files.length === 1) { attachFileToChat(files[0]); return; }
+            showChatToast(`Processing ${files.length} files in order…`, 'info');
+            _sendFilesSequentially(files);
         }
 
         // Single canonical helper for attaching a file to the chat composer
@@ -8414,36 +8411,37 @@
             // Capture the file, then clear the composer IMMEDIATELY so a quick
             // second Enter can't re-send the same attachment (Sprint 40 fix).
             const fileToSend = selectedFile;
+            chatInput.value = '';
+            clearAttachment();          // resets selectedFile + preview + buttons now
+            autoResizeTextarea();
+            await _sendOneToChat(msg, fileToSend);
+        }
 
+        // Send a single turn (optional text + optional file) and render the reply.
+        // Returns true on success, false on error/out-of-tokens (so a sequential
+        // multi-file run can stop early). Awaiting this keeps replies in order.
+        async function _sendOneToChat(msg, fileToSend) {
             document.getElementById('chat-welcome').style.display = 'none';
             document.getElementById('chat-messages').style.display = 'flex';
             document.getElementById('chat-suggestions').style.display = 'none';
 
-            const userMsg = msg || `Uploaded document: ${fileToSend.name}`;
+            const userMsg = msg || (fileToSend ? `Uploaded document: ${fileToSend.name}` : '');
             appendUserMessage(userMsg, fileToSend);
-            chatInput.value = '';
-            clearAttachment();          // resets selectedFile + preview + buttons now
-            autoResizeTextarea();
 
             const thinking = appendThinking();
-
             try {
                 const formData = new FormData();
-                formData.append('message', msg);
+                formData.append('message', msg || '');
                 // AI auto-classifies — no manual txn_type needed
                 if (fileToSend) formData.append('file', fileToSend);
                 if (currentSessionId) formData.append('session_id', currentSessionId);
 
                 const currentUser = JSON.parse(localStorage.getItem('currentUser'));
-                if (currentUser && currentUser.company_name) {
-                    formData.append('company_name', currentUser.company_name);
-                }
-                if (currentUser && currentUser.username) {
-                    formData.append('username', currentUser.username);
-                }
+                if (currentUser && currentUser.company_name) formData.append('company_name', currentUser.company_name);
+                if (currentUser && currentUser.username) formData.append('username', currentUser.username);
 
                 const res = await fetch(`${API}/chat`, { method: 'POST', body: formData });
-                if (res.status === 402) { thinking.remove(); _handleOutOfTokens(); return; }
+                if (res.status === 402) { thinking.remove(); _handleOutOfTokens(); return false; }
                 const data = await res.json();
 
                 thinking.remove();
@@ -8452,9 +8450,23 @@
                 if (data.suggested_questions) showSuggestions(data.suggested_questions);
                 loadChatSessions();
                 refreshWalletPill();
+                return true;
             } catch (err) {
                 thinking.remove();
                 appendAIMessage({ text: 'Error: ' + err.message });
+                return false;
+            }
+        }
+
+        // Process multiple dropped files one-by-one, in drop order — each gets its
+        // own reply before the next is sent (so replies stay in upload sequence).
+        async function _sendFilesSequentially(files) {
+            const list = Array.from(files || []);
+            if (!list.length) return;
+            clearAttachment();
+            for (const f of list) {
+                const ok = await _sendOneToChat('', f);
+                if (!ok) break;   // stop on out-of-tokens / error
             }
         }
 
