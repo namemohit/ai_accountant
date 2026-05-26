@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Publish the L2 agents (bluestone-cam-ai, fieldai, voice-caller) into the store
-as first-party, public, chargeable REMOTE apps.
+"""Publish the L3 in-house first-party agents (bluestone-cam-ai, fieldai,
+voice-caller) into the store as first-party, public, chargeable REMOTE apps.
+(These run on their own infra and are onboarded via the YantrAI SDK; L2 = apps
+bundled inside the platform, seeded separately in _seed_agents.)
 
 Unlike _seed_agents (which only writes 11 columns), remote+chargeable apps also
 need client_id + signing_key (for SSO scoping / usage metering) and visibility.
