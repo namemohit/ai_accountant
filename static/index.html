@@ -3462,31 +3462,41 @@
             }
         }
         function _renderTrainingProgress(d) {
-            const s = d.stats || {}; const pct = s.confidence_score || 0;
+            const s = d.stats || {}; const pct = (d.metrics && d.metrics.overall_pct) || s.confidence_score || 0;
             const learned = s.total_mappings || 0;
-            const statusColor = { Untrained:'#94a3b8', Pending:'#fbbf24', Training:'#38bdf8', Vectorized:'#4ade80' }[s.status] || '#94a3b8';
-            // Headline
+            const acc = d.accuracy || {};
+            const accLabel = (acc.accuracy_pct == null) ? '—' : (acc.accuracy_pct + '%');
+            const statusColor = { Untrained:'#94a3b8', Learning:'#38bdf8', 'Well trained':'#4ade80' }[s.status] || '#38bdf8';
+            // Headline — Trained level (benchmark %) + Accuracy (right ÷ total inferences)
             let h = `<div class="card" style="margin-bottom:16px;">
-                <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;">
+                <div style="display:flex; gap:36px; flex-wrap:wrap; align-items:flex-start;">
                     <div>
                         <div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:.5px; color:#94a3b8;">Trained level</div>
                         <div style="font-size:2rem; font-weight:800; color:#f5f1ec;">${pct}%</div>
                         <div style="font-size:0.8rem; color:#94a3b8;">${learned.toLocaleString('en-IN')} things learned ·
                             <span style="color:${statusColor}; font-weight:600;">${escapeHtml(s.status||'—')}</span></div>
                     </div>
+                    <div>
+                        <div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:.5px; color:#94a3b8;">Accuracy</div>
+                        <div style="font-size:2rem; font-weight:800; color:#f5f1ec;">${accLabel}</div>
+                        <div style="font-size:0.8rem; color:#94a3b8;">${acc.total_inferences ? `${acc.right_inferences}/${acc.total_inferences} inferences right` : 'not enough data yet'}</div>
+                    </div>
                 </div>
                 <div style="height:8px; background:rgba(255,255,255,0.08); border-radius:6px; margin-top:14px; overflow:hidden;">
                     <div style="height:100%; width:${Math.max(2,pct)}%; background:linear-gradient(90deg,#da7756,#e8a87c); border-radius:6px;"></div>
                 </div>
             </div>`;
-            // Breakdown
+            // Breakdown — count / target + a thin per-type progress bar
+            const per = (d.metrics && d.metrics.per_type) || {};
             const bd = d.breakdown || {};
             const cells = Object.keys(_TP_TYPES).map(t => {
-                const meta = _TP_TYPES[t]; const n = bd[t] || 0;
+                const meta = _TP_TYPES[t]; const n = (per[t] && per[t].count) != null ? per[t].count : (bd[t] || 0);
+                const tgt = (per[t] && per[t].target) || 0; const tp = (per[t] && per[t].pct) || 0;
                 return `<div style="background:var(--bg-light); border:1px solid var(--border); border-radius:10px; padding:12px 14px;">
                     <div style="font-size:1.3rem;">${meta.icon}</div>
-                    <div style="font-size:1.25rem; font-weight:700; color:#f5f1ec; margin-top:4px;">${n.toLocaleString('en-IN')}</div>
+                    <div style="font-size:1.25rem; font-weight:700; color:#f5f1ec; margin-top:4px;">${n.toLocaleString('en-IN')}<span style="font-size:0.75rem; color:#64748b; font-weight:500;">${tgt ? ' / ' + tgt : ''}</span></div>
                     <div style="font-size:0.72rem; color:#94a3b8;">${meta.label}</div>
+                    ${tgt ? `<div style="height:5px; background:rgba(255,255,255,0.08); border-radius:4px; margin-top:7px; overflow:hidden;"><div style="height:100%; width:${Math.max(2,tp)}%; background:#4ade80; border-radius:4px;"></div></div>` : ''}
                 </div>`;
             }).join('');
             h += `<h3 style="margin:18px 0 10px; font-size:1rem;">Learning breakdown</h3>

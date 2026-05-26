@@ -3283,6 +3283,73 @@ def training_stats(company_name="Acme Corp"):
     return {"total_mappings": total, "vectorized": vectorized,
             "confidence_score": confidence, "status": status}
 
+# Tunable benchmarks — "fully learned" target per knowledge type. Per-type % =
+# min(100, learned/target); overall training % = average of per-type %.
+TRAINING_TARGETS = {
+    "correction": 50,
+    "tally_master_ledger": 100,
+    "tally_master_party": 100,
+    "tally_master_item": 100,
+    "tally_master_narration": 200,
+    "bank_reconciliation": 100,
+}
+
+def training_metrics(company_name="Acme Corp"):
+    """Benchmark-based training %: each learning type scored against a target, rolled
+    into an overall %. Returns {overall_pct, per_type:{type:{count,target,pct}}}."""
+    bd = training_breakdown(company_name)
+    per_type = {}
+    pcts = []
+    for t, target in TRAINING_TARGETS.items():
+        cnt = int(bd.get(t, 0) or 0)
+        pct = min(100, round(cnt * 100.0 / target)) if target else 0
+        per_type[t] = {"count": cnt, "target": target, "pct": pct}
+        pcts.append(pct)
+    overall = round(sum(pcts) / len(pcts)) if pcts else 0
+    return {"overall_pct": overall, "per_type": per_type}
+
+def inference_accuracy(company_name="Acme Corp"):
+    """Accuracy % = right ÷ total AI inferences, from real outcome signals:
+    bank (matched ÷ ai_touched) + vouchers (extractions − corrections). Returns
+    {accuracy_pct|None, right_inferences, total_inferences}."""
+    conn = get_conn(); cur = conn.cursor()
+    bank_ai = bank_matched = extractions = corrections = 0
+    try:
+        try:
+            cur.execute("SELECT COUNT(*) FILTER (WHERE ai_touched), "
+                        "COUNT(*) FILTER (WHERE ai_touched AND status='matched') "
+                        "FROM bank_transactions WHERE company_name = %s", (company_name,))
+            r = cur.fetchone() or (0, 0); bank_ai = int(r[0] or 0); bank_matched = int(r[1] or 0)
+        except Exception as e:
+            print(f"[inference_accuracy bank] {e}")
+        try:
+            cur.execute("SELECT COUNT(*) FROM invoices WHERE company_name = %s", (company_name,))
+            extractions = int((cur.fetchone() or [0])[0] or 0)
+        except Exception as e:
+            print(f"[inference_accuracy inv] {e}")
+        try:
+            cur.execute("SELECT COUNT(*) FROM knowledge_base WHERE type='correction' "
+                        "AND data->>'company_name' = %s", (company_name,))
+            corrections = int((cur.fetchone() or [0])[0] or 0)
+        except Exception as e:
+            print(f"[inference_accuracy corr] {e}")
+    finally:
+        cur.close(); conn.close()
+    # Voucher accuracy = (extractions − corrections)/extractions, but ONLY when corrections
+    # represent per-invoice edits (corrections <= extractions). If corrections far exceed
+    # invoices (bulk-trained masters, not edit feedback), the ratio is meaningless → omit
+    # the voucher term rather than report a misleading 0%.
+    if extractions > 0 and corrections <= extractions:
+        v_total = extractions
+        v_right = extractions - corrections
+    else:
+        v_total = 0
+        v_right = 0
+    right = bank_matched + v_right
+    total = bank_ai + v_total
+    pct = round(right * 100.0 / total, 1) if total else None
+    return {"accuracy_pct": pct, "right_inferences": right, "total_inferences": total}
+
 def training_totals(company_name="Acme Corp"):
     """Headline 'how trained' across ALL learning types (corrections + masters +
     bank-reco), not just corrections — matches the per-type breakdown the UI shows."""

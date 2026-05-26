@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "139"
+APP_VERSION = "140"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -5305,10 +5305,18 @@ async def get_training_progress(request: Request, company_name: str = "Acme Corp
     training-log timeline for `company_name`. With scope=all, also returns per-company stats
     for every workspace the caller belongs to (CA comparison)."""
     try:
+        stats = db.training_totals(company_name)         # "things learned" count
+        metrics = db.training_metrics(company_name)       # benchmark-based overall %
+        stats["confidence_score"] = metrics["overall_pct"]  # headline % = benchmark, not vectorized
+        stats["status"] = ("Untrained" if metrics["overall_pct"] == 0
+                           else "Well trained" if metrics["overall_pct"] >= 80
+                           else "Learning")
         out = {
             "status": "success",
             "company_name": company_name,
-            "stats": db.training_totals(company_name),   # all learning types, not just corrections
+            "stats": stats,
+            "metrics": metrics,
+            "accuracy": db.inference_accuracy(company_name),
             "breakdown": db.training_breakdown(company_name),
             "recent": db.recent_training(company_name, limit=25),
         }
@@ -5326,7 +5334,9 @@ async def get_training_progress(request: Request, company_name: str = "Acme Corp
                 if not c or c in seen:
                     continue
                 seen.add(c)
-                companies.append({"company": c, "stats": db.training_totals(c)})
+                cst = db.training_totals(c)
+                cst["confidence_score"] = db.training_metrics(c)["overall_pct"]
+                companies.append({"company": c, "stats": cst})
             out["per_company"] = companies
         return out
     except Exception as e:
