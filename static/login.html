@@ -131,28 +131,26 @@
                 </div>
 
                 <!-- Login Form -->
-                <div id="form-login">
+                <form id="form-login" onsubmit="event.preventDefault(); handleLogin(); return false;">
                     <div class="form-group" style="text-align: left;">
                         <label>Username</label>
-                        <input type="text" id="username" autocomplete="username" placeholder="e.g. rohit or admin"
-                               onkeydown="if(event.key==='Enter')handleLogin()">
+                        <input type="text" id="username" autocomplete="username" placeholder="e.g. rohit or admin">
                     </div>
                     <div class="form-group" style="text-align: left;">
                         <label>Password</label>
                         <div class="pw-wrap">
-                            <input type="password" id="password" autocomplete="current-password" placeholder="••••••••"
-                                   onkeydown="if(event.key==='Enter')handleLogin()">
+                            <input type="password" id="password" autocomplete="current-password" placeholder="••••••••">
                             <button type="button" class="toggle" title="Show/hide" onclick="togglePw('password', this)">👁</button>
                         </div>
                     </div>
-                    <button class="btn confirm-btn" onclick="handleLogin()" id="login-btn" style="width: 100%; margin-top: 12px; padding: 12px; font-weight: bold; font-size: 1rem;">Sign In</button>
+                    <button type="submit" class="btn confirm-btn" id="login-btn" style="width: 100%; margin-top: 12px; padding: 12px; font-weight: bold; font-size: 1rem;">Sign In</button>
                     <div style="text-align:right; margin-top:10px;">
                         <a href="#" onclick="handleForgot(); return false;" style="color:#94a3b8; font-size:0.8rem; text-decoration:none;">Forgot password?</a>
                     </div>
-                </div>
+                </form>
 
                 <!-- Set-new-password (shown when arriving from a Supabase recovery link) -->
-                <div id="form-recovery" style="display: none;">
+                <form id="form-recovery" onsubmit="event.preventDefault(); handleSetNewPassword(); return false;" style="display: none;">
                     <p style="text-align:left; color:#94a3b8; font-size:0.85rem; margin:0 0 14px;">Set a new password for your account.</p>
                     <div class="form-group" style="text-align: left;">
                         <label>New Password *</label>
@@ -161,11 +159,11 @@
                             <button type="button" class="toggle" title="Show/hide" onclick="togglePw('rec-password', this)">👁</button>
                         </div>
                     </div>
-                    <button class="btn confirm-btn" onclick="handleSetNewPassword()" id="rec-btn" style="width: 100%; margin-top: 12px; padding: 12px; font-weight: bold; font-size: 1rem; background:#10b981;">Update password</button>
-                </div>
+                    <button type="submit" class="btn confirm-btn" id="rec-btn" style="width: 100%; margin-top: 12px; padding: 12px; font-weight: bold; font-size: 1rem; background:#10b981;">Update password</button>
+                </form>
 
                 <!-- Create-account Form (uniform signup — your own workspace) -->
-                <div id="form-register" style="display: none;">
+                <form id="form-register" onsubmit="event.preventDefault(); handleRegister(); return false;" style="display: none;">
                     <p style="text-align:left; color:#94a3b8; font-size:0.82rem; margin:0 0 14px;">Create your workspace. You can invite your CA, clients, or team later with a share code.</p>
                     <div class="form-group" style="text-align: left;">
                         <label>Company / workspace name *</label>
@@ -201,8 +199,8 @@
                         <label>Email Address *</label>
                         <input type="email" id="reg-email" autocomplete="email" placeholder="rohit@enterprises.com" required>
                     </div>
-                    <button class="btn confirm-btn" onclick="handleRegister()" id="register-btn" style="width: 100%; margin-top: 12px; padding: 12px; font-weight: bold; font-size: 1rem; background: #10b981;">Create account</button>
-                </div>
+                    <button type="submit" class="btn confirm-btn" id="register-btn" style="width: 100%; margin-top: 12px; padding: 12px; font-weight: bold; font-size: 1rem; background: #10b981;">Create account</button>
+                </form>
 
                 <p id="error-msg" style="color: #f87171; margin-top: 18px; font-size: 0.875rem; display: none;"></p>
                 <p id="success-msg" style="color: #4ade80; margin-top: 18px; font-size: 0.875rem; display: none;"></p>
