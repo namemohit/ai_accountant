@@ -5280,8 +5280,23 @@ async def ingest_tally_data(payload: dict):
         username = payload.get("username", "admin")
         conn_key = company_id or company
 
-        # Try full baseline seed via WebSocket bridge agent
-        ws_response = await dispatch_tally_command(conn_key, "seed_baseline")
+        # Incremental download (Sprint — incremental): if we have a watermark AND a
+        # recent full sync (< 24h), ask the agent for only vouchers altered since the
+        # last AlterId. Otherwise do a full pull (also the periodic reconcile that
+        # catches deletions). Old agents ignore since_alter_id and return everything.
+        _do_full, _since = True, 0
+        try:
+            _wm = db.get_sync_watermark(company)
+            if _wm and _wm.get("last_full_sync_at") and _wm.get("last_voucher_alterid"):
+                import datetime as _dt
+                _age = (_dt.datetime.utcnow() - _wm["last_full_sync_at"]).total_seconds()
+                if 0 <= _age < 24 * 3600:
+                    _do_full, _since = False, int(_wm["last_voucher_alterid"] or 0)
+        except Exception as _we:
+            print(f"[ingest] watermark check: {_we}")
+
+        ws_response = await dispatch_tally_command(
+            conn_key, "seed_baseline", {"since_alter_id": _since})
         
         if not ws_response or ws_response.get("status") != "success":
             # P0 FIX: never fabricate a customer's books. If the bridge gave us no
@@ -5430,10 +5445,17 @@ async def ingest_tally_data(payload: dict):
             group_count = await _loop.run_in_executor(None, db.save_tally_groups, tally_company, groups)
             stock_count = await _loop.run_in_executor(None, db.save_tally_stock_items, tally_company, stock_items)
             print(f"[SEED BASELINE] Upserted: {v_result.get('upserted',0)} vouchers, {ledger_count} ledgers, {group_count} groups, {stock_count} stock items.")
-            await _loop.run_in_executor(None, db.log_tally_sync, tally_company, 'baseline',
+            await _loop.run_in_executor(None, db.log_tally_sync, tally_company,
+                              'incremental' if not _do_full else 'baseline',
                               len(vouchers)+len(rich_ledgers)+len(groups)+len(stock_items),
                               v_result.get('upserted',0)+ledger_count+group_count+stock_count,
                               'success')
+
+            # Advance the incremental-download watermark to the highest AlterId seen.
+            # Absent (old agents) -> skip, so behaviour stays full-pull (no regression).
+            _max_alter = ws_response.get("max_alter_id")
+            if _max_alter is not None:
+                await _loop.run_in_executor(None, db.set_sync_watermark, company, _max_alter, _do_full)
 
             # Phase B: backfill company_id on newly-inserted rows so multi-tenant queries work.
             # We only backfill when the agent gave us an authenticated company_id (skipped on legacy path).

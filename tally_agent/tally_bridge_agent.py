@@ -308,16 +308,25 @@ def fetch_groups(tally_url):
         })
     return groups
 
-def fetch_vouchers(tally_url, from_date="20000401", to_date=None):
-    """Fetch all vouchers with full details: date, type, number, party, amount, narration, GUID,
-    ledger entries (with bank/bill allocations + cost-centre allocations) for AI training.
+def fetch_vouchers(tally_url, from_date="20000401", to_date=None, since_alter_id=0):
+    """Fetch vouchers with full details: date, type, number, party, amount, narration, GUID,
+    AlterId, ledger entries (with bank/bill allocations + cost-centre allocations).
 
     Tally's default Voucher collection returns the current fiscal year only. To pull
     ALL history we override SVFROMDATE/SVTODATE to a wide range.
+
+    INCREMENTAL (Sprint — incremental download): when since_alter_id > 0 we add a TDL
+    filter `$AlterId > N` so Tally returns ONLY vouchers created/edited since the last
+    sync. AlterId is always fetched so the server can advance its watermark.
     """
     if to_date is None:
         to_date = datetime.now().strftime("%Y%m%d")
-    xml = f"""<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>VchCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><SVFROMDATE TYPE="Date">{from_date}</SVFROMDATE><SVTODATE TYPE="Date">{to_date}</SVTODATE></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="VchCol"><TYPE>Voucher</TYPE><FETCH>Date, VoucherTypeName, VoucherNumber, PartyLedgerName, Amount, Narration, GUID, ReferenceNumber, ReferenceDate, PlaceOfSupply, AllLedgerEntries, AllLedgerEntries.BankAllocations, AllLedgerEntries.BillAllocations, AllLedgerEntries.CategoryAllocations, AllLedgerEntries.CategoryAllocations.CostCentreAllocations</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
+    _filter_use = _filter_decl = ""
+    if since_alter_id and int(since_alter_id) > 0:
+        _filter_use = "<FILTER>AlterIdFilter</FILTER>"
+        _filter_decl = (f'<SYSTEM TYPE="Formula" NAME="AlterIdFilter">$AlterId &gt; '
+                        f'{int(since_alter_id)}</SYSTEM>')
+    xml = f"""<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>VchCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><SVFROMDATE TYPE="Date">{from_date}</SVFROMDATE><SVTODATE TYPE="Date">{to_date}</SVTODATE></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="VchCol"><TYPE>Voucher</TYPE><FETCH>AlterId, Date, VoucherTypeName, VoucherNumber, PartyLedgerName, Amount, Narration, GUID, ReferenceNumber, ReferenceDate, PlaceOfSupply, AllLedgerEntries, AllLedgerEntries.BankAllocations, AllLedgerEntries.BillAllocations, AllLedgerEntries.CategoryAllocations, AllLedgerEntries.CategoryAllocations.CostCentreAllocations</FETCH>{_filter_use}</COLLECTION>{_filter_decl}</TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
     res = query_local_tally(tally_url, xml, timeout=180.0)
     if not res:
         return [
@@ -444,9 +453,15 @@ def fetch_vouchers(tally_url, from_date="20000401", to_date=None):
             ledger_entries.append(le_entry)
 
         # date_raw and others are already cleaned by vext(); reassign defensively
+        # AlterId — Tally's monotonically-increasing change counter (for incremental sync)
+        try:
+            alterid = int(vext("ALTERID") or 0)
+        except Exception:
+            alterid = 0
         voucher = {
             "date": date_raw, "type": vtype, "party": party,
             "number": vnum, "amount": amount, "narration": narration,
+            "alterid": alterid,
         }
         if guid:
             voucher["guid"] = guid
@@ -699,7 +714,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.5.0"   # Sends session_token on queue/ack/fail/heartbeat (tenant-scoped bridge auth)
+AGENT_VERSION = "0.6.0"   # + incremental download: AlterId watermark on baseline pull
 
 
 def _post_json(url, body, timeout=15.0):
@@ -2068,24 +2083,30 @@ class TallyBridgeApp:
                             self.log(f"Transmitted Tally summary for '{tally_company}'.", "success")
 
                         elif cmd_type == "seed_baseline":
-                            self.log("Starting full baseline data pull from Tally...", "info")
+                            # Incremental: server may pass since_alter_id to fetch only
+                            # vouchers changed since the last sync. 0 / absent = full pull.
+                            since = 0
+                            try:
+                                since = int((data or {}).get("since_alter_id") or 0)
+                            except Exception:
+                                since = 0
+                            mode = "incremental" if since > 0 else "full"
+                            self.log(f"Starting {mode} data pull from Tally"
+                                     + (f" (since AlterId {since})" if since else "") + "...", "info")
                             info = fetch_tally_company_info(tally_url)
                             tally_company = info.get("company_name") or self.selected_company_name or "Unknown"
                             info["pan"] = info.get("pan") or ""
                             self.log(f"Company: {tally_company} (PAN: {info['pan']})", "info")
 
                             rich_ledgers = fetch_rich_ledgers(tally_url)
-                            self.log(f"Pulled {len(rich_ledgers)} ledgers with balances.", "info")
-
                             groups = fetch_groups(tally_url)
-                            self.log(f"Pulled {len(groups)} account groups.", "info")
-
-                            vouchers = fetch_vouchers(tally_url)
-                            self.log(f"Pulled {len(vouchers)} vouchers.", "info")
-
+                            vouchers = fetch_vouchers(tally_url, since_alter_id=since)
                             stock_items = fetch_stock_items(tally_url)
-                            self.log(f"Pulled {len(stock_items)} stock items.", "info")
+                            self.log(f"Pulled {len(rich_ledgers)} ledgers, {len(groups)} groups, "
+                                     f"{len(vouchers)} vouchers ({mode}), {len(stock_items)} stock items.", "info")
 
+                            max_alter = max((int(v.get("alterid") or 0) for v in vouchers),
+                                            default=since)
                             response["tally_company_name"] = tally_company
                             response["pan"] = info["pan"]
                             response["ledgers"] = rich_ledgers
@@ -2096,7 +2117,9 @@ class TallyBridgeApp:
                             response["voucher_count"] = len(vouchers)
                             response["group_count"] = len(groups)
                             response["stock_count"] = len(stock_items)
-                            self.log(f"Baseline seed complete: {len(rich_ledgers)} ledgers, {len(vouchers)} vouchers, {len(groups)} groups, {len(stock_items)} stock items.", "success")
+                            response["incremental"] = since > 0
+                            response["max_alter_id"] = max_alter   # server advances its watermark
+                            self.log(f"{mode.capitalize()} seed complete (max AlterId {max_alter}).", "success")
                             self.increment_synced()
 
                         elif cmd_type == "create_voucher":

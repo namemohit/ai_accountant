@@ -6723,6 +6723,70 @@ def save_tally_vouchers(company_name, vouchers, source=None):
     return {"upserted": upserted, "skipped": skipped, "created": created, "updated": updated}
 
 
+_SYNC_STATE_READY = False
+
+
+def _ensure_sync_state(cur):
+    global _SYNC_STATE_READY
+    if _SYNC_STATE_READY:
+        return
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS tally_sync_state (
+            company_name TEXT PRIMARY KEY,
+            last_voucher_alterid BIGINT DEFAULT 0,
+            last_full_sync_at TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""")
+    _SYNC_STATE_READY = True
+
+
+def get_sync_watermark(company_name):
+    """Incremental-download watermark for a company (or None)."""
+    if not company_name:
+        return None
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_sync_state(cur)
+        cur.execute("""SELECT last_voucher_alterid, last_full_sync_at
+                       FROM tally_sync_state WHERE company_name=%s""", (company_name,))
+        r = cur.fetchone(); conn.commit(); return r
+    except Exception as e:
+        conn.rollback(); print(f"[get_sync_watermark] {e}"); return None
+    finally:
+        cur.close(); conn.close()
+
+
+def set_sync_watermark(company_name, max_alter_id, full=False):
+    """Advance the watermark to the highest AlterId seen. `full=True` also stamps
+    last_full_sync_at (used to schedule the periodic full reconcile for deletions)."""
+    if not company_name:
+        return
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        _ensure_sync_state(cur)
+        if full:
+            cur.execute("""
+                INSERT INTO tally_sync_state (company_name, last_voucher_alterid, last_full_sync_at, updated_at)
+                VALUES (%s,%s,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+                ON CONFLICT (company_name) DO UPDATE SET
+                    last_voucher_alterid=GREATEST(tally_sync_state.last_voucher_alterid, EXCLUDED.last_voucher_alterid),
+                    last_full_sync_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+            """, (company_name, int(max_alter_id or 0)))
+        else:
+            cur.execute("""
+                INSERT INTO tally_sync_state (company_name, last_voucher_alterid, updated_at)
+                VALUES (%s,%s,CURRENT_TIMESTAMP)
+                ON CONFLICT (company_name) DO UPDATE SET
+                    last_voucher_alterid=GREATEST(tally_sync_state.last_voucher_alterid, EXCLUDED.last_voucher_alterid),
+                    updated_at=CURRENT_TIMESTAMP
+            """, (company_name, int(max_alter_id or 0)))
+        conn.commit()
+    except Exception as e:
+        conn.rollback(); print(f"[set_sync_watermark] {e}")
+    finally:
+        cur.close(); conn.close()
+
+
 def list_voucher_sync_events(company_name, limit=50):
     """Recent per-voucher sync events (the download side of the Event Log)."""
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
