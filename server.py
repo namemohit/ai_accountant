@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response as _StarletteResponse
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse, HTMLResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse, HTMLResponse, Response
 import uvicorn
 import os
 from dotenv import load_dotenv
@@ -244,7 +244,7 @@ async def get_all_vouchers(company_name: str = None, company_id: str = None,
 
 @app.get("/login")
 async def login_page():
-    return FileResponse('static/login.html', headers={"Cache-Control": "no-cache, must-revalidate"})
+    return _serve_versioned('static/login.html', 'text/html')
 
 # ── Sprint 28 — Tally Outbox endpoints (bridge-agent contract + UI polling) ──
 @app.get("/api/tally/ledgers")
@@ -676,17 +676,33 @@ app.mount("/static", _CachedStatic(directory="static"), name="static")
 # (cheap 304 when unchanged, fresh bytes when changed).
 _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 
+# ── Single source of truth for the app version ──────────────────────────────
+# Bump APP_VERSION on EVERY release. It is injected (replacing the __APP_VER__
+# placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
+# the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
+# cache-bust are always the SAME number. Nothing else needs editing per release.
+APP_VERSION = "125"
+
+def _serve_versioned(path, media_type):
+    """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            body = f.read().replace("__APP_VER__", APP_VERSION)
+        return Response(content=body, media_type=media_type, headers=_NOCACHE)
+    except Exception:
+        return FileResponse(path, media_type=media_type, headers=_NOCACHE)
+
 @app.get("/manifest.json")
 async def get_manifest():
     return FileResponse('static/manifest.json', media_type='application/json', headers=_NOCACHE)
 
 @app.get("/sw.js")
 async def get_sw():
-    return FileResponse('static/sw.js', media_type='application/javascript', headers=_NOCACHE)
+    return _serve_versioned('static/sw.js', 'application/javascript')
 
 @app.get("/")
 async def read_index():
-    return FileResponse('static/index.html', headers=_NOCACHE)
+    return _serve_versioned('static/index.html', 'text/html')
 
 # Sprint 58 — PWA Share Target fallback. Normally the service worker intercepts the
 # POST and stashes the file; this only fires on the first launch before the SW controls

@@ -1,10 +1,11 @@
-const CACHE_NAME = 'yantrai-accounting-v124';
+const CACHE_NAME = 'yantrai-accounting-v__APP_VER__';
 const ASSETS = [
   '/',
   '/login',
   '/manifest.json',
-  '/static/style.css?v=113',
-  '/static/index.html'
+  '/static/style.css?v=__APP_VER__'
+  // '/' is the templated shell (version injected); don't precache the raw
+  // /static/index.html (it would still contain the __APP_VER__ placeholder).
 ];
 
 // Install: precache the shell and activate immediately (don't wait for old
