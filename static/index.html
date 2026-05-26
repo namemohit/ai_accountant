@@ -8631,9 +8631,14 @@
                     }
                 }
                 
-                const isSynced = (data.ui_data && data.ui_data.synced) || data.synced || false;
-                const disabledAttr = isSynced ? ' disabled' : '';
-                const editableAttr = isSynced ? 'contenteditable="false"' : 'contenteditable="true"';
+                // "locked" = the user already confirmed & we queued it to the Tally outbox
+                // (table can't be re-edited / re-sent). "trulySynced" = Tally actually
+                // accepted it (Bridge ack → ui_data.tally_pushed). We NEVER claim synced on
+                // queue alone — that was the false-"Synced" bug when the Bridge was offline.
+                const isLocked = (data.ui_data && (data.ui_data.queued || data.ui_data.synced || data.ui_data.tally_pushed)) || data.queued || data.synced || false;
+                const isTrulySynced = (data.ui_data && data.ui_data.tally_pushed) || data.tally_pushed || false;
+                const disabledAttr = isLocked ? ' disabled' : '';
+                const editableAttr = isLocked ? 'contenteditable="false"' : 'contenteditable="true"';
                 const tableId = `table-${Date.now()}`;
                 const fileUrlAttr = data.file_url ? ` data-file-url="${escapeHtml(data.file_url)}"` : '';
                 const msgIdAttr = data.id ? ` data-message-id="${data.id}"` : '';
@@ -8790,9 +8795,12 @@
                     </tr>`;
                 });
                 
-                let actionsHtml = isSynced ? `
+                let actionsHtml = isTrulySynced ? `
                 <div style="background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.25); color: #34d399; padding: 12px; border-radius: 8px; font-size: 0.85rem; font-weight: 600; display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 12px;">
                     <i class="fas fa-check-circle" style="font-size: 1.1rem; color: #10b981;"></i> Synced to Tally Prime Successfully!
+                </div>` : isLocked ? `
+                <div style="background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); color: #fbbf24; padding: 12px; border-radius: 8px; font-size: 0.84rem; font-weight: 600; display: flex; align-items: center; gap: 8px; margin-top: 12px;">
+                    <i class="fas fa-hourglass-half"></i> Queued for Tally Prime — it'll sync automatically once your Tally Bridge Agent is online. Track status in the Vouchers tab.
                 </div>` : `
                 <div class="table-actions">
                     <button class="btn btn-sm" onclick="addRow('${tableId}')"><i class="fas fa-plus"></i> Add Item</button>
@@ -9561,13 +9569,33 @@
                     file_url: fileUrl,
                     message_id: messageId
                 };
-                
-                const res = await fetch(`${API}/push-to-tally`, {
+
+                let res = await fetch(`${API}/push-to-tally`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
-                
+
+                // Workspace-is-a-party check: backend warns if our GSTIN isn't the
+                // seller or buyer on this invoice. Confirm to override, else abort.
+                let _warnData = null; try { _warnData = await res.clone().json(); } catch (_) {}
+                if (res.ok && _warnData && _warnData.warn === 'not_a_party') {
+                    const proceed = confirm(
+                        "This invoice doesn't list your workspace as a party.\n\n" +
+                        `Your workspace GSTIN: ${_warnData.workspace_gstin || '—'}\n` +
+                        `Invoice seller: ${_warnData.seller_gstin || '—'}\n` +
+                        `Invoice buyer:  ${_warnData.buyer_gstin || '—'}\n\n` +
+                        "This voucher may belong to a different workspace. Add it here anyway?");
+                    if (!proceed) {
+                        appendAIMessage({ text: "⚠️ Not added — your workspace isn't the seller or buyer on this invoice. Switch to the correct workspace and try again.", ui_type: 'text' });
+                        return;
+                    }
+                    res = await fetch(`${API}/push-to-tally`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ ...payload, force: true })
+                    });
+                }
+
                 if (res.ok) {
                     // Sprint 28 — honest two-step: invoice saved in YantrAI books AND
                     // enqueued for the Tally Bridge Agent. We immediately start polling

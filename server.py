@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "135"
+APP_VERSION = "136"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -2394,6 +2394,27 @@ async def analyze_invoice(file: UploadFile = File(...), company_name: str = Form
 @app.post("/push-to-tally")
 async def push_to_tally(data: dict):
     try:
+        # Integrity check — the active workspace must be a party to the invoice.
+        # If the workspace's own GSTIN matches NEITHER the seller (billing_party_gstin)
+        # NOR the buyer (billed_to_party_gstin), this voucher likely doesn't belong here.
+        # Soft gate: return a 'warn' so the UI can ask the user to confirm. The user can
+        # override by re-posting with force=true. Only triggers when we actually have
+        # GSTINs to compare (avoids false-blocks when extraction missed a GSTIN).
+        if not data.get("force"):
+            try:
+                ws_gstin = db.get_company_gstin(data.get("company_name"))
+                seller = (data.get("billing_party_gstin") or "").strip().upper()
+                buyer = (data.get("billed_to_party_gstin") or "").strip().upper()
+                present = [g for g in (seller, buyer) if g]
+                if ws_gstin and present and ws_gstin not in present:
+                    return {"status": "warn", "warn": "not_a_party",
+                            "workspace_gstin": ws_gstin,
+                            "seller_gstin": seller or None,
+                            "buyer_gstin": buyer or None,
+                            "message": "Your workspace's GSTIN isn't the seller or the buyer on this invoice."}
+            except Exception as _pe:
+                print(f"[push_to_tally] party-check skipped: {_pe}", flush=True)
+
         # Save to OUR books — this is YantrAI's record.
         invoice_id = None
         try:
@@ -2432,7 +2453,10 @@ async def push_to_tally(data: dict):
                     import json
                     ui_data = json.loads(msg["ui_data"]) if isinstance(msg["ui_data"], str) else msg["ui_data"]
                     if isinstance(ui_data, dict):
-                        ui_data["synced"] = True
+                        # It's only QUEUED to the outbox here — NOT yet accepted by Tally.
+                        # The Bridge Agent acks the outbox later; we never claim "synced"
+                        # in the chat card unless that real ack arrives (ui_data.tally_pushed).
+                        ui_data["queued"] = True
                         db.update_chat_message_ui_data(msg_id, ui_data)
                 except Exception as ex_msg:
                     print(f"Error updating message sync flag: {ex_msg}")

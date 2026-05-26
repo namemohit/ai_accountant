@@ -8127,6 +8127,23 @@ def create_membership(user_id, org_id, role, scope_company_ids=None, invited_by=
     return new_id
 
 
+def get_company_gstin(company_name):
+    """The workspace company's own GSTIN (for the 'is this workspace a party to the
+    invoice?' check). Returns the normalized GSTIN string or None."""
+    if not company_name:
+        return None
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT gstin FROM companies WHERE name = %s AND archived_at IS NULL "
+                    "ORDER BY is_primary DESC NULLS LAST LIMIT 1", (company_name,))
+        row = cur.fetchone()
+        g = (row[0] if row else None) or ""
+        return g.strip().upper() or None
+    except Exception as e:
+        print(f"[get_company_gstin] {e}"); return None
+    finally:
+        cur.close(); conn.close()
+
 def get_company_by_name_and_org(org_id, name):
     """Resolve a company by (org_id, name) -> company row, or None."""
     conn = get_conn()
