@@ -3370,18 +3370,22 @@
                     (badge ? `<span class="at-badge" title="Opens in Tally Agent">${badge}</span>` : '') +
                     `<div class="at-icon">${icon}</div>` +
                     `<div class="at-name">${escapeHtml(name)}</div><div class="at-sub">${escapeHtml(sub)}</div></div>`;
-                // Sprint 81 — fixed launcher order: Create task · <agents> · Store · Upload · Wallet · (Data Analyst SA) · Settings.
+                // Order: Tally shortcuts · Tally Agent · other agents · platform apps · Create task (last).
                 const tiles = [];
-                tiles.push(tile('📝', 'Create task', 'Tell YantrAI what you need', "showView('yantrai-chat')"));
-                // Sprint 85 — agent tiles get data-agent-slug → long-press / right-click to uninstall.
-                (window.__installedAgents || []).forEach(a => tiles.push(
-                    tile(a.icon || '🧩', a.name || a.slug, a.tagline || 'Open app', `enterAgent('${escapeHtml(a.slug)}')`, a.slug)));
+                const _agents = window.__installedAgents || [];
+                const _tally = _agents.find(a => a.slug === 'ai-accountant');
+                const _others = _agents.filter(a => a.slug !== 'ai-accountant');
                 // Quick-access Tally shortcuts (only when the Tally agent is installed).
                 if (window.__agentBySlug && window.__agentBySlug['ai-accountant']) {
-                    tiles.push(tile('🧾', 'Create voucher', 'New entry in Tally', "openVoucherChat()", null, '🧮'));
-                    tiles.push(tile('📷', 'Scan voucher', 'Snap a bill → voucher', "_aiaccScan()", null, '🧮'));
-                    tiles.push(tile('💬', 'Chat', 'Ask your Tally agent', "showView('chat')", null, '🧮'));
+                    tiles.push(tile('🧾', 'Create voucher', 'New entry in Tally', "openVoucherChat()", null, 'Tally Agent shortcut'));
+                    tiles.push(tile('📷', 'Scan voucher', 'Snap a bill → voucher', "_aiaccScan()", null, 'Tally Agent shortcut'));
+                    tiles.push(tile('💬', 'Chat', 'Ask your Tally agent', "showView('chat')", null, 'Tally Agent shortcut'));
                 }
+                // Tally Agent immediately after the Chat shortcut.
+                if (_tally) tiles.push(tile(_tally.icon || '🧮', _tally.name || _tally.slug, _tally.tagline || 'Open app', `enterAgent('${escapeHtml(_tally.slug)}')`, _tally.slug));
+                // Remaining installed agents (right-click / long-press to manage).
+                _others.forEach(a => tiles.push(
+                    tile(a.icon || '🧩', a.name || a.slug, a.tagline || 'Open app', `enterAgent('${escapeHtml(a.slug)}')`, a.slug)));
                 tiles.push(tile('🛍️', 'Store', 'Get more apps', "showView('store')"));
                 tiles.push(tile('📎', 'Files', 'Files for this company', "showView('uploads')"));
                 tiles.push(tile('🔌', 'Connectors', 'Tally, devices & data sources', "showView('training')"));
@@ -3389,6 +3393,8 @@
                 tiles.push(tile('⚡', 'Wallet', 'Tokens & recharge', "if(typeof openWalletModal==='function') openWalletModal()"));
                 if (window.__isSuperAdmin) tiles.push(tile('📊', 'Data Analyst', 'Platform usage & tokens', "showView('analytics')"));
                 tiles.push(tile('⚙️', 'Settings', 'Account & admin', "showView('settings')"));
+                // Create task — moved to the end.
+                tiles.push(tile('📝', 'Create task', 'Tell YantrAI what you need', "showView('yantrai-chat')"));
                 window.__homeTiles = tiles;
                 _renderHomeGrid();
             }
@@ -9013,7 +9019,7 @@
                             </select>
                         </div>
                     </div>
-                    ${_fld('Scope (optional)', 'scope', '', 'What\\'s in / out of scope?')}
+                    ${_fld('Scope (optional)', 'scope', '', "What's in / out of scope?")}
                     ${_fld('Deliverables (optional)', 'deliverables', '', 'What should be delivered?')}
                     <div style="display: flex; gap: 10px; margin-top:14px;" id="${srId}-actions">
                         <button onclick="submitChatTaskPD('${srId}')" style="background: #10b981; color: white; border: none; padding: 10px 20px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 0.85rem; display:flex; align-items:center; gap:6px;">
