@@ -1261,6 +1261,20 @@ def get_user_by_auth_uid(auth_uid):
         cursor.close(); conn.close()
 
 
+def set_email_verified(username, verified=True):
+    """Mark a user's email as verified (self-service, from Settings)."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("ALTER TABLE accounting_users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT FALSE")
+        cur.execute("UPDATE accounting_users SET email_verified=%s WHERE username=%s", (bool(verified), username))
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback(); print(f"[set_email_verified] {e}"); return False
+    finally:
+        cur.close(); conn.close()
+
+
 def link_auth_uid(username, auth_uid):
     """Store the Supabase auth user id on both identity tables for `username`."""
     _ensure_billing_schema()
@@ -1621,6 +1635,9 @@ def _ensure_billing_schema():
         cur.execute("ALTER TABLE accounting_users ADD COLUMN IF NOT EXISTS auth_uid UUID")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_users_auth_uid      ON users(auth_uid)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_acct_users_auth_uid ON accounting_users(auth_uid)")
+        # Sprint — self-service email verification (from Settings). FALSE until the
+        # user clicks the magic-link we email them.
+        cur.execute("ALTER TABLE accounting_users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT FALSE")
         # Sprint 53 — Razorpay: store the gateway order id to match verify/webhook.
         cur.execute("ALTER TABLE token_purchases ADD COLUMN IF NOT EXISTS provider_order_id TEXT")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_token_purch_order ON token_purchases(provider_order_id)")

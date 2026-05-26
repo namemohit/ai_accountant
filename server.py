@@ -811,6 +811,20 @@ def _supabase_recover(email, redirect_to=None):
                  json={"email": email}, timeout=15)
     return r.status_code in (200, 204)
 
+def _supabase_send_otp(email, redirect_to=None):
+    """Send a Supabase magic-link / OTP email to `email` (does NOT create a user).
+    Clicking it proves the user controls the inbox. Returns True on accept.
+    Delivery depends on SMTP being configured in the Supabase project."""
+    import requests as _rq, urllib.parse as _up
+    url = f"{SUPABASE_URL}/auth/v1/otp"
+    if redirect_to:
+        url += "?redirect_to=" + _up.quote(redirect_to, safe="")
+    r = _rq.post(url, headers={"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"},
+                 json={"email": email, "create_user": False}, timeout=15)
+    if r.status_code not in (200, 204):
+        print(f"[supabase_send_otp] {r.status_code}: {r.text[:200]}", flush=True)
+    return r.status_code in (200, 204)
+
 def _supabase_admin_create_user(email, password):
     """Create a Supabase auth user (service role). Returns the auth user id, or None."""
     import requests as _rq
@@ -6023,6 +6037,7 @@ def _user_payload(user, extra=None):
         "company_name": user.get("company_name", "Acme Corp"),
         "companies": companies,
         "user_type": user.get("user_type"),
+        "email_verified": bool(user.get("email_verified")),
     }
     if extra:
         out.update(extra)
@@ -6163,6 +6178,54 @@ async def api_forgot_password(payload: dict):
             print(f"[forgot-password] {e}", flush=True)
     return {"status": "success",
             "message": "If an account exists for that email, a password-reset link has been sent."}
+
+
+@app.post("/api/auth/send-verification")
+async def api_send_verification(request: Request):
+    """Authenticated: email the logged-in user a magic link to verify their email.
+    Clicking it lands on login.html?emailverify=1 and confirms ownership."""
+    user = getattr(request.state, "user_row", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Please sign in again to verify your email.")
+    email = (user.get("email") or "").strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="No email on file. Add one in Settings first.")
+    if user.get("email_verified"):
+        return {"status": "success", "already_verified": True,
+                "message": "Your email is already verified."}
+    if not SUPABASE_AUTH_ENABLED:
+        raise HTTPException(status_code=503, detail="Email verification is not available right now.")
+    site = os.getenv("PUBLIC_SITE_URL", "https://workspace.yantrailabs.com").rstrip("/")
+    try:
+        _supabase_send_otp(email, redirect_to=f"{site}/login.html?emailverify=1")
+    except Exception as e:
+        print(f"[send-verification] {e}", flush=True)
+    return {"status": "success",
+            "message": f"Verification link sent to {email}. Click it to verify your email."}
+
+
+@app.post("/api/auth/confirm-email")
+async def api_confirm_email(payload: dict):
+    """Called by login.html after the user clicks the magic link. The Supabase
+    session token proves they control the inbox → mark their email verified."""
+    token = ((payload or {}).get("access_token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Missing verification token.")
+    claims = _verify_token("Bearer " + token)
+    if not claims:
+        raise HTTPException(status_code=401, detail="Verification link is invalid or expired.")
+    try:
+        row = db.get_user_by_auth_uid(claims.get("sub"))
+    except Exception:
+        row = None
+    if not row:
+        # Fall back to matching on the verified email in the token claims.
+        email = (claims.get("email") or "").strip()
+        row = db.get_user_by_email(email) if email else None
+    if not row:
+        raise HTTPException(status_code=404, detail="No matching account for this link.")
+    db.set_email_verified(row["username"], True)
+    return {"status": "success", "message": "Email verified.", "email": row.get("email")}
 
 
 @app.get("/api/auth/config")

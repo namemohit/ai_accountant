@@ -14,7 +14,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-    <link rel="stylesheet" href="/static/style.css?v=112">
+    <link rel="stylesheet" href="/static/style.css?v=113">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script>
@@ -317,10 +317,12 @@
                 if (!c.enabled || !c.anon_key) { document.getElementById('google-btn').style.display = 'none'; return; }
                 _sb = supabase.createClient(c.supabase_url, c.anon_key,
                     { auth: { persistSession: false, detectSessionInUrl: true, autoRefreshToken: false } });
-                const { data } = await _sb.auth.getSession();   // populated from Google OR a recovery link
+                const { data } = await _sb.auth.getSession();   // populated from Google OR a recovery/verify link
                 // Password-reset link lands here with ?recovery=1 (and a recovery token in the hash).
                 const isRecovery = location.search.includes('recovery=1') || (location.hash || '').includes('type=recovery');
                 if (isRecovery) { _showRecovery(); return; }
+                // Email-verification magic link lands here with ?emailverify=1.
+                if (location.search.includes('emailverify=1')) { await _confirmEmail(data && data.session); return; }
                 if (data && data.session) { await _completeGoogle(data.session); }
             } catch (e) { console.log('supabase init', e); document.getElementById('google-btn').style.display = 'none'; }
         }
@@ -339,6 +341,23 @@
             const s = document.getElementById('success-msg');
             s.innerText = 'If an account exists for that email, a reset link has been sent. Check your inbox.';
             s.style.display = 'block';
+        }
+        // ── Email verification (magic link → confirm ownership) ─────────
+        async function _confirmEmail(session) {
+            const s = document.getElementById('success-msg');
+            const tok = session && session.access_token;
+            if (!tok) { _err('Verification link is invalid or expired — resend it from Settings.'); return; }
+            try {
+                const res = await fetch('/api/auth/confirm-email', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ access_token: tok })
+                });
+                if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Could not verify email.');
+                history.replaceState(null, '', location.pathname);   // strip token + query
+                s.innerText = '✅ Email verified! You can return to the app and sign in.';
+                s.style.display = 'block';
+                setTimeout(() => { location.href = '/'; }, 1800);
+            } catch (e) { _err(e.message); }
         }
         function _showRecovery() {
             ['form-login', 'form-register'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });

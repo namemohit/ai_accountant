@@ -14,7 +14,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
-    <link rel="stylesheet" href="/static/style.css?v=112">
+    <link rel="stylesheet" href="/static/style.css?v=113">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;800&display=swap" rel="stylesheet">
     <!-- Sprint 72 — load FontAwesome non-render-blocking (swap media to 'all' onload). -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" media="print" onload="this.media='all'">
@@ -288,6 +288,42 @@
             window.location.href = '/login';
         }
 
+        // ── Email verification (self-service, from Settings) ──────────────
+        function _renderEmailVerifyState(user) {
+            const badge = document.getElementById('settings-email-badge');
+            const btn = document.getElementById('settings-verify-btn');
+            if (!badge || !btn) return;
+            const hasEmail = !!(user && user.email);
+            if (!hasEmail) { badge.textContent = ''; btn.style.display = 'none'; return; }
+            if (user.email_verified) {
+                badge.innerHTML = '<span style="color:#4ade80;">✓ Email verified</span>';
+                btn.style.display = 'none';
+            } else {
+                badge.innerHTML = '<span style="color:#fbbf24;">⚠ Email not verified</span>';
+                btn.style.display = '';
+            }
+        }
+        async function sendEmailVerification() {
+            const btn = document.getElementById('settings-verify-btn');
+            const badge = document.getElementById('settings-email-badge');
+            if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+            try {
+                const res = await fetch('/api/auth/send-verification', { method: 'POST' });
+                const d = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(d.detail || 'Could not send verification email.');
+                if (d.already_verified) {
+                    const u = JSON.parse(localStorage.getItem('currentUser') || '{}');
+                    u.email_verified = true; localStorage.setItem('currentUser', JSON.stringify(u));
+                    _renderEmailVerifyState(u);
+                    return;
+                }
+                if (badge) badge.innerHTML = '<span style="color:#38bdf8;">✉ Verification link sent — check your inbox.</span>';
+                if (btn) { btn.textContent = 'Resend link'; btn.disabled = false; }
+            } catch (e) {
+                if (badge) badge.innerHTML = '<span style="color:#f87171;">' + (e.message || 'Failed') + '</span>';
+                if (btn) { btn.textContent = 'Verify email'; btn.disabled = false; }
+            }
+        }
         async function populateSettings() {
             try {
                 const user = JSON.parse(localStorage.getItem('currentUser') || '{}');
@@ -304,6 +340,7 @@
                 if (phoneEl) phoneEl.value = user.phone || '';
                 if (companyEl) companyEl.value = user.company_name || 'Acme Corp';
                 if (panEl) panEl.value = user.pan || '-';
+                _renderEmailVerifyState(user);
 
                 // Check bridge status
                 const bridgeEl = document.getElementById('settings-bridge-status');
@@ -2236,6 +2273,13 @@
                     <div class="form-group">
                         <label>Email</label>
                         <input type="email" id="settings-email" placeholder="your@email.com">
+                        <div id="settings-email-verify" style="margin-top:8px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                            <span id="settings-email-badge" style="font-size:0.8rem;"></span>
+                            <button id="settings-verify-btn" type="button" onclick="sendEmailVerification()"
+                                style="display:none; padding:6px 12px; font-size:0.8rem; border-radius:8px; border:1px solid var(--border); background:var(--bg-light); color:var(--text); cursor:pointer;">
+                                Verify email
+                            </button>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label>Phone</label>
