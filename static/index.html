@@ -3396,7 +3396,7 @@
             if (!grid) return;
             const tiles = window.__homeTiles || [];
             const isMobile = window.matchMedia('(max-width:768px)').matches;
-            if (!isMobile) { grid.className = 'app-grid'; grid.innerHTML = tiles.join(''); return; }
+            if (!isMobile) { grid.className = 'app-grid'; grid.innerHTML = tiles.join(''); _wireHomeTileUninstall(); return; }
             const perPage = 6;   // 3×2 per page → spans multiple swipeable pages on a phone
             const pages = [];
             for (let i = 0; i < tiles.length; i += perPage) pages.push(tiles.slice(i, i + perPage));
