@@ -1739,6 +1739,21 @@ AGENT_SEED = [
                       {"view": "dev-portal", "label": "My Apps", "icon": "🛠️"}]}]},
      "sort_order": 40},
     # Sprint 78 — Demo Alpha / Demo Beta (Sprint-65 dummy pager apps) removed.
+    # Network — AnyDesk-style workspace relationships (CA ↔ owner, owner ↔ accountant, etc.)
+    {"slug": "network", "name": "Network",
+     "tagline": "Connect with your CA, clients & team — grow your network.",
+     "description": "Link your workspace with your CA, accountant, auditor, staff or clients "
+                    "using a persistent Workspace ID and a simple request → approve handshake. "
+                    "The relationship type sets the access level automatically.",
+     "icon": "🔗", "category": "admin", "status": "published", "publisher": "first-party",
+     "token_policy": {"chargeable": False},
+     "manifest": {"version": 1, "agent_kind": "inapp",
+                  "api_prefixes": ["/api/network"],
+                  "nav_groups": [{"label": "Network", "items": [
+                      {"view": "network-home", "label": "Connect", "icon": "🔗"},
+                      {"view": "network-list", "label": "My Network", "icon": "👥"},
+                      {"view": "network-requests", "label": "Requests", "icon": "📨"}]}]},
+     "sort_order": 20},
 ]
 
 
@@ -1763,6 +1778,21 @@ def _seed_agents():
         conn.commit(); cur.close(); conn.close()
     except Exception as e:
         print(f"[_seed_agents] {e}")
+    _ensure_core_installs()
+
+
+def _ensure_core_installs():
+    """Network is core to the platform — make sure every existing org has it installed."""
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO org_agent_installs (org_id, agent_slug, enabled)
+            SELECT o.id, 'network', TRUE FROM organizations o
+            ON CONFLICT (org_id, agent_slug) DO NOTHING
+        """)
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f"[_ensure_core_installs] {e}")
 
 
 def list_catalog(org_id=None, include_all=False):
@@ -2638,6 +2668,11 @@ def onboard_user(username, password, name=None, email=None, phone=None,
             install_agent(org_id, "ai-accountant", users_id)
         except Exception as _e:
             print(f"[onboard_user] install Agent#1: {_e}")
+        # Network is core to the platform — auto-install for every new workspace.
+        try:
+            install_agent(org_id, "network", users_id)
+        except Exception as _e:
+            print(f"[onboard_user] install Network: {_e}")
         return {"ok": True, "user_type": user_type, "org_id": str(org_id),
                 "org_type": org_type, "company_name": legacy_company,
                 "companies": companies_list or [legacy_company], "role": role,
@@ -8364,6 +8399,264 @@ def accept_connection_code(code, accepter_users_id, accepter_username):
         return {"ok": False, "error": str(e)}
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Network — AnyDesk-style workspace relationships (persistent ID + approve).
+# Reuses memberships for the actual access grant; org_relationships tracks the
+# typed relationship + request/approve lifecycle.
+# ─────────────────────────────────────────────────────────────────────────
+import random as _rnd
+
+# Relationship type → access role the requester gets in the TARGET workspace.
+NETWORK_REL_ROLES = {
+    "ca":         "manager",      # I'm their CA / accounting firm
+    "accountant": "accountant",
+    "auditor":    "viewer",
+    "staff":      "junior",
+    "manager":    "manager",
+    "other":      "viewer",       # custom — approver can override the role
+}
+
+def _ensure_network_schema():
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS connect_id TEXT UNIQUE")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS org_relationships (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                requester_org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                target_org_id    UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                relationship_type TEXT NOT NULL,
+                granted_role     TEXT NOT NULL,
+                grantee_user_id  UUID,                 -- requester's user who gains access
+                scope_company_ids JSONB,               -- null = all target companies
+                status TEXT NOT NULL DEFAULT 'pending', -- pending|active|declined|revoked
+                requested_by UUID,
+                approved_by  UUID,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_orgrel_target ON org_relationships(target_org_id, status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_orgrel_req ON org_relationships(requester_org_id, status)")
+        conn.commit()
+    except Exception as e:
+        conn.rollback(); print(f"[_ensure_network_schema] {e}")
+    finally:
+        cur.close(); conn.close()
+
+def _gen_connect_id():
+    return f"YTR-{_rnd.randint(100,999)}-{_rnd.randint(100,999)}"
+
+def get_or_create_connect_id(org_id):
+    """Stable AnyDesk-style Workspace ID for an org (generated once)."""
+    _ensure_network_schema()
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT connect_id FROM organizations WHERE id=%s", (org_id,))
+        row = cur.fetchone()
+        if row and row[0]:
+            return row[0]
+        for _ in range(12):
+            cid = _gen_connect_id()
+            try:
+                cur.execute("UPDATE organizations SET connect_id=%s WHERE id=%s AND connect_id IS NULL", (cid, org_id))
+                if cur.rowcount:
+                    conn.commit(); return cid
+            except Exception:
+                conn.rollback()
+        cur.execute("SELECT connect_id FROM organizations WHERE id=%s", (org_id,))
+        r2 = cur.fetchone(); return r2[0] if r2 else None
+    finally:
+        cur.close(); conn.close()
+
+def org_by_connect_id(code):
+    _ensure_network_schema()
+    code = (code or "").strip().upper()
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT id, name FROM organizations WHERE UPPER(connect_id)=%s AND archived_at IS NULL", (code,))
+        return cur.fetchone()
+    finally:
+        cur.close(); conn.close()
+
+def get_org_name(org_id):
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT name FROM organizations WHERE id=%s", (str(org_id),))
+        r = cur.fetchone(); return r[0] if r else None
+    finally:
+        cur.close(); conn.close()
+
+def grant_membership(user_id, org_id, role, scope_company_ids=None, invited_by=None):
+    """Create/update a membership (user → org, role + company scope) and project the
+    granted companies' names into legacy accounting_users.companies. Reused by the
+    connect-code accept flow and the Network approve flow."""
+    import json as _json
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        scope = scope_company_ids
+        if isinstance(scope, str):
+            try: scope = _json.loads(scope)
+            except Exception: scope = None
+        if scope:
+            cur.execute("SELECT name FROM companies WHERE org_id=%s AND id::text = ANY(%s)",
+                        (org_id, [str(s) for s in scope]))
+        else:
+            cur.execute("SELECT name FROM companies WHERE org_id=%s AND archived_at IS NULL", (org_id,))
+        company_names = [r["name"] for r in cur.fetchall()]
+        scope_json = _json.dumps([str(s) for s in scope]) if scope else None
+        cur.execute("""
+            INSERT INTO memberships (user_id, org_id, role, scope_company_ids, invited_by)
+            VALUES (%s,%s,%s,%s::jsonb,%s)
+            ON CONFLICT (user_id, org_id) DO UPDATE SET role=EXCLUDED.role,
+                                                        scope_company_ids=EXCLUDED.scope_company_ids
+        """, (str(user_id), str(org_id), role, scope_json, str(invited_by) if invited_by else None))
+        cur.execute("SELECT username FROM users WHERE id=%s", (str(user_id),))
+        urow = cur.fetchone(); uname = urow["username"] if urow else None
+        conn.commit(); cur.close(); conn.close()
+        if uname:
+            for cname in company_names:
+                try: add_company_to_user(uname, cname)
+                except Exception as pe: print(f"[grant_membership project] {pe}")
+        return {"ok": True, "companies": company_names}
+    except Exception as e:
+        conn.rollback();
+        try: cur.close(); conn.close()
+        except Exception: pass
+        print(f"[grant_membership] {e}"); return {"ok": False, "error": str(e)}
+
+def create_relationship_request(requester_org_id, target_org_id, relationship_type, requested_by):
+    """Requester asks for <relationship_type> access to the target's workspace."""
+    _ensure_network_schema()
+    if str(requester_org_id) == str(target_org_id):
+        return {"ok": False, "error": "You can't connect a workspace to itself."}
+    role = NETWORK_REL_ROLES.get(relationship_type, "viewer")
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""SELECT id, status FROM org_relationships
+                       WHERE requester_org_id=%s AND target_org_id=%s AND status IN ('pending','active')
+                       LIMIT 1""", (str(requester_org_id), str(target_org_id)))
+        ex = cur.fetchone()
+        if ex:
+            return {"ok": False, "error": f"A {ex['status']} connection already exists with that workspace."}
+        cur.execute("""INSERT INTO org_relationships
+            (requester_org_id, target_org_id, relationship_type, granted_role, grantee_user_id, requested_by)
+            VALUES (%s,%s,%s,%s,%s,%s) RETURNING id""",
+            (str(requester_org_id), str(target_org_id), relationship_type, role,
+             str(requested_by) if requested_by else None, str(requested_by) if requested_by else None))
+        rid = cur.fetchone()["id"]; conn.commit()
+        return {"ok": True, "id": str(rid)}
+    except Exception as e:
+        conn.rollback(); print(f"[create_relationship_request] {e}"); return {"ok": False, "error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+def list_relationship_requests(org_id):
+    """Pending requests where this org is the TARGET (incoming, to approve) or the
+    REQUESTER (outgoing, awaiting their approval)."""
+    _ensure_network_schema()
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT r.*, ro.name AS requester_name, ro.connect_id AS requester_connect_id,
+                         to2.name AS target_name, to2.connect_id AS target_connect_id
+            FROM org_relationships r
+            JOIN organizations ro ON ro.id = r.requester_org_id
+            JOIN organizations to2 ON to2.id = r.target_org_id
+            WHERE r.status='pending' AND (r.target_org_id=%s OR r.requester_org_id=%s)
+            ORDER BY r.created_at DESC""", (str(org_id), str(org_id)))
+        rows = cur.fetchall()
+        inc = [_relrow(x) for x in rows if str(x["target_org_id"]) == str(org_id)]
+        out = [_relrow(x) for x in rows if str(x["requester_org_id"]) == str(org_id)]
+        return {"incoming": inc, "outgoing": out}
+    finally:
+        cur.close(); conn.close()
+
+def _relrow(x):
+    return {"id": str(x["id"]), "relationship_type": x["relationship_type"],
+            "granted_role": x["granted_role"], "status": x["status"],
+            "requester_name": x.get("requester_name"), "requester_connect_id": x.get("requester_connect_id"),
+            "target_name": x.get("target_name"), "target_connect_id": x.get("target_connect_id"),
+            "created_at": x["created_at"].isoformat() if x.get("created_at") else None}
+
+def approve_relationship(rel_id, role=None, scope_company_ids=None):
+    """Target approves → grant the requester's user access to the target workspace."""
+    _ensure_network_schema()
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT * FROM org_relationships WHERE id=%s", (str(rel_id),))
+        r = cur.fetchone()
+        if not r: return {"ok": False, "error": "Request not found."}
+        if r["status"] != "pending": return {"ok": False, "error": f"Already {r['status']}."}
+        grant_role = role or r["granted_role"]
+        cur.close(); conn.close()
+        g = grant_membership(r["grantee_user_id"], r["target_org_id"], grant_role,
+                             scope_company_ids, invited_by=None)
+        if not g.get("ok"): return {"ok": False, "error": g.get("error", "grant failed")}
+        conn2 = get_conn(); cur2 = conn2.cursor()
+        try:
+            import json as _json
+            sj = _json.dumps([str(s) for s in scope_company_ids]) if scope_company_ids else None
+            cur2.execute("""UPDATE org_relationships SET status='active', granted_role=%s,
+                            scope_company_ids=%s::jsonb, updated_at=CURRENT_TIMESTAMP WHERE id=%s""",
+                         (grant_role, sj, str(rel_id)))
+            conn2.commit()
+        finally:
+            cur2.close(); conn2.close()
+        return {"ok": True, "companies": g.get("companies", [])}
+    except Exception as e:
+        print(f"[approve_relationship] {e}"); return {"ok": False, "error": str(e)}
+
+def decline_relationship(rel_id):
+    _ensure_network_schema()
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("UPDATE org_relationships SET status='declined', updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status='pending'", (str(rel_id),))
+        conn.commit(); return {"ok": True}
+    except Exception as e:
+        conn.rollback(); print(f"[decline_relationship] {e}"); return {"ok": False, "error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+def list_connections(org_id):
+    """Active relationships where this org is on either side."""
+    _ensure_network_schema()
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT r.*, ro.name AS requester_name, to2.name AS target_name
+            FROM org_relationships r
+            JOIN organizations ro ON ro.id=r.requester_org_id
+            JOIN organizations to2 ON to2.id=r.target_org_id
+            WHERE r.status='active' AND (r.requester_org_id=%s OR r.target_org_id=%s)
+            ORDER BY r.updated_at DESC""", (str(org_id), str(org_id)))
+        out = []
+        for x in cur.fetchall():
+            mine_is_target = str(x["target_org_id"]) == str(org_id)
+            out.append({"id": str(x["id"]), "relationship_type": x["relationship_type"],
+                        "granted_role": x["granted_role"],
+                        "other_name": x["requester_name"] if mine_is_target else x["target_name"],
+                        "direction": "they access mine" if mine_is_target else "I access theirs"})
+        return out
+    finally:
+        cur.close(); conn.close()
+
+def revoke_relationship(rel_id):
+    _ensure_network_schema()
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT grantee_user_id, target_org_id FROM org_relationships WHERE id=%s", (str(rel_id),))
+        r = cur.fetchone()
+        if r and r["grantee_user_id"]:
+            cur.execute("DELETE FROM memberships WHERE user_id=%s AND org_id=%s",
+                        (str(r["grantee_user_id"]), str(r["target_org_id"])))
+        cur.execute("UPDATE org_relationships SET status='revoked', updated_at=CURRENT_TIMESTAMP WHERE id=%s", (str(rel_id),))
+        conn.commit(); return {"ok": True}
+    except Exception as e:
+        conn.rollback(); print(f"[revoke_relationship] {e}"); return {"ok": False, "error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+
 def list_connection_codes(org_id):
     """All codes issued for an org (active first)."""
     _ensure_connection_codes_table()
@@ -8659,6 +8952,10 @@ def mark_sensitive_ledgers(company_id=None):
 try:
     init_db()
     seeded = seed_builtin_recon_templates()
+    try:
+        _seed_agents()  # ensure first-party catalog + core auto-installs (incl. Network)
+    except Exception as _se:
+        print(f"[startup _seed_agents] {_se}")
     print(f"Cloud Database Initialized Successfully. ({seeded} recon templates loaded)")
 except Exception as e:
     print(f"Cloud DB Error: {e}")

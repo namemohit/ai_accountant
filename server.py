@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "145"
+APP_VERSION = "146"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -6455,6 +6455,104 @@ async def api_org_members(username: str, org_id: str = None):
     users_id, _ = _resolve_caller(username)
     org_id = _owner_org(users_id, org_id, allow=("owner", "manager", "accountant", "junior", "viewer"))
     return {"status": "success", "members": db.list_org_members(org_id)}
+
+
+# =============================================================================
+# Network — AnyDesk-style workspace relationships (persistent ID + approve).
+# Requester asks for typed access to a target workspace; the target approves and
+# the relationship type maps to the access role granted.
+# =============================================================================
+def _network_org(users_id, org_id=None):
+    """The caller's workspace for Network actions (owner/manager can request &
+    approve on behalf of the org)."""
+    return _owner_org(users_id, org_id, allow=("owner", "manager"))
+
+
+@app.get("/api/network/me")
+async def api_network_me(username: str, org_id: str = None):
+    users_id, _ = _resolve_caller(username)
+    org_id = _owner_org(users_id, org_id, allow=("owner", "manager", "accountant", "junior", "viewer"))
+    cid = db.get_or_create_connect_id(org_id)
+    return {"status": "success", "connect_id": cid, "org_id": str(org_id),
+            "org_name": db.get_org_name(org_id)}
+
+
+@app.post("/api/network/request")
+async def api_network_request(payload: dict):
+    users_id, _ = _resolve_caller(payload.get("username"))
+    org_id = _network_org(users_id, payload.get("org_id"))
+    target_code = (payload.get("target_connect_id") or "").strip()
+    rel_type = (payload.get("relationship_type") or "other").strip().lower()
+    if not target_code:
+        raise HTTPException(status_code=400, detail="Enter the workspace ID you want to connect to.")
+    target = db.org_by_connect_id(target_code)
+    if not target:
+        raise HTTPException(status_code=404, detail="No workspace found with that ID.")
+    res = db.create_relationship_request(
+        requester_org_id=org_id, target_org_id=target["id"],
+        relationship_type=rel_type, requested_by=users_id)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Could not send request."))
+    return {"status": "success", "id": res["id"], "target_name": target.get("name")}
+
+
+@app.get("/api/network/requests")
+async def api_network_requests(username: str, org_id: str = None):
+    users_id, _ = _resolve_caller(username)
+    org_id = _network_org(users_id, org_id)
+    return {"status": "success", **db.list_relationship_requests(org_id)}
+
+
+@app.post("/api/network/approve")
+async def api_network_approve(payload: dict):
+    users_id, _ = _resolve_caller(payload.get("username"))
+    org_id = _network_org(users_id, payload.get("org_id"))
+    rel_id = payload.get("request_id") or payload.get("rel_id")
+    if not rel_id:
+        raise HTTPException(status_code=400, detail="Missing request id.")
+    # Only the TARGET workspace may approve.
+    reqs = db.list_relationship_requests(org_id)
+    if not any(r["id"] == str(rel_id) for r in reqs.get("incoming", [])):
+        raise HTTPException(status_code=403, detail="That request isn't yours to approve.")
+    res = db.approve_relationship(rel_id, role=payload.get("role"),
+                                  scope_company_ids=payload.get("scope_company_ids"))
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Could not approve."))
+    return {"status": "success", **res}
+
+
+@app.post("/api/network/decline")
+async def api_network_decline(payload: dict):
+    users_id, _ = _resolve_caller(payload.get("username"))
+    org_id = _network_org(users_id, payload.get("org_id"))
+    rel_id = payload.get("request_id") or payload.get("rel_id")
+    reqs = db.list_relationship_requests(org_id)
+    if not any(r["id"] == str(rel_id) for r in reqs.get("incoming", [])):
+        raise HTTPException(status_code=403, detail="That request isn't yours to decline.")
+    res = db.decline_relationship(rel_id)
+    return {"status": "success" if res.get("ok") else "error", **res}
+
+
+@app.get("/api/network/connections")
+async def api_network_connections(username: str, org_id: str = None):
+    users_id, _ = _resolve_caller(username)
+    org_id = _network_org(users_id, org_id)
+    return {"status": "success", "connections": db.list_connections(org_id)}
+
+
+@app.post("/api/network/revoke")
+async def api_network_revoke(payload: dict):
+    users_id, _ = _resolve_caller(payload.get("username"))
+    org_id = _network_org(users_id, payload.get("org_id"))
+    rel_id = payload.get("relationship_id") or payload.get("rel_id")
+    if not rel_id:
+        raise HTTPException(status_code=400, detail="Missing relationship id.")
+    # Caller must be on either side of the relationship.
+    conns = db.list_connections(org_id)
+    if not any(c["id"] == str(rel_id) for c in conns):
+        raise HTTPException(status_code=403, detail="That connection isn't yours to revoke.")
+    res = db.revoke_relationship(rel_id)
+    return {"status": "success" if res.get("ok") else "error", **res}
 
 
 # =============================================================================
