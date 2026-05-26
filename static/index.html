@@ -1463,8 +1463,6 @@
                 <button class="voucher-type-btn" onclick="filterConnectors('accounting', this)">Accounting</button>
                 <button class="voucher-type-btn" onclick="filterConnectors('tax', this)">Tax & Compliance</button>
                 <button class="voucher-type-btn" onclick="filterConnectors('banking', this)">Banking</button>
-                <button class="voucher-type-btn" onclick="filterConnectors('payments', this)">Payments</button>
-                <button class="voucher-type-btn" onclick="filterConnectors('ecommerce', this)">E-commerce</button>
                 <button class="voucher-type-btn" onclick="filterConnectors('messaging', this)">Messaging</button>
             </div>
 
@@ -1527,49 +1525,6 @@
                 </div>
 
                 <!-- Razorpay -->
-                <div class="connector-card" data-category="payments" onclick="openConnectorModal('razorpay')">
-                    <div class="connector-card-header">
-                        <div class="connector-icon" style="background: rgba(59, 130, 246, 0.1); color: #3b82f6;">💳</div>
-                        <div class="connector-status available">Available</div>
-                    </div>
-                    <h4 class="connector-name">Razorpay</h4>
-                    <p class="connector-desc">Upload settlement reports to reconcile payment collections against Tally sales vouchers.</p>
-                    <div class="connector-meta"><span>Payment Gateway</span><span>CSV Upload</span></div>
-                </div>
-
-                <!-- Stripe -->
-                <div class="connector-card" data-category="payments" onclick="openConnectorModal('stripe')">
-                    <div class="connector-card-header">
-                        <div class="connector-icon" style="background: rgba(218, 119, 86, 0.10); color: var(--primary);">💰</div>
-                        <div class="connector-status available">Available</div>
-                    </div>
-                    <h4 class="connector-name">Stripe</h4>
-                    <p class="connector-desc">Import Stripe payout reports for revenue reconciliation with fee breakdowns.</p>
-                    <div class="connector-meta"><span>Payment Gateway</span><span>CSV Upload</span></div>
-                </div>
-
-                <!-- UPI / NPCI -->
-                <div class="connector-card" data-category="payments" onclick="openConnectorModal('upi')">
-                    <div class="connector-card-header">
-                        <div class="connector-icon" style="background: rgba(16, 185, 129, 0.1); color: #10b981;">📱</div>
-                        <div class="connector-status available">Available</div>
-                    </div>
-                    <h4 class="connector-name">UPI / NPCI</h4>
-                    <p class="connector-desc">Reconcile UPI collections and bank receipts against Tally sales records.</p>
-                    <div class="connector-meta"><span>Payment Gateway</span><span>CSV Upload</span></div>
-                </div>
-
-                <!-- POS Terminal -->
-                <div class="connector-card" data-category="payments" onclick="openConnectorModal('pos')">
-                    <div class="connector-card-header">
-                        <div class="connector-icon" style="background: rgba(245, 158, 11, 0.1); color: #f59e0b;">🖥️</div>
-                        <div class="connector-status available">Available</div>
-                    </div>
-                    <h4 class="connector-name">POS Terminal</h4>
-                    <p class="connector-desc">Upload POS sales reports to match retail transactions with Tally entries.</p>
-                    <div class="connector-meta"><span>Retail</span><span>CSV Upload</span></div>
-                </div>
-
                 <!-- WhatsApp Business -->
                 <div class="connector-card" data-category="messaging" onclick="openConnectorModal('whatsapp-connector')">
                     <div class="connector-card-header">
@@ -1581,49 +1536,6 @@
                     <div class="connector-meta"><span>Messaging</span><span>Webhook</span></div>
                 </div>
 
-                <!-- Email / Gmail -->
-                <div class="connector-card" data-category="messaging" onclick="openConnectorModal('email')">
-                    <div class="connector-card-header">
-                        <div class="connector-icon" style="background: rgba(239, 68, 68, 0.1); color: #ef4444;">📧</div>
-                        <div class="connector-status coming-soon">Coming Soon</div>
-                    </div>
-                    <h4 class="connector-name">Email (Gmail / Outlook)</h4>
-                    <p class="connector-desc">Auto-scan inbox for invoices, receipts and purchase orders. Extract and book automatically.</p>
-                    <div class="connector-meta"><span>Messaging</span><span>OAuth</span></div>
-                </div>
-
-                <!-- Amazon Seller -->
-                <div class="connector-card" data-category="ecommerce" onclick="openConnectorModal('amazon')">
-                    <div class="connector-card-header">
-                        <div class="connector-icon" style="background: rgba(255, 153, 0, 0.1); color: #ff9900;">📦</div>
-                        <div class="connector-status coming-soon">Coming Soon</div>
-                    </div>
-                    <h4 class="connector-name">Amazon Seller Central</h4>
-                    <p class="connector-desc">Import settlement reports, returns, and fee breakdowns from Amazon seller account.</p>
-                    <div class="connector-meta"><span>E-commerce</span><span>API / CSV</span></div>
-                </div>
-
-                <!-- Flipkart -->
-                <div class="connector-card" data-category="ecommerce" onclick="openConnectorModal('flipkart')">
-                    <div class="connector-card-header">
-                        <div class="connector-icon" style="background: rgba(59, 130, 246, 0.1); color: #2874f0;">🛒</div>
-                        <div class="connector-status coming-soon">Coming Soon</div>
-                    </div>
-                    <h4 class="connector-name">Flipkart Seller</h4>
-                    <p class="connector-desc">Reconcile Flipkart seller payouts, commissions, and returns with Tally.</p>
-                    <div class="connector-meta"><span>E-commerce</span><span>CSV Upload</span></div>
-                </div>
-
-                <!-- Swiggy / Zomato -->
-                <div class="connector-card" data-category="ecommerce" onclick="openConnectorModal('food-agg')">
-                    <div class="connector-card-header">
-                        <div class="connector-icon" style="background: rgba(239, 68, 68, 0.1); color: #fc8019;">🍔</div>
-                        <div class="connector-status coming-soon">Coming Soon</div>
-                    </div>
-                    <h4 class="connector-name">Swiggy / Zomato</h4>
-                    <p class="connector-desc">Import restaurant payout reports and reconcile delivery commissions and GST TCS.</p>
-                    <div class="connector-meta"><span>Food Aggregator</span><span>CSV Upload</span></div>
-                </div>
             </div>
 
             <!-- Hidden file inputs (preserved for JS functions) -->
@@ -12213,47 +12125,11 @@
                         </div>
                     `
                 },
-                'razorpay': {
-                    title: '💳 Razorpay',
-                    html: `<p style="color: #94a3b8; font-size: 0.85rem; margin-bottom: 20px;">Upload Razorpay settlement reports to reconcile payment collections against Tally.</p>
-                        <button class="btn" onclick="showView('recon'); closeConnectorModal();" style="width: 100%; background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%); color: white; border: none; font-weight: bold; border-radius: 8px; padding: 14px; cursor: pointer;"><i class="fas fa-file-upload"></i> Go to Revenue Reconciliation</button>`
-                },
-                'stripe': {
-                    title: '💰 Stripe',
-                    html: `<p style="color: #94a3b8; font-size: 0.85rem; margin-bottom: 20px;">Import Stripe payout reports for revenue reconciliation with fee breakdowns.</p>
-                        <button class="btn" onclick="showView('recon'); closeConnectorModal();" style="width: 100%; background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%); color: white; border: none; font-weight: bold; border-radius: 8px; padding: 14px; cursor: pointer;"><i class="fas fa-file-upload"></i> Go to Revenue Reconciliation</button>`
-                },
-                'upi': {
-                    title: '📱 UPI / NPCI',
-                    html: `<p style="color: #94a3b8; font-size: 0.85rem; margin-bottom: 20px;">Reconcile UPI collections and bank receipts against Tally sales records.</p>
-                        <button class="btn" onclick="showView('recon'); closeConnectorModal();" style="width: 100%; background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%); color: white; border: none; font-weight: bold; border-radius: 8px; padding: 14px; cursor: pointer;"><i class="fas fa-file-upload"></i> Go to Revenue Reconciliation</button>`
-                },
-                'pos': {
-                    title: '🖥️ POS Terminal',
-                    html: `<p style="color: #94a3b8; font-size: 0.85rem; margin-bottom: 20px;">Upload POS sales reports to match retail transactions with Tally entries.</p>
-                        <button class="btn" onclick="showView('recon'); closeConnectorModal();" style="width: 100%; background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%); color: white; border: none; font-weight: bold; border-radius: 8px; padding: 14px; cursor: pointer;"><i class="fas fa-file-upload"></i> Go to Revenue Reconciliation</button>`
-                },
                 'whatsapp-connector': {
                     title: '💬 WhatsApp Business',
                     html: `<p style="color: #94a3b8; font-size: 0.85rem; margin-bottom: 20px;">Configure WhatsApp Business API to receive invoices via messages.</p>
                         <button class="btn" onclick="showView('whatsapp'); closeConnectorModal();" style="width: 100%; background: linear-gradient(135deg, #25d366, #128C7E); color: white; border: none; font-weight: bold; border-radius: 8px; padding: 14px; cursor: pointer;"><i class="fab fa-whatsapp"></i> Go to WhatsApp Setup</button>`
                 },
-                'email': {
-                    title: '📧 Email (Gmail / Outlook)',
-                    html: `<div style="text-align: center; padding: 30px 0;"><div style="font-size: 3rem; margin-bottom: 16px;">📧</div><h4 style="color: white; margin-bottom: 8px;">Coming Soon</h4><p style="color: #94a3b8; font-size: 0.85rem;">Auto-scan your inbox for invoices, receipts and purchase orders. Extract and book entries automatically.</p></div>`
-                },
-                'amazon': {
-                    title: '📦 Amazon Seller Central',
-                    html: `<div style="text-align: center; padding: 30px 0;"><div style="font-size: 3rem; margin-bottom: 16px;">📦</div><h4 style="color: white; margin-bottom: 8px;">Coming Soon</h4><p style="color: #94a3b8; font-size: 0.85rem;">Import settlement reports, returns, and fee breakdowns from your Amazon seller account.</p></div>`
-                },
-                'flipkart': {
-                    title: '🛒 Flipkart Seller',
-                    html: `<div style="text-align: center; padding: 30px 0;"><div style="font-size: 3rem; margin-bottom: 16px;">🛒</div><h4 style="color: white; margin-bottom: 8px;">Coming Soon</h4><p style="color: #94a3b8; font-size: 0.85rem;">Reconcile Flipkart seller payouts, commissions, and returns with Tally.</p></div>`
-                },
-                'food-agg': {
-                    title: '🍔 Swiggy / Zomato',
-                    html: `<div style="text-align: center; padding: 30px 0;"><div style="font-size: 3rem; margin-bottom: 16px;">🍔</div><h4 style="color: white; margin-bottom: 8px;">Coming Soon</h4><p style="color: #94a3b8; font-size: 0.85rem;">Import restaurant payout reports and reconcile delivery commissions and GST TCS.</p></div>`
-                }
             };
 
             const config = configs[connectorId];
