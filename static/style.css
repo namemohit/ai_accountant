@@ -1300,20 +1300,24 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
   /* iPhone-style swipeable app pages (Home, mobile) */
   /* Sprint 66 — Home fills the screen: greeting on top, app pager takes the rest,
      dots pinned at the bottom; page rows stretch so tiles fill (no empty band). */
-  body.home-active #home-view { display: flex; flex-direction: column; overflow: hidden;
+  /* !important beats the inline display:block that showView() sets on the
+     active view (index.html ~4610) — without this the flex-fill chain below
+     never engages and the grid collapses to content height. */
+  body.home-active #home-view { display: flex !important; flex-direction: column; overflow: hidden;
     height: 100%; min-height: 0; padding: 12px 14px 8px !important; }
   body.home-active #home-view > header { margin-top: 0 !important; margin-bottom: 4px; }
   body.home-active #home-app-grid { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .app-pager { display: flex; flex: 1; min-height: 0; width: 100%; overflow-x: auto;
     scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
   .app-pager::-webkit-scrollbar { display: none; }
-  /* Each page = exactly the viewport width (no bleed), 2 columns; tiles are a FIXED
-     size and top-aligned, so a full page (6) and a partial page (3) show identical
-     tiles (no stretching that made the last page look different). */
+  /* Each page = exactly the viewport width (no bleed), 2 columns. Tiles are a
+     FIXED size; rows are spread evenly across the full page height (space-evenly)
+     so the screen fills with balanced gaps — no empty band — on both a full
+     page (6 tiles / 3 rows) and a partial page (fewer rows). */
   .app-page { flex: 0 0 100%; width: 100%; height: 100%; box-sizing: border-box;
     scroll-snap-align: start; display: grid; grid-template-columns: repeat(2, 1fr);
-    grid-auto-rows: minmax(140px, 1fr); align-content: stretch; gap: 14px; padding: 6px 4px; }
-  .app-page .app-tile { height: auto; min-height: 140px; padding: 12px 10px; }
+    grid-auto-rows: 150px; align-content: space-evenly; gap: 14px; padding: 6px 4px; }
+  .app-page .app-tile { height: 150px; padding: 12px 10px; }
   .app-dots { display: flex; flex: 0 0 auto; align-items: center; justify-content: center;
     gap: 7px; margin-top: 10px; }
   .app-dot { flex: 0 0 auto; width: 7px; height: 7px; min-width: 7px; min-height: 7px;
@@ -1324,9 +1328,10 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
 
   .main-content {
     padding: 0;
-    /* No top header anymore; reserve space at the bottom for #bottom-nav (60px)
-       so content + chat composer never sit behind it. */
-    height: calc(var(--app-height, 100dvh) - 60px);
+    /* No top header anymore; reserve space at the bottom for #bottom-nav
+       (60px + the iOS/Android safe-area inset the nav pads by) so content,
+       page dots and the chat composer never sit behind it. */
+    height: calc(var(--app-height, 100dvh) - 60px - env(safe-area-inset-bottom));
   }
 
   .dashboard-view { max-width: 100%; padding: 16px !important; }
