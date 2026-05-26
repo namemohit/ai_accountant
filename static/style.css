@@ -1089,6 +1089,44 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
 }
 .mobile-header-spacer { flex: 1; }
 
+/* --- Mobile bottom nav (thumb-reach launcher): Home · Workspace · Menu --- */
+#bottom-nav { display: none; }
+#bottom-nav .bn-btn { flex: 0 0 60px; background: none; border: none; color: var(--text-secondary);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  cursor: pointer; border-radius: 10px; -webkit-tap-highlight-color: transparent; }
+#bottom-nav .bn-btn .bn-ic { font-size: 1.25rem; line-height: 1; }
+#bottom-nav .bn-btn .bn-lbl { font-size: 0.6rem; }
+#bottom-nav .bn-center { position: relative; flex: 1; min-width: 0; background: rgba(56,189,248,0.08);
+  border: 1px solid rgba(56,189,248,0.25); border-radius: 12px; color: var(--text);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  cursor: pointer; padding: 4px 12px; -webkit-tap-highlight-color: transparent; }
+#bottom-nav .bn-center .bn-co { font-weight: 700; font-size: 0.85rem; max-width: 100%;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#bottom-nav .bn-center .bn-sub { font-size: 0.6rem; color: var(--text-secondary); }
+#bottom-nav .bn-badge { position: absolute; top: 4px; right: 10px; min-width: 16px; height: 16px;
+  padding: 0 4px; background: #ef4444; color: #fff; border-radius: 8px; font-size: 0.6rem;
+  line-height: 16px; text-align: center; }
+
+/* Workspace / Notifications bottom sheet */
+.ws-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 650; }
+.ws-overlay.open { display: block; }
+.ws-sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 660; max-height: 72vh;
+  background: var(--bg-surface, #1e1b18); border-top-left-radius: 18px; border-top-right-radius: 18px;
+  border-top: 1px solid var(--border); transform: translateY(100%); transition: transform 0.25s ease;
+  padding: 6px 14px calc(16px + env(safe-area-inset-bottom)); display: flex; flex-direction: column; }
+.ws-sheet.open { transform: translateY(0); }
+.ws-grip { width: 40px; height: 4px; border-radius: 2px; background: #4a4540; margin: 6px auto 12px; }
+.ws-tabs { display: flex; gap: 8px; margin-bottom: 10px; }
+.ws-tab { flex: 1; padding: 9px; background: var(--bg-light); border: 1px solid var(--border);
+  border-radius: 10px; color: var(--text-secondary); font-weight: 600; cursor: pointer; }
+.ws-tab.active { color: #fff; border-color: var(--primary, #da7756); }
+.ws-badge { background: #ef4444; color: #fff; border-radius: 8px; padding: 0 5px; font-size: 0.66rem; }
+.ws-body { overflow-y: auto; }
+.ws-row { display: flex; align-items: center; gap: 10px; padding: 12px; border: 1px solid var(--border);
+  border-radius: 10px; margin-bottom: 8px; cursor: pointer; color: var(--text); }
+.ws-row.current { border-color: var(--primary, #da7756); background: rgba(218,119,86,0.08); }
+.ws-row .ws-row-sub { font-size: 0.74rem; color: var(--text-secondary); }
+
 /* --- Overlay (dark backdrop when drawer is open) --- */
 .mobile-overlay {
   display: none;
@@ -1219,10 +1257,15 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
   }
   #bank-stats > span, #voucher-stats > span { flex-shrink: 0; }
 
-  .mobile-header { display: flex; }
-  /* Sprint 65 — on the Home launcher, drop the hamburger (its drawer just repeats
-     the app grid). Agent views keep their hamburger. */
-  body.home-active #hamburger-btn { display: none; }
+  /* Top logo bar removed — navigation is the bottom nav now. */
+  .mobile-header { display: none !important; }
+  #bottom-nav { display: flex; align-items: stretch; gap: 8px;
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 600;
+    height: 60px; padding: 6px 10px calc(6px + env(safe-area-inset-bottom));
+    background: rgba(42,38,35,0.98); backdrop-filter: blur(20px);
+    border-top: 1px solid var(--border); }
+  /* Hide the bar while the on-screen keyboard is up (set by JS on input focus). */
+  body.kbd-open #bottom-nav { transform: translateY(130%); }
   /* Sprint 68/69 — phone: fixed 4-column app grid, larger icons */
   .feat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px 6px; }
   .feat-tile { width: auto; }
@@ -1251,10 +1294,9 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
 
   .main-content {
     padding: 0;
-    padding-top: 52px;       /* height of mobile header */
-    height: 100vh;
-    height: 100dvh;
-    height: var(--app-height, 100dvh);
+    /* No top header anymore; reserve space at the bottom for #bottom-nav (60px)
+       so content + chat composer never sit behind it. */
+    height: calc(var(--app-height, 100dvh) - 60px);
   }
 
   .dashboard-view { max-width: 100%; padding: 16px !important; }

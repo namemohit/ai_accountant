@@ -556,7 +556,6 @@
             <div class="tb-right">
                 <select id="tb-company" onchange="switchCompany(this.value)" title="Active company"></select>
                 <span class="ht-btn" onclick="showView('settings')" title="Settings">⚙️ Settings</span>
-                <span class="tb-logo" onclick="exitToHome()" style="margin-left:4px;" title="Home">YantrAI</span>
             </div>
         </div>
         <!-- Demo Company Banner -->
@@ -2361,6 +2360,33 @@
         </button>
     </div>
 
+    <!-- Mobile bottom nav (thumb-reach): Home · Workspace hub · Menu -->
+    <div class="bottom-nav" id="bottom-nav">
+        <button class="bn-btn" id="bn-home" onclick="haptic(); if(typeof closeMobileMenu==='function') closeMobileMenu(); exitToHome();">
+            <span class="bn-ic">🏠</span><span class="bn-lbl">Home</span>
+        </button>
+        <button class="bn-center" id="bn-workspace" onclick="haptic(); openWorkspaceSheet();" title="Workspace & alerts">
+            <span class="bn-co" id="bn-company">Workspace</span>
+            <span class="bn-sub" id="bn-context">tap to switch · alerts</span>
+            <span class="bn-badge" id="bn-badge" style="display:none;">0</span>
+        </button>
+        <button class="bn-btn" id="bn-menu" onclick="haptic(); toggleMobileMenu();">
+            <span class="bn-ic">☰</span><span class="bn-lbl">Menu</span>
+        </button>
+    </div>
+
+    <!-- Workspace / Notifications bottom sheet -->
+    <div class="ws-overlay" id="ws-overlay" onclick="closeWorkspaceSheet()"></div>
+    <div class="ws-sheet" id="ws-sheet">
+        <div class="ws-grip"></div>
+        <div class="ws-tabs">
+            <button class="ws-tab active" id="ws-tab-spaces" onclick="haptic(); _wsTab('spaces')">Workspaces</button>
+            <button class="ws-tab" id="ws-tab-notifs" onclick="haptic(); _wsTab('notifs')">Notifications <span class="ws-badge" id="ws-notif-badge" style="display:none;">0</span></button>
+        </div>
+        <div class="ws-body" id="ws-spaces"></div>
+        <div class="ws-body" id="ws-notifs" style="display:none;"></div>
+    </div>
+
     <!-- Mobile Slide-Out Drawer -->
     <div class="mobile-overlay" id="mobile-overlay" onclick="closeMobileMenu()"></div>
     <div class="mobile-drawer" id="mobile-drawer">
@@ -3123,6 +3149,7 @@
                 }
             });
             if (typeof _renderTopbar === 'function') _renderTopbar();
+            if (typeof _refreshBottomNav === 'function') _refreshBottomNav();
         }
 
         // Sprint 61 — universal top bar: mirrors the (hidden) sidebar's nav + footer
@@ -4726,7 +4753,119 @@
         function mobileNav(view) {
             closeMobileMenu();
             showView(view);
+            if (typeof _refreshBottomNav === 'function') _refreshBottomNav();
         }
+
+        // ── Mobile bottom nav: haptics + workspace/notifications sheet ──────────
+        function haptic(ms) {
+            // Key-tap feedback. Works on Android web; iOS Safari/PWA ignores it.
+            try { if (navigator.vibrate) navigator.vibrate(ms || 10); } catch (_) {}
+        }
+        function _activeCompanyName() {
+            const sel = document.getElementById('active-company-select') || document.getElementById('tb-company');
+            if (!sel) { try { return (_devUser().company_name) || ''; } catch (_) { return ''; } }
+            const o = sel.options[sel.selectedIndex];
+            return (o && (o.textContent || o.value)) || sel.value || '';
+        }
+        function _refreshBottomNav() {
+            const co = document.getElementById('bn-company');
+            if (co) co.textContent = _activeCompanyName() || 'Workspace';
+            const active = window.__activeAgent;
+            const meta = active ? (window.__agentBySlug || {})[active] : null;
+            const sub = document.getElementById('bn-context');
+            if (sub) sub.textContent = meta ? (meta.name || active) : 'tap to switch · alerts';
+            // alert badge
+            _buildNotifications().then(items => {
+                const b = document.getElementById('bn-badge');
+                const nb = document.getElementById('ws-notif-badge');
+                const n = items.length;
+                [b, nb].forEach(el => { if (el) { el.textContent = n; el.style.display = n ? '' : 'none'; } });
+            });
+        }
+        async function _buildNotifications() {
+            const items = [];
+            const wb = document.getElementById('wallet-balance');
+            const bal = wb ? parseInt((wb.textContent || '').replace(/[^0-9]/g, ''), 10) : NaN;
+            if (!isNaN(bal) && bal <= 5000) {
+                items.push({ icon: '⚡', title: bal <= 0 ? 'Out of tokens' : 'Low token balance',
+                    sub: bal + ' left — tap to recharge',
+                    action: () => { closeWorkspaceSheet(); if (typeof openWalletModal === 'function') openWalletModal(); } });
+            }
+            try {
+                const c = _activeCompanyName();
+                if (c) {
+                    const r = await fetch(`${API}/api/tally/status?company_name=${encodeURIComponent(c)}`);
+                    const d = await r.json();
+                    const online = d && (d.online || d.connected || (d.seconds_since_seen != null && d.seconds_since_seen < 120));
+                    if (d && d.status === 'success' && !online) {
+                        items.push({ icon: '🔌', title: 'Tally not connected',
+                            sub: 'Open the Tally Bridge on your PC to sync',
+                            action: () => { closeWorkspaceSheet(); showView('training'); } });
+                    }
+                }
+            } catch (_) {}
+            return items;
+        }
+        function openWorkspaceSheet() {
+            _renderWorkspaceSheet();
+            document.getElementById('ws-overlay').classList.add('open');
+            document.getElementById('ws-sheet').classList.add('open');
+        }
+        function closeWorkspaceSheet() {
+            document.getElementById('ws-overlay').classList.remove('open');
+            document.getElementById('ws-sheet').classList.remove('open');
+        }
+        function _wsTab(which) {
+            const spaces = which === 'spaces';
+            document.getElementById('ws-tab-spaces').classList.toggle('active', spaces);
+            document.getElementById('ws-tab-notifs').classList.toggle('active', !spaces);
+            document.getElementById('ws-spaces').style.display = spaces ? '' : 'none';
+            document.getElementById('ws-notifs').style.display = spaces ? 'none' : '';
+        }
+        function _renderWorkspaceSheet() {
+            // Workspaces tab — companies from the source-of-truth select.
+            const sel = document.getElementById('active-company-select') || document.getElementById('tb-company');
+            const opts = sel ? Array.from(sel.options) : [];
+            const cur = sel ? sel.value : '';
+            const box = document.getElementById('ws-spaces');
+            if (box) {
+                if (opts.length <= 1) {
+                    const name = (opts[0] && opts[0].textContent) || _activeCompanyName() || 'Your workspace';
+                    const bal = (document.getElementById('wallet-balance') || {}).textContent || '—';
+                    box.innerHTML = `<div class="ws-row current"><div style="flex:1;"><div>${escapeHtml(name)}</div>`
+                        + `<div class="ws-row-sub">⚡ ${escapeHtml(bal)} tokens</div></div></div>`
+                        + `<div class="ws-row" onclick="haptic(); closeWorkspaceSheet(); if(typeof openWalletModal==='function') openWalletModal();"><span>⚡</span><div style="flex:1;">Recharge tokens</div></div>`
+                        + `<div class="ws-row" onclick="haptic(); closeWorkspaceSheet(); showView('training');"><span>🔌</span><div style="flex:1;">Connect / manage Tally</div></div>`
+                        + `<div class="ws-row" onclick="haptic(); closeWorkspaceSheet(); showView('settings');"><span>👥</span><div style="flex:1;">Invite CA / team (share code)</div></div>`;
+                } else {
+                    box.innerHTML = opts.map(o =>
+                        `<div class="ws-row${o.value === cur ? ' current' : ''}" onclick="haptic(); _switchWorkspace('${o.value.replace(/'/g, "\\'")}')">`
+                        + `<span>🏢</span><div style="flex:1;">${escapeHtml(o.textContent || o.value)}</div>`
+                        + (o.value === cur ? '<span style="color:var(--primary,#da7756)">✓</span>' : '') + `</div>`).join('');
+                }
+            }
+            // Notifications tab
+            _buildNotifications().then(items => {
+                const nb = document.getElementById('ws-notifs');
+                if (!nb) return;
+                window.__wsNotifActions = items.map(i => i.action);
+                nb.innerHTML = items.length ? items.map((i, idx) =>
+                    `<div class="ws-row" onclick="haptic(); (window.__wsNotifActions[${idx}]||function(){})()">`
+                    + `<span>${i.icon}</span><div style="flex:1;"><div>${escapeHtml(i.title)}</div>`
+                    + `<div class="ws-row-sub">${escapeHtml(i.sub)}</div></div></div>`).join('')
+                    : `<div style="text-align:center; color:var(--text-secondary); padding:24px;">✓ You're all caught up</div>`;
+            });
+        }
+        function _switchWorkspace(name) {
+            closeWorkspaceSheet();
+            if (typeof switchCompany === 'function') switchCompany(name);
+            setTimeout(() => { if (typeof _refreshBottomNav === 'function') _refreshBottomNav(); }, 300);
+        }
+        // Hide the bottom bar while typing (keyboard up) so it doesn't cover inputs.
+        window.addEventListener('focusin', (e) => {
+            if (e.target && ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) document.body.classList.add('kbd-open');
+        });
+        window.addEventListener('focusout', () => document.body.classList.remove('kbd-open'));
 
         // --- Collapsible Nav Groups ---
         function toggleNavGroup(groupName) {
