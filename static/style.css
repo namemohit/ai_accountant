@@ -1743,8 +1743,10 @@ input[type="text"].ya:focus, select.ya:focus {
   .ya-btn-sm { min-height: 32px; }
 
   /* Main content padding — give edges some breathing room.
-     Padding lives on the view, not main-content, so banner can stay edge-aware. */
-  .main-content { padding: 0 !important; padding-top: 52px !important; }
+     Padding lives on the view, not main-content, so banner can stay edge-aware.
+     (Top header was removed → no top padding reservation; bottom-nav handled
+     by .main-content height calc above.) */
+  .main-content { padding: 0 !important; }
   .dashboard-view { padding: 16px !important; }
   #chat-view { padding: 0 !important; }
 
