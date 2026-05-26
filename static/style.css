@@ -1336,7 +1336,15 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
     height: calc(var(--app-height, 100dvh) - 60px - env(safe-area-inset-bottom));
   }
 
-  .dashboard-view { max-width: 100%; padding: 16px !important; }
+  /* Reserve the fixed bottom-nav height (60px + safe-area) so the last rows /
+     buttons of every scrolling view clear the bar instead of hiding behind it. */
+  .dashboard-view { max-width: 100%; padding: 16px !important;
+    padding-bottom: calc(16px + 60px + env(safe-area-inset-bottom)) !important; }
+  /* Embedded remote-agent iframe: its inline height subtracts the desktop top bar
+     (40px). On mobile there's no top bar but a 60px bottom nav, so reserve that
+     instead (override the inline height). */
+  #agent-remote-view { height: calc(var(--app-height, 100dvh) - 60px - env(safe-area-inset-bottom)) !important;
+    padding-bottom: 0 !important; }
   .grid { grid-template-columns: 1fr; gap: 16px; }
 
   /* Demo banner — tighter on mobile, still above scroll area */
