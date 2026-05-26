@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Form, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Form, WebSocket, WebSocketDisconnect, BackgroundTasks
 import fastapi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "137"
+APP_VERSION = "139"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -2392,7 +2392,7 @@ async def analyze_invoice(file: UploadFile = File(...), company_name: str = Form
             os.remove(temp_path)
 
 @app.post("/push-to-tally")
-async def push_to_tally(data: dict):
+async def push_to_tally(data: dict, background_tasks: BackgroundTasks = None):
     try:
         # Integrity check — the active workspace must be a party to the invoice.
         # If the workspace's own GSTIN matches NEITHER the seller (billing_party_gstin)
@@ -2440,6 +2440,18 @@ async def push_to_tally(data: dict):
             )
         except Exception as q_err:
             print(f"[push_to_tally] enqueue_tally_push error: {q_err}", flush=True)
+
+        # Seed the workspace knowledge base from this confirmed voucher so Training
+        # Progress grows as the user processes invoices (party / items / narration /
+        # ledger). Runs in the background so confirm stays snappy; idempotent by kb_key.
+        try:
+            if background_tasks is not None:
+                background_tasks.add_task(db.embed_confirmed_voucher,
+                                         data.get("company_name"), data, get_embedding)
+            else:
+                db.embed_confirmed_voucher(data.get("company_name"), data, get_embedding)
+        except Exception as tr_err:
+            print(f"[push_to_tally] training-seed error: {tr_err}", flush=True)
 
         # Mark corresponding chat message as synced if message_id is provided
         msg_id = data.get("message_id")
@@ -5296,7 +5308,7 @@ async def get_training_progress(request: Request, company_name: str = "Acme Corp
         out = {
             "status": "success",
             "company_name": company_name,
-            "stats": db.training_stats(company_name),
+            "stats": db.training_totals(company_name),   # all learning types, not just corrections
             "breakdown": db.training_breakdown(company_name),
             "recent": db.recent_training(company_name, limit=25),
         }
@@ -5314,7 +5326,7 @@ async def get_training_progress(request: Request, company_name: str = "Acme Corp
                 if not c or c in seen:
                     continue
                 seen.add(c)
-                companies.append({"company": c, "stats": db.training_stats(c)})
+                companies.append({"company": c, "stats": db.training_totals(c)})
             out["per_company"] = companies
         return out
     except Exception as e:

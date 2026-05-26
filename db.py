@@ -3283,6 +3283,23 @@ def training_stats(company_name="Acme Corp"):
     return {"total_mappings": total, "vectorized": vectorized,
             "confidence_score": confidence, "status": status}
 
+def training_totals(company_name="Acme Corp"):
+    """Headline 'how trained' across ALL learning types (corrections + masters +
+    bank-reco), not just corrections — matches the per-type breakdown the UI shows."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT COUNT(*), COUNT(embedding) FROM knowledge_base "
+                    "WHERE data->>'company_name' = %s", (company_name,))
+        total, vect = cur.fetchone()
+        total = int(total or 0); vect = int(vect or 0)
+    except Exception as e:
+        print(f"[training_totals] {e}"); total = vect = 0
+    finally:
+        cur.close(); conn.close()
+    pct = round(vect * 100.0 / total, 1) if total else 0.0
+    status = "Untrained" if total == 0 else ("Vectorized" if vect == total else "Training")
+    return {"total_mappings": total, "vectorized": vect, "confidence_score": pct, "status": status}
+
 def training_breakdown(company_name="Acme Corp"):
     """Count of learned items per knowledge_base type for a company (corrections +
     synced Tally masters + bank-reco patterns). Powers the Training Progress breakdown."""
@@ -8329,6 +8346,66 @@ def list_org_members(org_id):
     rows = cur.fetchall(); cur.close(); conn.close()
     return rows
 
+
+def embed_confirmed_voucher(company_name, voucher, embed_fn, company_id=None):
+    """Seed the workspace knowledge base from a CONFIRMED voucher so Training
+    Progress grows as the user processes invoices. Embeds the party, narration,
+    line items and counter ledger — idempotent by kb_key (re-confirming the same
+    party/item won't double-count). embed_fn(text)->list[float] is supplied by the
+    caller (server.get_embedding). Returns counts."""
+    if not embed_fn or not voucher:
+        return {"skipped": True}
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    counts = {"parties": 0, "narrations": 0, "items": 0, "ledgers": 0, "skipped": 0}
+    def _already(kb_type, kb_key):
+        cur.execute("SELECT 1 FROM knowledge_base WHERE type=%s AND data->>'company_name'=%s AND data->>'kb_key'=%s LIMIT 1",
+                    (kb_type, company_name, kb_key))
+        return cur.fetchone() is not None
+    def _insert(kb_type, kb_key, text, payload):
+        if _already(kb_type, kb_key):
+            counts["skipped"] += 1; return False
+        try:
+            emb = embed_fn(text)
+        except Exception as e:
+            print(f"[embed_confirmed_voucher] embed err {kb_type} {kb_key}: {e}"); return False
+        if not emb:
+            return False
+        emb_str = "[" + ",".join(map(str, emb)) + "]"
+        p = dict(payload); p["company_name"] = company_name
+        p["company_id"] = str(company_id) if company_id else None; p["kb_key"] = kb_key
+        cur.execute("INSERT INTO knowledge_base (type, data, embedding) VALUES (%s, %s::jsonb, %s)",
+                    (kb_type, json.dumps(p), emb_str))
+        return True
+    try:
+        party = (voucher.get("billing_party_name") or voucher.get("party_name") or "").strip()
+        if party and _insert("tally_master_party", f"party::{party}",
+                             f"Party '{party}' seen on a confirmed voucher.",
+                             {"party": party, "gstin": voucher.get("billing_party_gstin")}):
+            counts["parties"] += 1
+        narr = (voucher.get("narration") or voucher.get("notes") or "").strip()
+        if narr and _insert("tally_master_narration", f"narration::{narr[:80]}",
+                            f"Narration: {narr}", {"narration": narr, "party": party}):
+            counts["narrations"] += 1
+        for it in (voucher.get("items") or []):
+            if not isinstance(it, dict):
+                continue
+            nm = (it.get("description") or it.get("item") or it.get("name") or "").strip()
+            if not nm:
+                continue
+            hsn = it.get("hsn_sac") or it.get("hsn") or "n/a"
+            if _insert("tally_master_item", f"item::{nm}", f"Item '{nm}' with HSN {hsn}.",
+                       {"name": nm, "hsn": it.get("hsn_sac") or it.get("hsn")}):
+                counts["items"] += 1
+        led = (voucher.get("counter_ledger") or voucher.get("category") or "").strip()
+        if led and _insert("tally_master_ledger", f"ledger::{led}",
+                           f"Ledger '{led}' used on a confirmed voucher.", {"name": led}):
+            counts["ledgers"] += 1
+        conn.commit()
+    except Exception as e:
+        conn.rollback(); print(f"[embed_confirmed_voucher] {e}")
+    finally:
+        cur.close(); conn.close()
+    return counts
 
 def embed_tally_master(company_id, company_name, embed_fn, batch_log=None):
     """Embed Tally master data (ledgers, parties, vouchers, stock items) into knowledge_base
