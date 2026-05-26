@@ -1229,6 +1229,20 @@
                 <p style="color: #94a3b8;">Your apps — tap to open. Manage AI training & admin in Settings.</p>
             </header>
 
+            <!-- Slim Network connect strip (AnyDesk-style): your ID + connect-to + Requests -->
+            <div id="home-network-widget" class="home-net-strip">
+                <span class="hns-label">🔗 Your ID</span>
+                <span id="home-net-id" class="hns-id">—</span>
+                <button class="hns-btn" onclick="nwCopyId()" title="Copy your Workspace ID">📋</button>
+                <span class="hns-sep"></span>
+                <input id="home-net-target" class="hns-input" placeholder="Connect to ID…" autocomplete="off">
+                <button class="hns-btn hns-go" onclick="homeNetConnect()">Connect</button>
+                <span class="hns-sep"></span>
+                <button class="hns-btn hns-req" onclick="enterAgent('network'); setTimeout(()=>showView('network-requests'),60);">
+                    📨 Requests <span id="nw-home-badge" class="hns-badge" style="display:none;"></span>
+                </button>
+            </div>
+
             <!-- App-icon grid (built by loadHome: installed agents + system apps) -->
             <div class="app-grid" id="home-app-grid">
                 <div style="color:#64748b; font-size:0.85rem;">Loading…</div>
@@ -1541,16 +1555,8 @@
                     <div class="connector-meta"><span>Devices</span><span id="install-app-hint">Add to device</span></div>
                 </div>
 
-                <!-- Team & access — share workspace via a handshake code -->
-                <div class="connector-card" data-category="team" onclick="openConnectionsModal()">
-                    <div class="connector-card-header">
-                        <div class="connector-icon" style="background: rgba(168,85,247,0.12); color: #a855f7;">🔑</div>
-                        <div class="connector-status available">Share</div>
-                    </div>
-                    <h4 class="connector-name">Team &amp; access</h4>
-                    <p class="connector-desc">Invite your CA, a client, or a teammate with a one-time share code — you pick their role. Or enter a code to join someone's workspace.</p>
-                    <div class="connector-meta"><span>People</span><span>Share / Join</span></div>
-                </div>
+                <!-- Team & access moved to the Network agent (Home). The one-time-code
+                     share/join flow (openConnectionsModal) now lives inside Network. -->
 
                 <!-- GST Portal -->
                 <div class="connector-card" data-category="tax" onclick="openConnectorModal('gst-portal')">
@@ -3386,6 +3392,7 @@
                 });
             }
             // AI-learning stats now live in Settings (Sprint 60) — not loaded here.
+            if (typeof loadHomeNetworkWidget === 'function') loadHomeNetworkWidget();
         }
         // Sprint 65 — render the Home app tiles: flat grid on desktop, iPhone-style
         // swipeable pages (scroll-snap) on mobile.
@@ -4347,6 +4354,32 @@
                 if (!r.ok) { const d = await r.json(); throw new Error(d.detail || 'Could not revoke.'); }
             } catch(e) { alert(e.message); }
             loadNetworkList();
+        }
+        // Home widget: populate the Workspace ID + pending-requests badge.
+        async function loadHomeNetworkWidget() {
+            const u = _nwUser();
+            try {
+                const r = await fetch(`${API}/api/network/me?username=${encodeURIComponent(u.username||'')}`);
+                const d = await r.json();
+                if (r.ok && d.connect_id) {
+                    window.__nwMyId = d.connect_id;
+                    const el = document.getElementById('home-net-id'); if (el) el.textContent = d.connect_id;
+                }
+            } catch(_) {}
+            nwRefreshBadge();
+        }
+        // Connect from the Home strip → open Network's Connect screen with the ID prefilled.
+        function homeNetConnect() {
+            const v = (document.getElementById('home-net-target')||{}).value || '';
+            enterAgent('network');
+            setTimeout(() => {
+                showView('network-home');
+                setTimeout(() => {
+                    const ti = document.getElementById('nw-target-id');
+                    if (ti) { ti.value = v.trim(); ti.focus(); }
+                    const ht = document.getElementById('home-net-target'); if (ht) ht.value = '';
+                }, 80);
+            }, 40);
         }
         // Pending-incoming count → Home widget + (future) badges.
         async function nwRefreshBadge() {
