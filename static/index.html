@@ -1274,6 +1274,12 @@
                 <div id="dev-register-msg" style="font-size:0.82rem; margin-top:8px;"></div>
             </div>
 
+            <!-- super_admin only: public-listing review queue -->
+            <div id="dev-review-queue" style="display:none; margin-top:24px;">
+                <h3 style="margin-bottom:12px; font-size:1rem; color:#e2e8f0;">🛡️ Review queue <span style="font-size:0.72rem; color:#94a3b8;">(super admin)</span></h3>
+                <div id="dev-review-list"><div style="color:#64748b; font-size:0.85rem;">Loading…</div></div>
+            </div>
+
             <h3 style="margin-top:26px; margin-bottom:12px; font-size:1rem; color:#e2e8f0;">My apps</h3>
             <div id="dev-apps-list"><div style="color:#64748b; font-size:0.85rem;">Loading…</div></div>
         </div>
@@ -3987,8 +3993,67 @@
                 box.innerHTML = apps.length ? apps.map(_devAppCard).join('')
                     : '<div style="color:#64748b; font-size:0.85rem;">No apps yet — register one above.</div>';
             } catch(e) { box.innerHTML = '<div style="color:#f87171; font-size:0.85rem;">Could not load your apps.</div>'; }
+            if ((u.role || '') === 'super_admin') loadPublishQueue();
+        }
+        async function loadPublishQueue() {
+            const u = _devUser();
+            const wrap = document.getElementById('dev-review-queue');
+            const list = document.getElementById('dev-review-list');
+            if (!wrap || !list) return;
+            wrap.style.display = 'block';
+            try {
+                const r = await fetch(`${API}/api/admin/publish-queue?username=${encodeURIComponent(u.username||'')}`);
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || 'Could not load queue');
+                const apps = (d && d.apps) || [];
+                list.innerHTML = apps.length ? apps.map(_reviewCard).join('')
+                    : '<div style="color:#64748b; font-size:0.85rem;">Nothing awaiting review.</div>';
+            } catch(e) { list.innerHTML = `<div style="color:#f87171; font-size:0.85rem;">${escapeHtml(e.message)}</div>`; }
+        }
+        function _reviewCard(a) {
+            const url = (a.manifest || {}).remote_url || '';
+            return `<div class="card" style="max-width:680px; margin-bottom:10px;">
+                <div style="display:flex; align-items:center; gap:10px;">
+                    <span style="font-size:1.2rem;">${escapeHtml(a.icon||'🧩')}</span>
+                    <div style="flex:1;">
+                        <div style="font-weight:600; color:#f4f4f5;">${escapeHtml(a.name||a.slug)} <span style="font-size:0.7rem; color:#94a3b8;">(${escapeHtml(a.slug)})</span></div>
+                        <div style="font-size:0.76rem; color:#94a3b8;">${escapeHtml(a.tagline||'')}</div>
+                        <div style="font-size:0.72rem; color:#8a8178; margin-top:3px; word-break:break-all;">🔗 ${escapeHtml(url)}</div>
+                    </div>
+                </div>
+                <div style="display:flex; gap:8px; margin-top:12px;">
+                    <button onclick="adminDecide('${a.slug}', true)" style="padding:7px 14px; background:rgba(74,222,128,0.14); color:#4ade80; border:1px solid rgba(74,222,128,0.35); border-radius:8px; font-weight:600; cursor:pointer;">Approve → Public</button>
+                    <button onclick="adminDecide('${a.slug}', false)" style="padding:7px 12px; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.25); border-radius:8px; cursor:pointer;">Reject</button>
+                </div>
+            </div>`;
+        }
+        async function adminDecide(slug, approve) {
+            const u = _devUser();
+            let note = null;
+            if (!approve) { note = prompt('Reason for rejection (optional):', '') || ''; }
+            else if (!confirm(`Approve "${slug}" for public listing in all workspaces?`)) { return; }
+            try {
+                const r = await fetch(`${API}/api/admin/publish-decision`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: u.username, slug, approve, note }) });
+                if (!r.ok) { const d = await r.json(); throw new Error(d.detail || 'Decision failed'); }
+                try { showChatToast && showChatToast(approve ? 'Approved & published.' : 'Rejected.'); } catch(_) {}
+                loadPublishQueue();
+            } catch(e) { alert(e.message); }
         }
         function _devAppCard(a) {
+            const tp = a.token_policy || {};
+            const billLabel = tp.chargeable
+                ? ('Chargeable' + (tp.credits_per_action ? ` · ${tp.credits_per_action}/action` : ' · metered'))
+                : 'Free';
+            const vis = (a.visibility === 'public') ? '🌐 Public' : '🔒 Private';
+            const rs = a.review_status || 'none';
+            const reviewBadge = rs === 'requested'
+                ? '<span style="font-size:0.66rem; color:#fbbf24; background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.3); border-radius:999px; padding:2px 8px;">review pending</span>'
+                : rs === 'approved'
+                ? '<span style="font-size:0.66rem; color:#4ade80; background:rgba(74,222,128,0.12); border:1px solid rgba(74,222,128,0.3); border-radius:999px; padding:2px 8px;">approved</span>'
+                : rs === 'rejected'
+                ? '<span style="font-size:0.66rem; color:#f87171; background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.3); border-radius:999px; padding:2px 8px;">rejected</span>'
+                : '';
+            const canRequest = (a.visibility !== 'public') && (rs === 'none' || rs === 'rejected');
             return `<div class="card" style="max-width:680px; margin-bottom:10px;">
                 <div style="display:flex; align-items:center; gap:10px;">
                     <span style="font-size:1.2rem;">${escapeHtml(a.icon||'🧩')}</span>
@@ -4001,11 +4066,18 @@
                 <div style="font-size:0.74rem; color:#8a8178; margin-top:8px; word-break:break-all;">
                     <div>🔗 ${escapeHtml(a.remote_url||'')}</div>
                     <div style="margin-top:3px;">client_id: <code style="color:#cbd5e1;">${escapeHtml(a.client_id||'')}</code></div>
+                    <div style="margin-top:6px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                        <span>${vis}</span><span>💳 ${escapeHtml(billLabel)}</span>${reviewBadge}
+                    </div>
                 </div>
                 <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap;">
                     <button onclick="devOpenApp('${a.slug}')" style="padding:7px 14px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer;">Open</button>
+                    <button onclick="devTestSSO('${a.slug}')" style="padding:7px 12px; background:rgba(56,189,248,0.12); color:#38bdf8; border:1px solid rgba(56,189,248,0.3); border-radius:8px; cursor:pointer;">Test SSO</button>
+                    <button onclick="devSetBilling('${a.slug}')" style="padding:7px 12px; background:var(--bg-light); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; cursor:pointer;">Billing</button>
+                    <button onclick="devShowUsage('${a.slug}')" style="padding:7px 12px; background:var(--bg-light); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; cursor:pointer;">Usage</button>
                     <button onclick="devEditUrl('${a.slug}')" style="padding:7px 12px; background:var(--bg-light); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; cursor:pointer;">Edit URL</button>
                     <button onclick="devRotateKey('${a.slug}')" style="padding:7px 12px; background:rgba(168,85,247,0.12); color:#a855f7; border:1px solid rgba(168,85,247,0.3); border-radius:8px; cursor:pointer;">Rotate key</button>
+                    ${canRequest ? `<button onclick="devRequestPublish('${a.slug}')" style="padding:7px 12px; background:rgba(74,222,128,0.12); color:#4ade80; border:1px solid rgba(74,222,128,0.3); border-radius:8px; cursor:pointer;">Request publish</button>` : ''}
                     <button onclick="devArchiveApp('${a.slug}')" style="padding:7px 12px; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.25); border-radius:8px; cursor:pointer;">Archive</button>
                 </div>
             </div>`;
@@ -4077,6 +4149,59 @@
                     // we're not necessarily in it; just refresh nav
                     _renderNav();
                 }
+                loadDevPortal();
+            } catch(e) { alert(e.message); }
+        }
+        async function devSetBilling(slug) {
+            const u = _devUser();
+            const chargeable = confirm('Make this app CHARGEABLE?\n\nOK = chargeable, Cancel = free.');
+            let credits_per_action = null;
+            if (chargeable) {
+                const v = prompt('Flat credits per action (leave blank to bill the amount the app reports):', '');
+                if (v !== null && v.trim() !== '') credits_per_action = parseInt(v.trim(), 10) || 0;
+            }
+            try {
+                const r = await fetch(`${API}/api/dev/apps/billing`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: u.username, slug, chargeable, credits_per_action }) });
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || 'Billing update failed');
+                try { showChatToast && showChatToast('Billing updated.'); } catch(_) {}
+                loadDevPortal();
+            } catch(e) { alert(e.message); }
+        }
+        async function devShowUsage(slug) {
+            const u = _devUser();
+            try {
+                const r = await fetch(`${API}/api/dev/apps/usage?username=${encodeURIComponent(u.username||'')}&slug=${encodeURIComponent(slug)}`);
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || 'Usage load failed');
+                const t = d.total || {};
+                alert(`Usage — ${slug}\n\nCredits billed: ${t.tokens||0}\nBillable actions: ${t.calls||0}\nWorkspaces using it: ${t.workspaces||0}`);
+            } catch(e) { alert(e.message); }
+        }
+        async function devTestSSO(slug) {
+            const u = _devUser();
+            try {
+                const r = await fetch(`${API}/api/dev/apps/test-sso`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: u.username, company_name: u.company_name||'', slug }) });
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || 'Test failed');
+                let chargeLine = '';
+                try {
+                    const cr = await fetch(`${API}/api/agents/usage`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ token: d.token, tokens: 100, dry_run: true, action: 'sandbox_test' }) });
+                    const cd = await cr.json();
+                    chargeLine = cr.ok
+                        ? `\n\nDry-run charge: ${cd.charged} credits${cd.skipped ? ' ('+cd.skipped+')' : ''} — no debit`
+                        : `\n\nDry-run charge error: ${cd.detail||''}`;
+                } catch(_) {}
+                alert(`SSO test — ${slug}\n\nToken verified: ${d.ok ? 'YES ✓' : 'NO ✗'}\nClaims: ${JSON.stringify(d.claims)}${chargeLine}`);
+            } catch(e) { alert(e.message); }
+        }
+        async function devRequestPublish(slug) {
+            const u = _devUser();
+            if (!confirm('Request that this app be listed publicly for all workspaces? A reviewer will approve it.')) return;
+            try {
+                const r = await fetch(`${API}/api/dev/apps/request-publish`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: u.username, slug }) });
+                if (!r.ok) { const d = await r.json(); throw new Error(d.detail || 'Request failed'); }
+                try { showChatToast && showChatToast('Publish requested — pending review.'); } catch(_) {}
                 loadDevPortal();
             } catch(e) { alert(e.message); }
         }

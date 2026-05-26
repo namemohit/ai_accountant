@@ -1586,6 +1586,20 @@ def _ensure_billing_schema():
         cur.execute("ALTER TABLE store_agents ADD COLUMN IF NOT EXISTS client_id     TEXT")
         cur.execute("ALTER TABLE store_agents ADD COLUMN IF NOT EXISTS signing_key   TEXT")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_store_agents_owner ON store_agents(owner_org_id)")
+        # App-store: lightweight review gate for public listing of developer apps.
+        cur.execute("ALTER TABLE store_agents ADD COLUMN IF NOT EXISTS review_status TEXT DEFAULT 'none'")
+        cur.execute("ALTER TABLE store_agents ADD COLUMN IF NOT EXISTS review_note   TEXT")
+        cur.execute("ALTER TABLE store_agents ADD COLUMN IF NOT EXISTS reviewed_by   UUID")
+        cur.execute("ALTER TABLE store_agents ADD COLUMN IF NOT EXISTS reviewed_at   TIMESTAMP")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS agent_review_log (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                agent_slug TEXT NOT NULL,
+                action TEXT NOT NULL,                 -- requested | approved | rejected
+                note TEXT,
+                actor_user_id UUID,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );""")
         # Sprint 51 — Supabase Auth: link our identity rows to the auth user (auth.users.id).
         cur.execute("ALTER TABLE users            ADD COLUMN IF NOT EXISTS auth_uid UUID")
         cur.execute("ALTER TABLE accounting_users ADD COLUMN IF NOT EXISTS auth_uid UUID")
@@ -2015,45 +2029,76 @@ def usage_by_agent(org_id, since=None):
 # Sprint 50 — Developer Portal: a dev app is a store_agents row owned by an org
 # (visibility='private'), with per-app client_id + signing_key for scoped SSO.
 # ---------------------------------------------------------------------------
-def create_dev_app(org_id, user_id, name, remote_url, tagline=None, description=None,
-                   icon="🧩", category="custom"):
+def create_app(org_id, user_id, name, remote_url, *, slug=None, tagline=None,
+               description=None, icon="🧩", category="custom",
+               publisher="developer", visibility="private", token_policy=None,
+               sort_order=500):
+    """Register (or idempotently re-publish) a remote agent in the store.
+
+    One code path for both developer apps (random slug, private, developer) and
+    first-party apps (explicit slug, public, first-party). On a slug conflict it
+    updates metadata but PRESERVES client_id/signing_key (rotating them would
+    break live sessions + metering)."""
     import secrets as _secrets, json as _json
     name = (name or "").strip() or "My App"
     remote_url = (remote_url or "").strip()
     if not remote_url:
         return {"ok": False, "error": "A remote URL is required."}
-    slug = "app-" + _secrets.token_hex(6)
-    client_id = "cid_" + _secrets.token_hex(8)
-    signing_key = "sk_" + _secrets.token_hex(24)
+    slug = slug or ("app-" + _secrets.token_hex(6))
     view = "remote-" + slug
-    manifest = {"version": 1, "agent_kind": "remote", "remote_url": remote_url,
-                "client_id": client_id,
-                "nav_groups": [{"label": "App", "items": [
-                    {"view": view, "label": name, "icon": icon}]}]}
     conn = get_conn(); cur = conn.cursor()
     try:
+        # Reuse existing credentials if the row exists; never rotate them here.
+        cur.execute("SELECT client_id, signing_key FROM store_agents WHERE slug=%s", (slug,))
+        row = cur.fetchone()
+        client_id = (row[0] if row and row[0] else "cid_" + _secrets.token_hex(8))
+        signing_key = (row[1] if row and row[1] else "sk_" + _secrets.token_hex(24))
+        manifest = {"version": 1, "agent_kind": "remote", "remote_url": remote_url,
+                    "client_id": client_id,
+                    "nav_groups": [{"label": name, "items": [
+                        {"view": view, "label": name, "icon": icon}]}]}
         cur.execute("""
             INSERT INTO store_agents (slug, name, tagline, description, icon, category,
                 status, publisher, token_policy, manifest, sort_order,
                 owner_org_id, owner_user_id, visibility, client_id, signing_key)
-            VALUES (%s,%s,%s,%s,%s,%s,'published','developer','{}'::jsonb,%s,500,
-                    %s,%s,'private',%s,%s)
-        """, (slug, name, tagline, description, icon, category, _json.dumps(manifest),
-              org_id, user_id, client_id, signing_key))
+            VALUES (%s,%s,%s,%s,%s,%s,'published',%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (slug) DO UPDATE SET
+                name=EXCLUDED.name, tagline=EXCLUDED.tagline, description=EXCLUDED.description,
+                icon=EXCLUDED.icon, category=EXCLUDED.category, status=EXCLUDED.status,
+                publisher=EXCLUDED.publisher, token_policy=EXCLUDED.token_policy,
+                manifest=EXCLUDED.manifest, sort_order=EXCLUDED.sort_order,
+                visibility=EXCLUDED.visibility,
+                owner_org_id=COALESCE(store_agents.owner_org_id, EXCLUDED.owner_org_id),
+                owner_user_id=COALESCE(store_agents.owner_user_id, EXCLUDED.owner_user_id),
+                client_id=COALESCE(store_agents.client_id, EXCLUDED.client_id),
+                signing_key=COALESCE(store_agents.signing_key, EXCLUDED.signing_key)
+        """, (slug, name, tagline, description, icon, category, publisher,
+              _json.dumps(token_policy or {}), _json.dumps(manifest), sort_order,
+              org_id, user_id, visibility, client_id, signing_key))
         conn.commit()
         return {"ok": True, "slug": slug, "client_id": client_id,
                 "client_secret": signing_key, "remote_url": remote_url, "name": name}
     except Exception as e:
-        conn.rollback(); print(f"[create_dev_app] {e}"); return {"ok": False, "error": str(e)}
+        conn.rollback(); print(f"[create_app] {e}"); return {"ok": False, "error": str(e)}
     finally:
         cur.close(); conn.close()
+
+
+def create_dev_app(org_id, user_id, name, remote_url, tagline=None, description=None,
+                   icon="🧩", category="custom"):
+    """Portal default: a private, developer-published, non-chargeable remote app."""
+    return create_app(org_id, user_id, name, remote_url, tagline=tagline,
+                      description=description, icon=icon, category=category,
+                      publisher="developer", visibility="private",
+                      token_policy={}, sort_order=500)
 
 
 def list_dev_apps(org_id):
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""SELECT slug, name, tagline, description, icon, category, status,
-                              visibility, client_id, manifest, created_at
+                              visibility, client_id, manifest, token_policy,
+                              review_status, created_at
                        FROM store_agents
                        WHERE owner_org_id=%s AND COALESCE(status,'')<>'archived'
                        ORDER BY created_at DESC""", (org_id,))
@@ -2154,6 +2199,154 @@ def get_agent_auth(slug):
         if r and r[0] and r[1]:
             return {"client_id": r[0], "signing_key": r[1]}
         return None
+    finally:
+        cur.close(); conn.close()
+
+
+def slug_for_client_id(client_id):
+    """Reverse of get_agent_auth: the agent slug for a given client_id (SSO `kid`)."""
+    if not client_id:
+        return None
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT slug FROM store_agents WHERE client_id=%s LIMIT 1", (client_id,))
+        r = cur.fetchone()
+        return r[0] if r else None
+    finally:
+        cur.close(); conn.close()
+
+
+def get_dev_app(slug, org_id):
+    """A single owned app row (or None) — for ownership checks + portal detail."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""SELECT slug, name, tagline, description, icon, category, status,
+                              visibility, publisher, token_policy, client_id, manifest,
+                              review_status, review_note, created_at
+                       FROM store_agents WHERE slug=%s AND owner_org_id=%s""",
+                    (slug, org_id))
+        return cur.fetchone()
+    finally:
+        cur.close(); conn.close()
+
+
+def get_token_policy(slug):
+    """The billing policy {"chargeable":bool,"credits_per_action":int} for an agent."""
+    if not slug:
+        return {}
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT token_policy FROM store_agents WHERE slug=%s LIMIT 1", (slug,))
+        r = cur.fetchone()
+        return (r[0] or {}) if r else {}
+    finally:
+        cur.close(); conn.close()
+
+
+def set_app_billing(slug, org_id, chargeable=None, credits_per_action=None):
+    """Update an owned app's token_policy (merges; only the fields you pass)."""
+    import json as _json
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT token_policy FROM store_agents WHERE slug=%s AND owner_org_id=%s",
+                    (slug, org_id))
+        row = cur.fetchone()
+        if not row:
+            return {"ok": False, "error": "App not found."}
+        tp = dict(row["token_policy"] or {})
+        if chargeable is not None:
+            tp["chargeable"] = bool(chargeable)
+        if credits_per_action is not None:
+            tp["credits_per_action"] = int(credits_per_action)
+        cur.execute("UPDATE store_agents SET token_policy=%s::jsonb WHERE slug=%s AND owner_org_id=%s",
+                    (_json.dumps(tp), slug, org_id))
+        conn.commit()
+        return {"ok": True, "token_policy": tp}
+    except Exception as e:
+        conn.rollback(); print(f"[set_app_billing] {e}"); return {"ok": False, "error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+
+def dev_app_usage(slug, org_id):
+    """Usage/earnings for a dev-owned app across EVERY workspace that used it.
+    Returns None if the app isn't owned by org_id (authorization)."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT 1 FROM store_agents WHERE slug=%s AND owner_org_id=%s", (slug, org_id))
+        if not cur.fetchone():
+            return None
+        cur.execute("""SELECT COALESCE(SUM(tokens_charged),0) AS tokens, COUNT(*) AS calls,
+                              COUNT(DISTINCT org_id) AS workspaces
+                       FROM ai_usage_log WHERE agent_slug=%s""", (slug,))
+        total = cur.fetchone()
+        cur.execute("""SELECT DATE(created_at) AS day,
+                              COALESCE(SUM(tokens_charged),0) AS tokens, COUNT(*) AS calls
+                       FROM ai_usage_log
+                       WHERE agent_slug=%s AND created_at >= NOW() - INTERVAL '30 days'
+                       GROUP BY 1 ORDER BY 1 DESC""", (slug,))
+        daily = cur.fetchall()
+        return {"total": total, "daily": daily}
+    finally:
+        cur.close(); conn.close()
+
+
+def request_publish(slug, org_id, user_id=None):
+    """Developer asks for their (owned, private) app to be listed publicly."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""UPDATE store_agents SET review_status='requested'
+                       WHERE slug=%s AND owner_org_id=%s AND COALESCE(status,'')<>'archived'""",
+                    (slug, org_id))
+        ok = cur.rowcount > 0
+        if ok:
+            cur.execute("""INSERT INTO agent_review_log (agent_slug, action, actor_user_id)
+                           VALUES (%s,'requested',%s)""", (slug, user_id))
+        conn.commit()
+        return {"ok": ok, "error": None if ok else "App not found."}
+    except Exception as e:
+        conn.rollback(); print(f"[request_publish] {e}"); return {"ok": False, "error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+
+def publish_queue():
+    """Apps awaiting review (super_admin view)."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""SELECT slug, name, tagline, icon, category, publisher, visibility,
+                              owner_org_id, manifest, review_status, created_at
+                       FROM store_agents
+                       WHERE review_status='requested' AND COALESCE(status,'')<>'archived'
+                       ORDER BY created_at ASC""")
+        return cur.fetchall()
+    finally:
+        cur.close(); conn.close()
+
+
+def decide_publish(slug, approve, reviewer_user_id=None, note=None):
+    """Approve (→ public + approved) or reject (→ rejected, stays private) an app."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        if approve:
+            cur.execute("""UPDATE store_agents
+                           SET visibility='public', review_status='approved',
+                               review_note=%s, reviewed_by=%s, reviewed_at=CURRENT_TIMESTAMP
+                           WHERE slug=%s""", (note, reviewer_user_id, slug))
+        else:
+            cur.execute("""UPDATE store_agents
+                           SET review_status='rejected',
+                               review_note=%s, reviewed_by=%s, reviewed_at=CURRENT_TIMESTAMP
+                           WHERE slug=%s""", (note, reviewer_user_id, slug))
+        ok = cur.rowcount > 0
+        if ok:
+            cur.execute("""INSERT INTO agent_review_log (agent_slug, action, note, actor_user_id)
+                           VALUES (%s,%s,%s,%s)""",
+                        (slug, "approved" if approve else "rejected", note, reviewer_user_id))
+        conn.commit()
+        return {"ok": ok, "error": None if ok else "App not found."}
+    except Exception as e:
+        conn.rollback(); print(f"[decide_publish] {e}"); return {"ok": False, "error": str(e)}
     finally:
         cur.close(); conn.close()
 

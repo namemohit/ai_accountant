@@ -6497,6 +6497,53 @@ async def api_agents_verify_sso(token: str = None):
     return {"ok": True, "username": p.get("u"), "company_name": p.get("c")}
 
 
+@app.post("/api/agents/usage")
+async def api_agents_usage(payload: dict):
+    """Remote (embedded) agents report token usage here using the user's SSO token.
+    The token's `kid` identifies the app (so usage lands on the right agent_slug) and
+    its `u`/`c` claims identify the user + workspace to debit. Chargeable remote apps
+    call this server-side after each LLM action."""
+    payload = payload or {}
+    p = _sso_verify(payload.get("token") or "")
+    if not p:
+        raise HTTPException(status_code=401, detail="Invalid or expired token.")
+    slug = db.slug_for_client_id(p.get("kid")) if p.get("kid") else None
+    if not slug:
+        raise HTTPException(status_code=400, detail="Token is not scoped to a registered app.")
+    try:
+        reported = int(payload.get("tokens") or 0)
+    except (TypeError, ValueError):
+        reported = 0
+    if reported <= 0:
+        raise HTTPException(status_code=400, detail="`tokens` must be a positive integer.")
+
+    # The store owns billing: only charge if the app is marked chargeable, and if a
+    # per-action price is configured it is authoritative (overrides the reported count).
+    policy = db.get_token_policy(slug) or {}
+    if not policy.get("chargeable"):
+        return {"ok": True, "agent": slug, "charged": 0, "skipped": "not_chargeable"}
+    n = int(policy.get("credits_per_action") or reported)
+
+    company = p.get("c")
+    _, uid = db.org_id_for_username(p.get("u")) if p.get("u") else (None, None)
+    org_id = db.org_id_for_company(company, uid)
+    if not org_id:
+        raise HTTPException(status_code=404, detail="Could not resolve workspace for billing.")
+
+    # Sandbox: validate + price the charge without touching balances/ledger.
+    if payload.get("dry_run"):
+        return {"ok": True, "agent": slug, "charged": n, "dry_run": True,
+                "balance": db.org_balance(org_id)}
+
+    bal = db.debit_tokens(org_id, n,
+                          action=payload.get("action"), model=payload.get("model"),
+                          user_id=uid, company_name=company,
+                          prompt_tokens=payload.get("prompt_tokens"),
+                          output_tokens=payload.get("output_tokens"),
+                          agent_slug=slug)
+    return {"ok": True, "agent": slug, "charged": n, "balance": bal}
+
+
 # --- Sprint 50 — Developer Portal: register/manage your own remote agent --------
 def _dev_org(username):
     """Resolve the caller's owned workspace for dev-app ownership (owner/manager)."""
@@ -6515,6 +6562,8 @@ async def api_dev_apps_list(username: str = None):
         "category": r.get("category"), "status": r.get("status"),
         "visibility": r.get("visibility"), "client_id": r.get("client_id"),
         "remote_url": (r.get("manifest") or {}).get("remote_url"),
+        "token_policy": r.get("token_policy") or {},
+        "review_status": r.get("review_status") or "none",
     } for r in rows]}
 
 
@@ -6561,6 +6610,79 @@ async def api_dev_apps_rotate_key(payload: dict):
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("error") or "Rotate failed.")
     return {"status": "success", "client_secret": res.get("client_secret")}
+
+
+@app.post("/api/dev/apps/billing")
+async def api_dev_apps_billing(payload: dict):
+    """Set an owned app's billing: chargeable on/off + optional flat credits_per_action."""
+    org_id, _ = _dev_org(payload.get("username"))
+    res = db.set_app_billing(payload.get("slug"), org_id,
+                             chargeable=payload.get("chargeable"),
+                             credits_per_action=payload.get("credits_per_action"))
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "Billing update failed.")
+    return {"status": "success", "token_policy": res.get("token_policy")}
+
+
+@app.get("/api/dev/apps/usage")
+async def api_dev_apps_usage(username: str = None, slug: str = None):
+    """Usage/earnings for one of the caller's apps, across all workspaces that use it."""
+    org_id, _ = _dev_org(username)
+    res = db.dev_app_usage(slug, org_id)
+    if res is None:
+        raise HTTPException(status_code=404, detail="App not found.")
+    return {"status": "success", "slug": slug, **res}
+
+
+@app.post("/api/dev/apps/test-sso")
+async def api_dev_apps_test_sso(payload: dict):
+    """Sandbox: mint an app-scoped SSO token for the caller and verify it round-trips
+    — proves the app's signing_key wiring without a deploy. Use the returned token
+    with POST /api/agents/usage {dry_run:true} to test a charge."""
+    org_id, _ = _dev_org(payload.get("username"))
+    slug = payload.get("slug")
+    if not db.get_dev_app(slug, org_id):
+        raise HTTPException(status_code=404, detail="App not found.")
+    auth = db.get_agent_auth(slug)
+    if not auth:
+        raise HTTPException(status_code=400, detail="App has no signing key yet.")
+    token = _sso_sign({"u": payload.get("username") or "",
+                       "c": payload.get("company_name") or "",
+                       "kid": auth["client_id"],
+                       "exp": int(_ssotime.time()) + _SSO_TTL},
+                      auth["signing_key"].encode())
+    claims = _sso_verify(token)
+    return {"status": "success", "ok": claims is not None, "token": token, "claims": claims}
+
+
+@app.post("/api/dev/apps/request-publish")
+async def api_dev_apps_request_publish(payload: dict):
+    """Developer requests public listing; a super_admin approves it."""
+    org_id, uid = _dev_org(payload.get("username"))
+    res = db.request_publish(payload.get("slug"), org_id, user_id=uid)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "Request failed.")
+    return {"status": "success"}
+
+
+@app.get("/api/admin/publish-queue")
+async def api_admin_publish_queue(username: str = None):
+    if not _is_super_admin(username):
+        raise HTTPException(status_code=403, detail="Forbidden.")
+    return {"status": "success", "apps": db.publish_queue()}
+
+
+@app.post("/api/admin/publish-decision")
+async def api_admin_publish_decision(payload: dict):
+    username = payload.get("username")
+    if not _is_super_admin(username):
+        raise HTTPException(status_code=403, detail="Forbidden.")
+    uid, _ = _resolve_caller(username)
+    res = db.decide_publish(payload.get("slug"), bool(payload.get("approve")),
+                            reviewer_user_id=uid, note=payload.get("note"))
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "Decision failed.")
+    return {"status": "success"}
 
 
 # =============================================================================
