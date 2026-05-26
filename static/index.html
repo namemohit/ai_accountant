@@ -3352,8 +3352,11 @@
                 if (typeof _fetchInstalled === 'function' && !(window.__installedAgents && window.__installedAgents.length)) {
                     try { await _fetchInstalled(); } catch(_) {}
                 }
-                const tile = (icon, name, sub, onclick, slug) =>
-                    `<div class="app-tile"${slug ? ` data-agent-slug="${escapeHtml(slug)}" title="Open · long-press or right-click to remove"` : ''} onclick="${onclick}"><div class="at-icon">${icon}</div>` +
+                const tile = (icon, name, sub, onclick, slug, badge) =>
+                    `<div class="app-tile"${slug ? ` data-agent-slug="${escapeHtml(slug)}" title="Open · long-press or right-click to manage"` : ''} onclick="${onclick}">` +
+                    (slug ? `<button class="at-remove" aria-label="Remove">✕</button>` : '') +
+                    (badge ? `<span class="at-badge" title="Opens in Tally Agent">${badge}</span>` : '') +
+                    `<div class="at-icon">${icon}</div>` +
                     `<div class="at-name">${escapeHtml(name)}</div><div class="at-sub">${escapeHtml(sub)}</div></div>`;
                 // Sprint 81 — fixed launcher order: Create task · <agents> · Store · Upload · Wallet · (Data Analyst SA) · Settings.
                 const tiles = [];
@@ -3363,9 +3366,9 @@
                     tile(a.icon || '🧩', a.name || a.slug, a.tagline || 'Open app', `enterAgent('${escapeHtml(a.slug)}')`, a.slug)));
                 // Quick-access Tally shortcuts (only when the Tally agent is installed).
                 if (window.__agentBySlug && window.__agentBySlug['ai-accountant']) {
-                    tiles.push(tile('🧾', 'Create voucher', 'New entry in Tally', "openVoucherChat()"));
-                    tiles.push(tile('📷', 'Scan voucher', 'Snap a bill → voucher', "_aiaccScan()"));
-                    tiles.push(tile('💬', 'Chat', 'Ask your Tally agent', "showView('chat')"));
+                    tiles.push(tile('🧾', 'Create voucher', 'New entry in Tally', "openVoucherChat()", null, '🧮'));
+                    tiles.push(tile('📷', 'Scan voucher', 'Snap a bill → voucher', "_aiaccScan()", null, '🧮'));
+                    tiles.push(tile('💬', 'Chat', 'Ask your Tally agent', "showView('chat')", null, '🧮'));
                 }
                 tiles.push(tile('🛍️', 'Store', 'Get more apps', "showView('store')"));
                 tiles.push(tile('📎', 'Files', 'Files for this company', "showView('uploads')"));
@@ -3413,13 +3416,45 @@
         }
         // Sprint 85 — Android-launcher-style uninstall: long-press (touch) or right-click
         // (desktop) an agent tile → confirm → remove from this workspace.
+        // Phone-style edit/jiggle mode: long-press / right-click an app tile → enter edit
+        // mode (tiles jiggle + show a ✕); tap ✕ to remove, "Done" to exit.
+        function _enterAppsEdit() {
+            if (typeof haptic === 'function') haptic();
+            document.body.classList.add('apps-edit');
+            let done = document.getElementById('apps-edit-done');
+            if (!done) {
+                done = document.createElement('button');
+                done.id = 'apps-edit-done'; done.textContent = 'Done';
+                done.onclick = _exitAppsEdit;
+                document.body.appendChild(done);
+            }
+            done.style.display = 'block';
+        }
+        function _exitAppsEdit() {
+            document.body.classList.remove('apps-edit');
+            const done = document.getElementById('apps-edit-done');
+            if (done) done.style.display = 'none';
+        }
         function _wireHomeTileUninstall() {
+            const grid = document.getElementById('home-app-grid');
+            // Capture-phase guard: while editing, a tap on a tile body must NOT open the app
+            // (only the ✕ acts). Wire once.
+            if (grid && !grid.__editGuard) {
+                grid.__editGuard = true;
+                grid.addEventListener('click', (e) => {
+                    if (!document.body.classList.contains('apps-edit')) return;
+                    if (e.target.closest('.at-remove')) return;   // let ✕ through
+                    e.preventDefault(); e.stopPropagation();
+                }, true);
+            }
             document.querySelectorAll('#home-app-grid .app-tile[data-agent-slug]').forEach(el => {
                 const slug = el.getAttribute('data-agent-slug');
                 const name = (el.querySelector('.at-name') || {}).textContent || slug;
-                el.oncontextmenu = (e) => { e.preventDefault(); _homeUninstall(slug, name); };
+                el.oncontextmenu = (e) => { e.preventDefault(); _enterAppsEdit(); };
+                const rm = el.querySelector('.at-remove');
+                if (rm) rm.onclick = (e) => { e.preventDefault(); e.stopPropagation(); _homeUninstall(slug, name); };
                 let timer = null, moved = false;
-                el.addEventListener('touchstart', () => { moved = false; timer = setTimeout(() => { if (!moved) _homeUninstall(slug, name); }, 600); }, { passive: true });
+                el.addEventListener('touchstart', () => { moved = false; timer = setTimeout(() => { if (!moved) _enterAppsEdit(); }, 600); }, { passive: true });
                 el.addEventListener('touchmove', () => { moved = true; clearTimeout(timer); }, { passive: true });
                 el.addEventListener('touchend', () => clearTimeout(timer), { passive: true });
             });
