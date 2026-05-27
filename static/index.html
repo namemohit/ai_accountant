@@ -10544,6 +10544,7 @@
         }
 
         // ── Mobile chat master/detail: tap Chat → list; open/new → conversation ──
+        function _isMobileView() { return window.matchMedia('(max-width:768px)').matches; }
         function _chatMobileList() {
             document.body.classList.add('chatm-list');
             document.body.classList.remove('chatm-convo');
@@ -14529,7 +14530,7 @@
             const hash = window.location.hash.substring(1); // Remove '#'
             if (!hash) {
                 showView('chat', true);
-                startNewChat(true);
+                if (!_isMobileView()) startNewChat(true);   // mobile lands on the chat LIST
                 return;
             }
 
@@ -14542,7 +14543,7 @@
             } else {
                 if (hash === 'chat') {
                     showView('chat', true);
-                    startNewChat(true);
+                    if (!_isMobileView()) startNewChat(true);   // mobile stays on the LIST
                 } else if (hash === 'masters') {
                     // Sprint 27 — URL alias for the internal 'schema' view
                     showView('schema', true);
