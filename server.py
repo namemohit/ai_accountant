@@ -4023,12 +4023,16 @@ async def bank_ledger_options(company_id: str = None, company_name: str = None):
 
 
 @app.post("/api/parties/create")
-async def create_party_endpoint(payload: dict):
+async def create_party_endpoint(payload: dict, background_tasks: BackgroundTasks = None):
     """Add a new party to the company's ledger master so it appears in the
     Bank-Reco party dropdown for all future rows. Body: {company_name, company_id?,
     name, group?}. group defaults to 'Sundry Debtors' (customer); pass
     'Sundry Creditors' for a vendor. Does NOT post to Tally — that happens when a
-    voucher referencing the party is posted."""
+    voucher referencing the party is posted.
+
+    Also TEACHES the RAG store this party (embed_party) so the AI's party
+    suggestions improve and it shows in Training Progress — i.e. the AI learns
+    from each party a human adds."""
     try:
         company_name = (payload.get("company_name") or "").strip()
         name = (payload.get("name") or "").strip()
@@ -4041,6 +4045,15 @@ async def create_party_endpoint(payload: dict):
         res = db.add_party_ledger(company_name, name, group=group, company_id=company_id)
         if res.get("status") != "success":
             raise HTTPException(status_code=500, detail=res.get("message", "add party failed"))
+        # Learn it into the RAG store (background — keeps the add snappy).
+        try:
+            if background_tasks is not None:
+                background_tasks.add_task(db.embed_party, company_name, name,
+                                         get_embedding, company_id, payload.get("gstin"))
+            else:
+                db.embed_party(company_name, name, get_embedding, company_id, payload.get("gstin"))
+        except Exception as _e:
+            print(f"[create_party] embed_party error: {_e}", flush=True)
         return res
     except HTTPException:
         raise

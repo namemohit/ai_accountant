@@ -9192,6 +9192,44 @@ def embed_confirmed_voucher(company_name, voucher, embed_fn, company_id=None):
         cur.close(); conn.close()
     return counts
 
+def embed_party(company_name, name, embed_fn, company_id=None, gstin=None):
+    """Teach the RAG store a single party (e.g. one a human added in Bank Reco).
+    Inserts a tally_master_party row into knowledge_base — same shape/kb_key as
+    embed_confirmed_voucher — so the party (a) shows in Training Progress and
+    (b) becomes a retrieval candidate for the AI's party suggestions. Idempotent
+    by kb_key. embed_fn(text)->list[float] is supplied by the caller."""
+    name = (name or "").strip()
+    if not embed_fn or not name:
+        return {"skipped": True}
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        kb_key = f"party::{name}"
+        cur.execute("SELECT 1 FROM knowledge_base WHERE type='tally_master_party' "
+                    "AND data->>'company_name'=%s AND data->>'kb_key'=%s LIMIT 1",
+                    (company_name, kb_key))
+        if cur.fetchone():
+            return {"skipped": True, "reason": "already_learned"}
+        text = f"Party '{name}' (added by user)."
+        try:
+            emb = embed_fn(text)
+        except Exception as e:
+            print(f"[embed_party] embed err {name}: {e}"); return {"error": str(e)}
+        if not emb:
+            return {"error": "no_embedding"}
+        emb_str = "[" + ",".join(map(str, emb)) + "]"
+        p = {"party": name, "gstin": gstin, "company_name": company_name,
+             "company_id": str(company_id) if company_id else None,
+             "kb_key": kb_key, "content": text, "source": "user_added"}
+        cur.execute("INSERT INTO knowledge_base (type, data, embedding) VALUES (%s, %s::jsonb, %s)",
+                    ("tally_master_party", json.dumps(p), emb_str))
+        conn.commit()
+        return {"learned": True}
+    except Exception as e:
+        conn.rollback(); print(f"[embed_party] {e}"); return {"error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+
 def embed_tally_master(company_id, company_name, embed_fn, batch_log=None):
     """Embed Tally master data (ledgers, parties, vouchers, stock items) into knowledge_base
     so RAG / semantic search can recall them later.
