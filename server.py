@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "175"
+APP_VERSION = "176"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -3225,13 +3225,18 @@ async def list_bank_transactions_endpoint(
 
 
 @app.patch("/api/bank-transactions/{tx_id}")
-async def patch_bank_transaction(tx_id: str, payload: dict):
+async def patch_bank_transaction(tx_id: str, payload: dict, background_tasks: BackgroundTasks = None):
     try:
+        party_edited = "party" in payload
+        party_val = (payload.get("party") or "").strip() if party_edited else None
         # If user is manually setting party/head, bump confidence to 1.0 and status to ai_filled
         if any(k in payload for k in ("party", "head", "bank_ledger")):
             payload.setdefault("confidence", 1.0)
             payload.setdefault("status", "ai_filled")
             payload.setdefault("rationale", "Manual override by user")
+        # A manual party edit makes the row human-curated → it's preserved by re-runs.
+        if party_edited:
+            payload["human_touched"] = True
         # P0 FIX: scope the edit to the caller's company (tenant isolation).
         _cid = payload.get("company_id")
         if not _cid and payload.get("company_name"):
@@ -3239,6 +3244,22 @@ async def patch_bank_transaction(tx_id: str, payload: dict):
         row = db.update_bank_transaction(tx_id, payload, company_id=_cid)
         if not row:
             raise HTTPException(status_code=404, detail="bank_transaction not found (or not in your company)")
+        # Learn (or unlearn) the bank-narration → party association so re-runs reuse
+        # it. Runs in the background to keep the inline save snappy.
+        learning = None
+        if party_edited:
+            cname = payload.get("company_name") or row.get("company_name")
+            narr = row.get("description") or ""
+            if party_val:
+                learning = "learning"
+                if background_tasks is not None:
+                    background_tasks.add_task(db.learn_bank_party, cname, narr, party_val,
+                                             get_embedding, _cid, str(tx_id))
+                else:
+                    db.learn_bank_party(cname, narr, party_val, get_embedding, _cid, str(tx_id))
+            else:
+                learning = "unlearned"
+                db.unlearn_bank_party(cname, str(tx_id))
         # JSON-friendly
         for k in ("date", "value_date", "created_at", "updated_at"):
             if row.get(k) is not None: row[k] = str(row[k])
@@ -3246,7 +3267,7 @@ async def patch_bank_transaction(tx_id: str, payload: dict):
             if row.get(k) is not None: row[k] = float(row[k])
         for k in ("id", "source_record_id", "source_file_id", "linked_id", "company_id"):
             if row.get(k) is not None: row[k] = str(row[k])
-        return {"status": "success", "data": row}
+        return {"status": "success", "data": row, "learning": learning}
     except HTTPException:
         raise
     except Exception as e:

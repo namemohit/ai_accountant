@@ -9258,6 +9258,60 @@ def embed_party(company_name, name, embed_fn, company_id=None, gstin=None):
         cur.close(); conn.close()
 
 
+def learn_bank_party(company_name, narration, party, embed_fn, company_id=None, line_id=None):
+    """Learn a bank-narration → party association so the reconciler proposes this
+    party for SIMILAR narrations on the next re-run. Embeds the narration text under
+    type tally_master_party (value = party), keyed to the source line so it can be
+    cleanly unlearned if the user clears the cell. Re-setting a line's party replaces
+    its prior learning. Returns {learned|skipped|error}."""
+    narration = (narration or "").strip(); party = (party or "").strip()
+    if not embed_fn or not party or not narration:
+        return {"skipped": True}
+    kb_key = f"bankline::{line_id}" if line_id else f"banknarr::{narration[:80]}::{party}"
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        # Drop any prior learning for this line (the party may have changed).
+        cur.execute("DELETE FROM knowledge_base WHERE type='tally_master_party' "
+                    "AND data->>'company_name'=%s AND data->>'kb_key'=%s", (company_name, kb_key))
+        try:
+            emb = embed_fn(narration)
+        except Exception as e:
+            conn.rollback(); print(f"[learn_bank_party] embed err: {e}"); return {"error": str(e)}
+        if not emb:
+            conn.rollback(); return {"error": "no_embedding"}
+        emb_str = "[" + ",".join(map(str, emb)) + "]"
+        data = {"party": party, "company_name": company_name,
+                "company_id": str(company_id) if company_id else None,
+                "kb_key": kb_key, "content": narration, "narration": narration,
+                "source": "bank_manual"}
+        cur.execute("INSERT INTO knowledge_base (type, data, embedding) VALUES (%s, %s::jsonb, %s)",
+                    ("tally_master_party", json.dumps(data), emb_str))
+        conn.commit()
+        return {"learned": True}
+    except Exception as e:
+        conn.rollback(); print(f"[learn_bank_party] {e}"); return {"error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+
+def unlearn_bank_party(company_name, line_id):
+    """Remove the bank-narration→party learning that a line created (on clear). Does
+    NOT touch the party's master ledger entry — only this line's learned association."""
+    if not line_id:
+        return {"deleted": 0}
+    kb_key = f"bankline::{line_id}"
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM knowledge_base WHERE type='tally_master_party' "
+                    "AND data->>'company_name'=%s AND data->>'kb_key'=%s", (company_name, kb_key))
+        n = cur.rowcount; conn.commit()
+        return {"deleted": n}
+    except Exception as e:
+        conn.rollback(); print(f"[unlearn_bank_party] {e}"); return {"error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+
 def embed_tally_master(company_id, company_name, embed_fn, batch_log=None):
     """Embed Tally master data (ledgers, parties, vouchers, stock items) into knowledge_base
     so RAG / semantic search can recall them later.

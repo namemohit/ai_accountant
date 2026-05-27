@@ -2022,4 +2022,20 @@ input[type="text"].ya:focus, select.ya:focus {
 .party-empty { color: #64748b; cursor: default; }
 .party-empty:hover { background: transparent; }
 
+/* Curated (committed) party — collapsed display chip + learned note */
+.party-cellwrap { width: 170px; }
+.party-display { display: flex; align-items: center; gap: 6px; }
+.party-display .party-name {
+  color: #e2e8f0; font-size: 0.8rem; cursor: pointer;
+  border-bottom: 1px dashed rgba(148,163,184,0.5);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 138px;
+}
+.party-display .party-name:hover { color: #fff; border-bottom-color: #38bdf8; }
+.party-clear {
+  background: transparent; color: #94a3b8; border: none; cursor: pointer;
+  font-size: 0.78rem; line-height: 1; padding: 2px 4px; border-radius: 4px;
+}
+.party-clear:hover { color: #ef4444; background: rgba(239,68,68,0.12); }
+.party-learned { margin-top: 3px; font-size: 0.66rem; color: #10b981; }
+
 
