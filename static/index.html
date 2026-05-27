@@ -924,15 +924,6 @@
                 <p style="color: #94a3b8;">Party Master and Item Master power every downstream rule — GST, TDS, ITR, HSN summaries. Keep them complete and accurate.</p>
             </header>
 
-            <!-- Sprint 27 — AI Gap Scan card for masters -->
-            <div id="master-gap-card" style="background: rgba(56,189,248,0.05); border:1px solid rgba(56,189,248,0.25); border-radius:8px; padding:12px 14px; margin: 14px 0;">
-                <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-                    <button id="master-ai-scan-btn" onclick="runMasterAIScan()" style="background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%); color:white; border:none; padding:8px 14px; border-radius:6px; font-weight:600; font-size:0.85rem; cursor:pointer;">🔬 Run AI Master Gap Scan</button>
-                    <span style="color:#94a3b8; font-size:0.78rem;">AI walks Party + Item master. Proposes fills for missing GSTIN / PAN / Place of Supply / HSN / GST rate / Unit / Standard Rate. Review inline — nothing is changed until you click Apply.</span>
-                </div>
-                <div id="master-ai-scan-status" style="margin-top:8px; font-size:0.8rem; color:#cbd5e1;"></div>
-            </div>
-
             <div id="schema-tabbar" style="display: flex; gap: 16px; margin-top: 20px; border-bottom: 1px solid var(--border); padding-bottom: 2px; margin-bottom: 24px;">
                 <button class="schema-tab-btn active" id="schema-tab-coa" onclick="switchSchemaSubView('coa')" style="background: none; border: none; color: var(--primary); font-weight: 600; font-size: 0.95rem; cursor: pointer; padding: 10px 20px; border-bottom: 2px solid var(--accent); transition: all 0.2s;">📋 Chart of Accounts</button>
                 <button class="schema-tab-btn" id="schema-tab-parties" onclick="switchSchemaSubView('parties')" style="background: none; border: none; color: #94a3b8; font-weight: 600; font-size: 0.95rem; cursor: pointer; padding: 10px 20px; transition: all 0.2s;">👥 Party Master Directory</button>
@@ -964,8 +955,10 @@
                                 <option value="">🤖 AI Gap: all</option>
                             </select>
                             <button class="btn" onclick="openAddPartyModal()" style="padding: 6px 14px; border-radius: 6px; font-weight: bold; background: var(--accent); color: white; border: none; cursor: pointer; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 6px;"><i class="fas fa-plus"></i> Add Party</button>
+                            <button id="master-ai-scan-btn" onclick="runMasterAIScan()" title="AI walks Party + Item master and proposes fills for missing GSTIN / PAN / Place of Supply / HSN / GST rate / Unit / Standard Rate. Review inline — nothing changes until you Apply." style="padding: 6px 14px; border-radius: 6px; font-weight: 600; background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%); color: white; border: none; cursor: pointer; font-size: 0.85rem;">🔬 Run AI Master Gap Scan</button>
                         </div>
                     </div>
+                    <div id="master-ai-scan-status" style="font-size: 0.75rem; color: #cbd5e1; margin-top: 8px; text-align: right;"></div>
                 </div>
 
                 <!-- Scrollable table card with sticky header (matches Bank Reco) -->
