@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "179"
+APP_VERSION = "180"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -4272,6 +4272,12 @@ async def create_party_endpoint(payload: dict, background_tasks: BackgroundTasks
         res = db.add_party_ledger(company_name, name, group=group, company_id=company_id)
         if res.get("status") != "success":
             raise HTTPException(status_code=500, detail=res.get("message", "add party failed"))
+        # Also make it a first-class Party Master row (editable: GSTIN/PAN/bank later),
+        # so a party added in Bank Reco shows up in the Party Master directory too.
+        try:
+            db.save_or_update_party(company_name, name, gstin=payload.get("gstin"))
+        except Exception as _pe:
+            print(f"[create_party] save_or_update_party error: {_pe}", flush=True)
         # Learn it into the RAG store (background — keeps the add snappy).
         try:
             if background_tasks is not None:

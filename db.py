@@ -7924,11 +7924,40 @@ def save_or_update_party(company_name, name, gstin=None, address=None, bank_name
         conn.close()
 
 def get_parties(company_name="Acme Corp"):
+    """Party Master directory = the UNION of the `parties` table and the Sundry
+    Debtor/Creditor ledgers in `tally_ledgers` (where Bank-Reco-added parties live),
+    de-duplicated case-insensitively by name. The richer `parties` row wins when a
+    name exists in both; tally_ledgers-only names are mapped into the same shape so a
+    party added in Bank Reco shows up here too."""
     conn = get_conn()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cursor.execute("SELECT * FROM parties WHERE company_name = %s ORDER BY name ASC", (company_name,))
-        return cursor.fetchall()
+        rows = cursor.fetchall()
+        seen = {(r.get("name") or "").strip().lower() for r in rows}
+        # Pull Sundry Debtor/Creditor ledgers not already represented in `parties`.
+        cursor.execute("""
+            SELECT name, gstin, pan, address FROM tally_ledgers
+            WHERE company_name = %s
+              AND (LOWER(COALESCE(parent_group,'')) LIKE '%%sundry%%'
+                   OR LOWER(COALESCE(parent_group,'')) LIKE '%%debtor%%'
+                   OR LOWER(COALESCE(parent_group,'')) LIKE '%%creditor%%')
+            ORDER BY name ASC
+        """, (company_name,))
+        for L in cursor.fetchall():
+            nm = (L.get("name") or "").strip()
+            if not nm or nm.lower() in seen:
+                continue
+            seen.add(nm.lower())
+            rows.append({
+                "id": None, "company_name": company_name, "name": nm,
+                "gstin": L.get("gstin"), "address": L.get("address"),
+                "bank_name": None, "account_number": None, "ifsc_code": None,
+                "pan": L.get("pan"), "email": None, "phone": None,
+                "created_at": None, "company_id": None,
+            })
+        rows.sort(key=lambda r: (r.get("name") or "").lower())
+        return rows
     except Exception as e:
         print(f"Error fetching parties: {e}")
         return []

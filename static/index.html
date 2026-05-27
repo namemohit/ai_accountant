@@ -950,31 +950,29 @@
                 <div id="kb-ledgers"></div>
             </div>
             
-            <div id="schema-subview-parties" class="card" style="display: none;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px;">
-                    <div>
-                        <h3 style="margin-bottom: 4px;">👥 Business Party Profiles</h3>
-                        <p style="color: #94a3b8; font-size: 0.85rem;">Autonomous accounts learned from invoice headers, containing verified GSTINs and bank payout configurations.</p>
-                    </div>
-                    <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
-                        <button type="button" class="filter-toggle" onclick="toggleFilters(this)">
-                            <span><i class="fas fa-sliders-h"></i> Filters <span class="filter-count"></span></span>
-                            <i class="fas fa-chevron-down"></i>
-                        </button>
-                        <div class="filter-body" style="gap: 12px; align-items: center;">
-                        <input type="text" id="party-search" placeholder="Search parties..." oninput="filterPartyMaster()" style="padding: 8px 14px; border-radius: 6px; background: var(--bg-light); color: white; border: 1px solid var(--border); font-size: 0.85rem; outline: none; width: 220px;">
-                        <select id="party-ai-gap-filter" onchange="filterPartyMaster()" title="Filter to parties with a pending AI suggestion" style="padding: 8px 12px; border-radius: 6px; background: var(--bg-light); color: white; border: 1px solid var(--border); font-size: 0.85rem;">
-                            <option value="">🤖 AI Gap: all</option>
-                        </select>
+            <div id="schema-subview-parties" class="card" style="display: none; padding-top: 12px;">
+                <!-- Sticky controls bar (matches Bank Reco chrome) -->
+                <div style="position: sticky; top: 0; z-index: 5; background: var(--bg-surface, var(--card-bg)); padding: 4px 0 12px; border-bottom: 1px solid var(--border); margin-bottom: 14px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+                        <div>
+                            <h3 style="margin-bottom: 4px;">👥 Business Party Profiles</h3>
+                            <p style="color: #94a3b8; font-size: 0.85rem; margin: 0;">Sundry debtors &amp; creditors — learned from invoices, bank reco, and Tally. GSTIN, PAN &amp; bank payout for GST/TDS.</p>
                         </div>
-                        <button class="btn" onclick="openAddPartyModal()" style="padding: 8px 14px; border-radius: 6px; font-weight: bold; background: var(--accent); color: white; border: none; cursor: pointer; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 6px;"><i class="fas fa-plus"></i> Add Party</button>
+                        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                            <input type="text" id="party-search" placeholder="🔍 Search parties…" oninput="filterPartyMaster()" style="padding: 6px 12px; border-radius: 6px; background: var(--bg-light); color: white; border: 1px solid var(--border); font-size: 0.85rem; outline: none; width: 240px;">
+                            <select id="party-ai-gap-filter" onchange="filterPartyMaster()" title="Filter to parties with a pending AI suggestion" style="padding: 6px 12px; border-radius: 6px; background: var(--bg-light); color: white; border: 1px solid var(--border); font-size: 0.85rem;">
+                                <option value="">🤖 AI Gap: all</option>
+                            </select>
+                            <button class="btn" onclick="openAddPartyModal()" style="padding: 6px 14px; border-radius: 6px; font-weight: bold; background: var(--accent); color: white; border: none; cursor: pointer; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 6px;"><i class="fas fa-plus"></i> Add Party</button>
+                        </div>
                     </div>
                 </div>
-                
-                <div style="overflow-x: auto;">
+
+                <!-- Scrollable table card with sticky header (matches Bank Reco) -->
+                <div style="overflow: auto; max-height: calc(100vh - 260px); border: 1px solid var(--border); border-radius: 8px;">
                     <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem; text-align: left;">
-                        <thead>
-                            <tr style="border-bottom: 1px solid var(--border); color: #94a3b8;">
+                        <thead style="position: sticky; top: 0; background: var(--bg-surface); z-index: 1;">
+                            <tr style="border-bottom: 2px solid var(--border); color: #94a3b8;">
                                 <th style="padding: 12px 10px;">Party Name</th>
                                 <th style="padding: 12px 10px;">GSTIN</th>
                                 <th style="padding: 12px 10px;">PAN</th>
@@ -13855,9 +13853,17 @@
             }
         }
 
-        async function loadPartyMaster() {
+        async function loadPartyMaster(force) {
             const tbody = document.getElementById('party-master-tbody');
             if (!tbody) return;
+            // Guard: collapse the rapid duplicate calls (switchSchemaSubView + showView
+            // wrapper + #masters→#schema hashchange) into a single load so the table
+            // doesn't visibly flash/refresh on its own.
+            if (!force) {
+                if (window._partyMasterLoading) return;
+                if (window._partyMasterLoadedAt && (Date.now() - window._partyMasterLoadedAt) < 1500) return;
+            }
+            window._partyMasterLoading = true;
             tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding: 20px; color: #94a3b8;"><i class="fas fa-spinner fa-spin"></i> Loading party master directory...</td></tr>`;
             
             try {
@@ -13883,6 +13889,9 @@
             } catch (err) {
                 console.error("Error loading parties:", err);
                 tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding: 20px; color: #ef4444;"><i class="fas fa-exclamation-triangle"></i> Error loading directory: ${err.message}</td></tr>`;
+            } finally {
+                window._partyMasterLoading = false;
+                window._partyMasterLoadedAt = Date.now();
             }
         }
 
