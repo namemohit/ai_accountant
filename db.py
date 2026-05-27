@@ -3394,7 +3394,9 @@ def save_correction(field, original, corrected, party_name=None, embedding=None,
         "original": original,
         "corrected": corrected,
         "party_name": party_name,
-        "company_name": company_name
+        "company_name": company_name,
+        # exact embedded text (RAG transparency) — what the correction memory matches on
+        "content": f"For {party_name or 'any party'}: {field} should be '{corrected}' (not '{original}')."
     }
     
     if embedding:
@@ -3567,6 +3569,90 @@ def recent_training(company_name="Acme Corp", limit=25):
             "created_at": (r.get("created_at").isoformat() if r.get("created_at") else None),
         })
     return out
+
+def _reconstruct_kb_content(kb_type, d):
+    """Human-readable text for a knowledge_base row that predates stored `content`."""
+    d = d or {}
+    if kb_type == 'tally_master_ledger':
+        s = f"Ledger '{d.get('name','?')}'"
+        if d.get('parent_group'): s += f" under group '{d['parent_group']}'"
+        if d.get('gstin'): s += f" · GSTIN {d['gstin']}"
+        return s
+    if kb_type == 'tally_master_party':
+        n = d.get('party') or d.get('name') or '?'
+        s = f"Party '{n}'"
+        if d.get('transaction_count'): s += f" · {d['transaction_count']} transactions"
+        return s
+    if kb_type == 'tally_master_item':
+        s = f"Item '{d.get('name','?')}'"
+        hsn = d.get('hsn') or d.get('hsn_code')
+        if hsn: s += f" · HSN {hsn}"
+        if d.get('gst_rate'): s += f" · GST {d['gst_rate']}%"
+        return s
+    if kb_type == 'tally_master_narration':
+        if d.get('narration'): return f"Narration: {d['narration']}"
+        return (f"Narration on voucher #{d.get('voucher_number','?')} for "
+                f"{d.get('party','?')} ₹{d.get('amount','')} (older entry — text not stored)")
+    if kb_type == 'correction':
+        return f"{d.get('field','?')}: '{d.get('original','')}' → '{d.get('corrected','')}'"
+    if kb_type == 'bank_reconciliation':
+        return d.get('pattern') or d.get('narration') or d.get('description') or 'Bank-reco pattern'
+    extra = {k: v for k, v in d.items() if k not in ('company_name', 'company_id', 'kb_key', 'content')}
+    return json.dumps(extra)[:200]
+
+
+def list_training_items(company_name, kb_type, limit=100, offset=0):
+    """The actual learned entries of one type (content + whether vectorized)."""
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""SELECT data, (embedding IS NOT NULL) AS vectorized, created_at
+                       FROM knowledge_base WHERE data->>'company_name'=%s AND type=%s
+                       ORDER BY created_at DESC LIMIT %s OFFSET %s""",
+                    (company_name, kb_type, int(limit), int(offset)))
+        out = []
+        for r in cur.fetchall():
+            d = r["data"] or {}
+            out.append({"content": d.get("content") or _reconstruct_kb_content(kb_type, d),
+                        "vectorized": bool(r["vectorized"]),
+                        "created_at": r["created_at"].isoformat() if r.get("created_at") else None})
+        return out
+    finally:
+        cur.close()
+        try: conn.rollback()
+        except Exception: pass
+        pput(conn)
+
+
+def retrieve_training_matches(company_name, query_embedding, kb_type=None, k=8):
+    """RAG preview: nearest learned items to a query embedding (with similarity score)."""
+    if not query_embedding:
+        return []
+    emb = "[" + ",".join(map(str, query_embedding)) + "]"
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        if kb_type:
+            cur.execute("""SELECT type, data, 1 - (embedding <=> %s::vector) AS score
+                           FROM knowledge_base WHERE data->>'company_name'=%s AND type=%s
+                             AND embedding IS NOT NULL
+                           ORDER BY embedding <=> %s::vector LIMIT %s""",
+                        (emb, company_name, kb_type, emb, int(k)))
+        else:
+            cur.execute("""SELECT type, data, 1 - (embedding <=> %s::vector) AS score
+                           FROM knowledge_base WHERE data->>'company_name'=%s AND embedding IS NOT NULL
+                           ORDER BY embedding <=> %s::vector LIMIT %s""",
+                        (emb, company_name, emb, int(k)))
+        out = []
+        for r in cur.fetchall():
+            d = r["data"] or {}
+            out.append({"type": r["type"], "score": round(float(r["score"] or 0), 3),
+                        "content": d.get("content") or _reconstruct_kb_content(r["type"], d)})
+        return out
+    finally:
+        cur.close()
+        try: conn.rollback()
+        except Exception: pass
+        pput(conn)
+
 
 def get_relevant_corrections(query_embedding, company_name="Acme Corp", limit=5):
     if not query_embedding:
@@ -9044,6 +9130,7 @@ def embed_confirmed_voucher(company_name, voucher, embed_fn, company_id=None):
         emb_str = "[" + ",".join(map(str, emb)) + "]"
         p = dict(payload); p["company_name"] = company_name
         p["company_id"] = str(company_id) if company_id else None; p["kb_key"] = kb_key
+        p["content"] = text   # the exact text that was embedded (RAG transparency)
         cur.execute("INSERT INTO knowledge_base (type, data, embedding) VALUES (%s, %s::jsonb, %s)",
                     (kb_type, json.dumps(p), emb_str))
         return True
@@ -9115,6 +9202,7 @@ def embed_tally_master(company_id, company_name, embed_fn, batch_log=None):
         payload_dict["company_name"] = company_name
         payload_dict["company_id"] = str(company_id) if company_id else None
         payload_dict["kb_key"] = kb_key
+        payload_dict["content"] = text_for_embed   # exact embedded text (RAG transparency)
         cur.execute(
             "INSERT INTO knowledge_base (type, data, embedding) VALUES (%s, %s::jsonb, %s)",
             (kb_type, json.dumps(payload_dict), emb_str),

@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "169"
+APP_VERSION = "170"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -5354,6 +5354,42 @@ async def get_training_progress(request: Request, company_name: str = "Acme Corp
     except Exception as e:
         print(f"[training/progress] {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+_TRAINING_TYPES = ("correction", "tally_master_ledger", "tally_master_party",
+                   "tally_master_item", "tally_master_narration", "bank_reconciliation")
+
+
+@app.get("/api/training/items")
+async def get_training_items(company_name: str = "Acme Corp", type: str = "",
+                             limit: int = 100, offset: int = 0):
+    """Drill into one learning type: the exact embedded content + whether vectorized."""
+    if type not in _TRAINING_TYPES:
+        raise HTTPException(status_code=400, detail="Unknown learning type.")
+    total = db.training_breakdown(company_name).get(type, 0)
+    items = db.list_training_items(company_name, type, limit=min(int(limit), 500), offset=int(offset))
+    return {"status": "success", "type": type, "total": total, "items": items}
+
+
+@app.post("/api/training/retrieve")
+async def post_training_retrieve(payload: dict):
+    """RAG preview: what the memory returns for a query (top matches + similarity)."""
+    company = payload.get("company_name") or "Acme Corp"
+    query = (payload.get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Enter something to test.")
+    kb_type = payload.get("type") or None
+    if kb_type and kb_type not in _TRAINING_TYPES:
+        kb_type = None
+    try:
+        emb = get_embedding(query)
+    except Exception as e:
+        print(f"[training/retrieve] embed: {e}"); emb = None
+    if not emb:
+        raise HTTPException(status_code=503, detail="Could not embed the query right now.")
+    matches = db.retrieve_training_matches(company, emb, kb_type=kb_type, k=int(payload.get("k") or 8))
+    return {"status": "success", "query": query, "matches": matches}
+
 
 @app.post("/training/optimize")
 async def optimize_training_model(payload: dict):

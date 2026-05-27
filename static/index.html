@@ -3740,10 +3740,10 @@
             const cells = Object.keys(_TP_TYPES).map(t => {
                 const meta = _TP_TYPES[t]; const n = (per[t] && per[t].count) != null ? per[t].count : (bd[t] || 0);
                 const tgt = (per[t] && per[t].target) || 0; const tp = (per[t] && per[t].pct) || 0;
-                return `<div style="background:var(--bg-light); border:1px solid var(--border); border-radius:10px; padding:12px 14px;">
+                return `<div onclick="openTrainingItems('${t}')" title="See exactly what's been learned" style="background:var(--bg-light); border:1px solid var(--border); border-radius:10px; padding:12px 14px; cursor:pointer;" onmouseover="this.style.borderColor='var(--primary)'" onmouseout="this.style.borderColor='var(--border)'">
                     <div style="font-size:1.3rem;">${meta.icon}</div>
                     <div style="font-size:1.25rem; font-weight:700; color:#f5f1ec; margin-top:4px;">${n.toLocaleString('en-IN')}<span style="font-size:0.75rem; color:#64748b; font-weight:500;">${tgt ? ' / ' + tgt : ''}</span></div>
-                    <div style="font-size:0.72rem; color:#94a3b8;">${meta.label}</div>
+                    <div style="font-size:0.72rem; color:#94a3b8;">${meta.label} <span style="color:var(--primary-light);">›</span></div>
                     ${tgt ? `<div style="height:5px; background:rgba(255,255,255,0.08); border-radius:4px; margin-top:7px; overflow:hidden;"><div style="height:100%; width:${Math.max(2,tp)}%; background:#4ade80; border-radius:4px;"></div></div>` : ''}
                 </div>`;
             }).join('');
@@ -3785,7 +3785,90 @@
                 h += `<h3 style="margin:22px 0 6px; font-size:1rem;">Recent training</h3>
                     <div class="card" style="color:#64748b; font-size:0.85rem;">Nothing learned yet — correct an AI extraction (the “Learn ✨” button) or sync your Tally masters to start training.</div>`;
             }
+            // Retrieval preview — "open the black box": what the memory recalls for a query.
+            h += `<h3 style="margin:22px 0 6px; font-size:1rem;">🔎 Test what the AI recalls</h3>
+                <div class="card">
+                    <div style="font-size:0.8rem; color:#94a3b8; margin-bottom:8px;">Type a party, narration or transaction phrase — see what the AI would pull from memory (and how strongly). High, relevant matches mean it'll help the answer.</div>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <input id="tp-retrieve-q" placeholder="e.g. payment to Sheet Metal Industries" onkeydown="if(event.key==='Enter')runTrainingRetrieve()" style="flex:1; min-width:200px; padding:9px 12px; background:var(--bg-light); color:#fff; border:1px solid var(--border); border-radius:8px; font-size:0.85rem;">
+                        <button onclick="runTrainingRetrieve()" style="padding:9px 18px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer;">Test</button>
+                    </div>
+                    <div id="tp-retrieve-out" style="margin-top:12px;"></div>
+                </div>`;
             return h;
+        }
+        // Drill-in: list the exact embedded entries for one learning type.
+        async function openTrainingItems(type) {
+            const co = (typeof _activeCompanyName === 'function' && _activeCompanyName()) ||
+                       (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}').company_name||''; } catch(_) { return ''; } })();
+            const meta = _TP_TYPES[type] || { icon:'•', label:type };
+            let ov = document.getElementById('tp-items-modal'); if (ov) ov.remove();
+            ov = document.createElement('div'); ov.id = 'tp-items-modal';
+            ov.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:9999; display:flex; align-items:center; justify-content:center; padding:16px;';
+            ov.onclick = (e) => { if (e.target === ov) ov.remove(); };
+            ov.innerHTML = `<div style="background:var(--bg-surface,#1e1b18); border:1px solid var(--border); border-radius:14px; max-width:620px; width:100%; max-height:85vh; overflow:auto; padding:20px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+                    <h3 style="margin:0; color:#f4f4f5;">${meta.icon} ${escapeHtml(meta.label)}</h3>
+                    <button onclick="document.getElementById('tp-items-modal').remove()" style="background:none;border:none;color:#94a3b8;font-size:1.4rem;cursor:pointer;line-height:1;">×</button>
+                </div>
+                <input id="tp-items-search" oninput="_tpFilterItems()" placeholder="🔍 Search…" style="width:100%; margin-top:12px; padding:8px 11px; background:var(--bg-light); color:#fff; border:1px solid var(--border); border-radius:8px; font-size:0.85rem;">
+                <div id="tp-items-body" style="margin-top:12px; color:#94a3b8; font-size:0.85rem;">Loading…</div>
+            </div>`;
+            document.body.appendChild(ov);
+            try {
+                const r = await fetch(`${API}/api/training/items?company_name=${encodeURIComponent(co)}&type=${encodeURIComponent(type)}&limit=300`);
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || 'Could not load.');
+                window.__tpItems = d.items || [];
+                _tpRenderItems(d.total || (d.items||[]).length);
+            } catch(e) {
+                const b = document.getElementById('tp-items-body'); if (b) b.innerHTML = `<div style="color:#f87171;">${escapeHtml(e.message)}</div>`;
+            }
+        }
+        function _tpRenderItems(total) {
+            const b = document.getElementById('tp-items-body'); if (!b) return;
+            const q = ((document.getElementById('tp-items-search')||{}).value || '').trim().toLowerCase();
+            const all = window.__tpItems || [];
+            const items = q ? all.filter(x => (x.content||'').toLowerCase().includes(q)) : all;
+            if (!all.length) { b.innerHTML = '<div style="color:#64748b;">Nothing learned in this category yet.</div>'; return; }
+            const head = `<div style="font-size:0.74rem; color:#64748b; margin-bottom:8px;">${all.length} shown${total>all.length?` of ${total}`:''} · 🟢 embedded (searchable) · ⚪ not embedded</div>`;
+            b.innerHTML = head + items.map(x => `
+                <div style="padding:9px 0; border-bottom:1px solid rgba(255,255,255,0.05); display:flex; gap:10px; align-items:flex-start;">
+                    <span title="${x.vectorized?'Embedded — part of the searchable memory':'Not embedded yet'}">${x.vectorized?'🟢':'⚪'}</span>
+                    <div style="flex:1; min-width:0;">
+                        <div style="font-size:0.84rem; color:#e2e8f0; word-break:break-word; font-family:ui-monospace,Menlo,monospace;">${escapeHtml(x.content||'(no content)')}</div>
+                        <div style="font-size:0.7rem; color:#64748b; margin-top:2px;">${_tpAgo(x.created_at)}</div>
+                    </div>
+                </div>`).join('') || '<div style="color:#64748b;">No matches.</div>';
+        }
+        function _tpFilterItems() { _tpRenderItems((window.__tpItems||[]).length); }
+        async function runTrainingRetrieve() {
+            const co = (typeof _activeCompanyName === 'function' && _activeCompanyName()) ||
+                       (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}').company_name||''; } catch(_) { return ''; } })();
+            const q = ((document.getElementById('tp-retrieve-q')||{}).value || '').trim();
+            const out = document.getElementById('tp-retrieve-out'); if (!out) return;
+            if (!q) { out.innerHTML = '<span style="color:#f87171; font-size:0.82rem;">Type something to test.</span>'; return; }
+            out.innerHTML = '<span style="color:#64748b; font-size:0.82rem;">Searching memory…</span>';
+            try {
+                const r = await fetch(`${API}/api/training/retrieve`, { method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({ company_name: co, query: q, k: 8 }) });
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || 'Search failed.');
+                const m = d.matches || [];
+                if (!m.length) { out.innerHTML = '<div style="color:#64748b; font-size:0.84rem;">No matches — nothing in memory is similar to that yet, so it won\'t influence the answer.</div>'; return; }
+                out.innerHTML = m.map(x => {
+                    const pct = Math.round((x.score||0)*100);
+                    const col = pct>=75?'#4ade80':pct>=55?'#fbbf24':'#94a3b8';
+                    const meta = _TP_TYPES[x.type] || { icon:'•', label:x.type };
+                    return `<div style="display:flex; gap:10px; align-items:flex-start; padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.05);">
+                        <span style="font-weight:700; color:${col}; font-size:0.82rem; min-width:42px;">${pct}%</span>
+                        <div style="flex:1; min-width:0;">
+                            <div style="font-size:0.83rem; color:#e2e8f0; word-break:break-word;">${escapeHtml(x.content||'')}</div>
+                            <div style="font-size:0.7rem; color:#64748b;">${meta.icon} ${escapeHtml(meta.label)}</div>
+                        </div>
+                    </div>`;
+                }).join('');
+            } catch(e) { out.innerHTML = `<span style="color:#f87171; font-size:0.82rem;">${escapeHtml(e.message)}</span>`; }
         }
         function homeNewChat() {
             if (typeof enterAgent === 'function') enterAgent('ai-accountant');
