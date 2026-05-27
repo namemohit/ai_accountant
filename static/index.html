@@ -6785,16 +6785,10 @@
                 if (view === 'vouchers') {
                     setTimeout(_loadAiSuggestionsForVouchers, 350);
                 }
-                // Sprint 27 — load master suggestions when entering the Masters view
-                if (view === 'schema') {
-                    setTimeout(async () => {
-                        if (typeof _loadMasterAiSuggestions === 'function') {
-                            await _loadMasterAiSuggestions();
-                            if (typeof loadPartyMaster === 'function') loadPartyMaster();
-                            if (typeof loadItemMaster === 'function') loadItemMaster();
-                        }
-                    }, 350);
-                }
+                // Note: the Masters view loads its active section itself via
+                // _renderMastersSection → switchSchemaSubView → loadPartyMaster/
+                // loadItemMaster (which also pulls AI suggestions). No extra reload
+                // here — that caused the list to re-fetch/flash repeatedly on entry.
                 return r;
             };
         }
@@ -13890,15 +13884,13 @@
                 
                 if (result.status === 'success') {
                     allPartiesData = result.parties || [];
-                    renderPartyTable(allPartiesData);
-                    // Sprint 34 — ensure AI suggestions are loaded so chips +
-                    // gap-filter dropdown populate, then re-render once.
+                    // Load AI suggestions FIRST (if not cached) so we render the table
+                    // exactly once — no second render/flash.
                     if (!window._masterAiSuggestions && typeof _loadMasterAiSuggestions === 'function') {
                         await _loadMasterAiSuggestions();
-                        renderPartyTable(allPartiesData);
-                    } else if (typeof _refreshMasterAiGapDropdowns === 'function') {
-                        _refreshMasterAiGapDropdowns();
                     }
+                    renderPartyTable(allPartiesData);
+                    if (typeof _refreshMasterAiGapDropdowns === 'function') _refreshMasterAiGapDropdowns();
                 } else {
                     throw new Error(result.message || 'Failed to load parties');
                 }
