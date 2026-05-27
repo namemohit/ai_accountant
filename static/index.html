@@ -1120,9 +1120,7 @@
                     <div id="bank-stats" style="display: flex; flex-wrap: wrap; gap: 14px; margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.04); font-size: 0.78rem; color: #94a3b8;">
                         <span>📊 Total: <strong id="bank-stat-total" style="color: #e2e8f0;">—</strong></span>
                         <span style="color: #64748b;">·</span>
-                        <span title="Tally rows visible in this view">✅ In Tally: <strong id="bank-stat-in-tally" style="color: #10b981;">—</strong></span>
-                        <span style="color: #64748b;">·</span>
-                        <span title="Statement rows matched to a Tally counterpart. In Collapsed view, paired rows roll up under In Tally (this counter then shows the Statement-only unmatched residue).">🔗 Linked: <strong id="bank-stat-linked" style="color: #10b981;">—</strong></span>
+                        <span title="Statement lines matched to a voucher in Tally (the Vouchers master)">🔗 Linked: <strong id="bank-stat-linked" style="color: #10b981;">—</strong></span>
                         <span style="color: #64748b;">·</span>
                         <span title="AI suggested party + head; click Post to Tally to sync">🟡 AI Ready: <strong id="bank-stat-ai-ready" style="color: #f59e0b;">—</strong></span>
                         <span style="color: #64748b;">·</span>
@@ -1144,7 +1142,7 @@
                 <!-- Sprint 12 — Triage hint banner (visible only when filter = needs_attention) -->
                 <div id="bank-triage-hint" style="margin-top: 10px; padding: 8px 12px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 6px; color: #cbd5e1; font-size: 0.82rem; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
                     <span>🔥 Showing <strong><span id="bank-triage-hint-count">…</span></strong> rows that need your attention.</span>
-                    <span style="color:#64748b;">Tally-sourced and already-posted rows live in the</span>
+                    <span style="color:#64748b;">All Tally vouchers (the master) live in the</span>
                     <a href="#" onclick="showView('vouchers'); return false;" style="color:#38bdf8; text-decoration:none;">Vouchers tab</a>.
                     <a href="#" onclick="showAllBankTx(); return false;" style="color:#a855f7; text-decoration:none; margin-left:auto;">Show all instead →</a>
                 </div>
@@ -1158,7 +1156,6 @@
                                 <tr style="border-bottom: 2px solid var(--border); color: #94a3b8;">
                                     <th style="padding: 10px;"><input type="checkbox" onchange="document.querySelectorAll('.bank-select').forEach(c => { c.checked = this.checked; }); updateBankSelectedCount();"></th>
                                     <th style="text-align: left; padding: 10px;">Date</th>
-                                    <th style="text-align: left; padding: 10px;">Source</th>
                                     <th style="text-align: left; padding: 10px;">Description / Ref</th>
                                     <th style="text-align: left; padding: 10px;">Party</th>
                                     <th style="text-align: left; padding: 10px;">Head</th>
@@ -1168,7 +1165,7 @@
                                     <th style="text-align: left; padding: 10px;" title="Who reconciled this row — AI engine, human, or both">Reconciled By</th>
                                 </tr>
                             </thead>
-                            <tbody id="bank-tx-tbody"><tr><td colspan="10" style="text-align:center; padding:20px; color:#64748b;">Loading bank transactions…</td></tr></tbody>
+                            <tbody id="bank-tx-tbody"><tr><td colspan="9" style="text-align:center; padding:20px; color:#64748b;">Loading bank transactions…</td></tr></tbody>
                         </table>
                         <!-- Datalists for inline party / head / bank dropdowns. Populated by loadBankLedgerOptions() -->
                         <datalist id="bank-party-list"></datalist>
@@ -12027,7 +12024,7 @@
                 const m = result.data.metrics;
                 const _setLegacy = (id, v) => { const el = document.getElementById(id); if (el) el.innerText = v; };
                 _setLegacy('bank-stat-total',        m.total);
-                _setLegacy('bank-stat-in-tally',     m.auto_matched);     // closest 5-state mapping
+                _setLegacy('bank-stat-linked',       m.auto_matched);     // statement lines matched to a voucher
                 _setLegacy('bank-stat-ai-ready',     m.auto_filled);
                 _setLegacy('bank-stat-needs-review', m.unmatched);
 
@@ -12432,12 +12429,11 @@
         async function loadBankTransactions() {
             const co = _getActiveCompanyForBank();
             if (!co.company_name) {
-                document.getElementById('bank-tx-tbody').innerHTML = '<tr><td colspan="10" style="text-align:center; padding:20px; color:#64748b;">Select a company first.</td></tr>';
+                document.getElementById('bank-tx-tbody').innerHTML = '<tr><td colspan="9" style="text-align:center; padding:20px; color:#64748b;">Select a company first.</td></tr>';
                 return;
             }
             loadBankLedgerOptions();  // fire-and-forget; cached after first call
             _saveBankFilters();
-            const source = document.getElementById('bank-filter-source').value;
             const bankLedger = document.getElementById('bank-filter-bank-ledger')?.value || '';
             const tallyStatus = document.getElementById('bank-filter-tally-status').value;
             const fromDate = document.getElementById('bank-filter-from').value;
@@ -12453,7 +12449,6 @@
             const params = new URLSearchParams();
             params.set('company_name', co.company_name);
             if (co.company_id) params.set('company_id', co.company_id);
-            if (source) params.set('source', source);
             if (bankLedger) params.set('bank_ledger', bankLedger);
             if (tallyStatus) params.set('tally_status', tallyStatus);
             if (fromDate) params.set('from_date', fromDate);
@@ -12468,7 +12463,7 @@
                 const j = await res.json();
                 renderBankTable(j.data.rows, j.data.total, j.data.stats);
             } catch (e) {
-                document.getElementById('bank-tx-tbody').innerHTML = `<tr><td colspan="10" style="text-align:center; padding:20px; color:#ef4444;">Error: ${e.message}</td></tr>`;
+                document.getElementById('bank-tx-tbody').innerHTML = `<tr><td colspan="9" style="text-align:center; padding:20px; color:#ef4444;">Error: ${e.message}</td></tr>`;
             }
         }
 
@@ -12546,13 +12541,13 @@
                 }).join('')}</tbody></table>`;
         }
 
-        // Sprint 11 — Tally Status cell (5-state lifecycle, mutually exclusive).
-        // Order matters: source=tally first (most authoritative), then posted,
-        // then linked, then ai_filled, then unmatched.
+        // Tally Status cell (4-state lifecycle, mutually exclusive). All rows here
+        // are uploaded bank-statement lines; "exists in Tally" is decided by whether
+        // the line matched a voucher in the Vouchers master (→ Linked). Order:
+        // posted, then linked, then ai_filled, then unmatched.
         function _tallyStatusCell(r) {
             const wrap = (color, emoji, label, title) =>
                 `<span style="background:${color}22; color:${color}; padding:2px 8px; border-radius:4px; font-size:0.72rem; font-weight:600; white-space:nowrap;" title="${title}">${emoji} ${label}</span>`;
-            if (r.source === 'tally')             return wrap('#10b981', '✅', 'In Tally',     'Synced down from a Tally voucher');
             if (r.status === 'posted')            return wrap('#a855f7', '✅', 'Posted',       'Uploaded here, then synced to Tally');
             // Sprint 16 — "Linked" covers both (a) rows with linked_id set, AND
             // (b) statement rows that Phase 1 deterministically matched against a
@@ -12631,16 +12626,15 @@
                 const el = document.getElementById(id);
                 if (el) el.innerText = (n == null ? 0 : n).toLocaleString('en-IN');
             };
-            const s = stats || {in_tally:0, linked:0, ai_ready:0, needs_review:0, posted:0};
+            const s = stats || {linked:0, ai_ready:0, needs_review:0, posted:0};
             setStat('bank-stat-total',         total || 0);
-            setStat('bank-stat-in-tally',      s.in_tally);
             setStat('bank-stat-linked',        s.linked);
             setStat('bank-stat-ai-ready',      s.ai_ready);
             setStat('bank-stat-needs-review',  s.needs_review);
             setStat('bank-stat-posted',        s.posted);
 
             if (!rows || !rows.length) {
-                tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; padding:20px; color:#64748b;">No bank transactions found. Click "Upload Statement" above, or pull from Tally via Vouchers ▸ Import.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:20px; color:#64748b;">No bank statement lines yet. Click "Upload Statement" above to reconcile a bank statement.</td></tr>';
                 return;
             }
 
@@ -12662,28 +12656,25 @@
                 const rationale = r.rationale ? `<div style="color:#475569; font-size:0.68rem; margin-top:3px; font-style:italic;">💡 ${r.rationale}</div>` : '';
                 const linkedBadge = r.linked_id ? '<span style="color:#a855f7; font-size:0.7rem;" title="Linked across sources">🔗</span>' : '';
 
-                // Source link
+                // Attachment link to the uploaded statement file (all rows are bank_statement)
                 let sourceLink = '';
-                if (r.source === 'bank_statement' && r.source_file_id) {
+                if (r.source_file_id) {
                     sourceLink = `<a href="${r.source_file_url || '#'}" download style="color:#38bdf8; font-size:0.7rem; text-decoration:none; margin-left:4px;" title="Open ${r.source_file_name || 'file'}">📎</a>`;
-                } else if (r.source === 'tally' && r.source_record_id) {
-                    sourceLink = `<a href="/#vouchers" style="color:#10b981; font-size:0.7rem; text-decoration:none; margin-left:4px;" title="See Tally voucher">↗</a>`;
                 }
 
                 return `
                 <tr style="border-bottom: 1px solid rgba(255,255,255,0.04);">
                     <td style="padding: 8px;"><input type="checkbox" class="bank-select" value="${r.id}" onchange="updateBankSelectedCount()"></td>
                     <td style="padding: 8px; color:#cbd5e1; white-space:nowrap; font-size:0.78rem;">${r.date || '—'}</td>
-                    <td style="padding: 8px;">${_sourceBadge(r.source)} ${sourceLink} ${linkedBadge}</td>
                     <td style="padding: 8px; max-width: 280px;">
-                        <div style="color:#e2e8f0;">${(r.description || '').substring(0, 100)}</div>
+                        <div style="color:#e2e8f0;">${(r.description || '').substring(0, 100)} ${sourceLink}</div>
                         ${ref}${rationale}
                     </td>
                     <td style="padding: 8px;">${partyCell}</td>
                     <td style="padding: 8px;">${headCell}</td>
                     <td style="padding: 8px;">${bankCell}</td>
                     <td style="padding: 8px; text-align:right; color:${amtColor}; font-weight:600; white-space:nowrap;">${amt >= 0 ? '+' : ''}₹${Math.abs(amt).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
-                    <td style="padding: 8px;">${_tallyStatusCell(r)}</td>
+                    <td style="padding: 8px;">${_tallyStatusCell(r)} ${linkedBadge}</td>
                     <td style="padding: 8px;">${_reconciledByBadge(r.ai_touched, r.human_touched, r.confidence)}</td>
                 </tr>`;
             }).join('');

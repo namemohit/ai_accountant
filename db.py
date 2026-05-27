@@ -4285,10 +4285,12 @@ def list_bank_transactions(company_id=None, company_name=None, source=None, stat
         params.append(company_id)
     elif company_name:
         where.append("bt.company_name = %s"); params.append(company_name)
-    # Sprint 15 — Bank Reco is strictly bank + cash. Invoices + manual entries
-    # live elsewhere (Vouchers tab). Unconditional floor regardless of any
-    # user filters; the table never returns invoice/manual rows.
-    where.append("bt.source IN ('tally','bank_statement')")
+    # Vouchers section is now the single master of "exists in Tally". This view
+    # reconciles ONLY bulk-uploaded bank statements, so it shows nothing but
+    # statement lines — duplicate source='tally' rows (and invoices/manual) are
+    # excluded here. Each line's Tally status is derived from whether it matched
+    # a voucher in the master (status='matched'/linked_id), set by the reconciler.
+    where.append("bt.source = 'bank_statement'")
     if source:
         where.append("bt.source = %s"); params.append(source)
     if status:
@@ -4303,7 +4305,6 @@ def list_bank_transactions(company_id=None, company_name=None, source=None, stat
         'ai_ready':        "bt.status='ai_filled'",
         'needs_review':    "bt.status='unmatched'",
         'linked':          "bt.linked_id IS NOT NULL",
-        'in_tally':        "bt.source='tally'",
         'posted':          "bt.status='posted'",
     }
     if tally_status and tally_status in TS_CLAUSES:
@@ -4318,12 +4319,9 @@ def list_bank_transactions(company_id=None, company_name=None, source=None, stat
     if q:
         where.append("(bt.description ILIKE %s OR bt.party ILIKE %s OR bt.reference ILIKE %s)")
         params += [f"%{q}%", f"%{q}%", f"%{q}%"]
-    if view == "collapsed":
-        # Sprint 22 — Always keep the Tally side of every linked pair (hide the
-        # statement-side duplicate). Tally is the canonical books, so the survivor
-        # row carries authoritative voucher_number, party, head etc. This makes
-        # the collapsed view's "In Tally" count deterministic rather than UUID-random.
-        where.append("(bt.linked_id IS NULL OR bt.source = 'tally')")
+    # Note: the old "collapsed" view rolled paired Tally rows up against their
+    # statement line. With only bank_statement rows shown now, there is no Tally
+    # side to collapse — the `view` param is kept for API compatibility but inert.
 
     # Sort
     sort_map = {
@@ -4355,30 +4353,27 @@ def list_bank_transactions(company_id=None, company_name=None, source=None, stat
     """, params)
     total = cur.fetchone()["n"]
 
-    # Sprint 16 — 5-state Tally Status aggregate (matches the column's logic).
-    # Mutually exclusive buckets in the same order the cell evaluates them:
-    #   In Tally  → source='tally'
-    #   Posted    → status='posted'  (and source != 'tally')
-    #   Linked    → linked_id IS NOT NULL  OR  (status='matched' AND source='bank_statement')
-    #               (handles Phase-1 deterministic matches that didn't persist linked_id)
+    # 4-state Tally Status aggregate over the uploaded statement lines (all rows
+    # here are source='bank_statement'). "In Tally" was dropped — a line that
+    # matched a voucher in the master now rolls into Linked. Mutually exclusive,
+    # evaluated in the same order the cell renders them:
+    #   Posted    → status='posted'
+    #   Linked    → linked_id IS NOT NULL  OR  status='matched'  (Phase-1 voucher-master match)
     #   AI Ready  → status='ai_filled'
     #   Needs Review → status='unmatched'
     cur.execute(f"""
         SELECT
-          SUM(CASE WHEN bt.source='tally' THEN 1 ELSE 0 END) AS in_tally,
-          SUM(CASE WHEN bt.source<>'tally' AND bt.status='posted' THEN 1 ELSE 0 END) AS posted,
-          SUM(CASE WHEN bt.source<>'tally' AND bt.status<>'posted'
-                    AND (bt.linked_id IS NOT NULL
-                         OR (bt.status='matched' AND bt.source='bank_statement'))
+          SUM(CASE WHEN bt.status='posted' THEN 1 ELSE 0 END) AS posted,
+          SUM(CASE WHEN bt.status<>'posted'
+                    AND (bt.linked_id IS NOT NULL OR bt.status='matched')
                    THEN 1 ELSE 0 END) AS linked,
-          SUM(CASE WHEN bt.source<>'tally' AND bt.status='ai_filled' THEN 1 ELSE 0 END) AS ai_ready,
-          SUM(CASE WHEN bt.source<>'tally' AND bt.status='unmatched' THEN 1 ELSE 0 END) AS needs_review
+          SUM(CASE WHEN bt.status='ai_filled' THEN 1 ELSE 0 END) AS ai_ready,
+          SUM(CASE WHEN bt.status='unmatched' THEN 1 ELSE 0 END) AS needs_review
         FROM bank_transactions bt
         WHERE {where_sql}
     """, params)
     s = cur.fetchone() or {}
     stats = {
-        "in_tally":     int(s.get("in_tally")     or 0),
         "linked":       int(s.get("linked")       or 0),
         "ai_ready":     int(s.get("ai_ready")     or 0),
         "needs_review": int(s.get("needs_review") or 0),
