@@ -478,7 +478,9 @@ body.apps-edit .app-tile[data-agent-slug]:hover { transform: none; }
 .upl-name { flex: 1; min-width: 0; color: #e2e8f0; font-weight: 600; font-size: 0.88rem; cursor: pointer;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .upl-meta { color: #94a3b8; font-size: 0.78rem; flex-shrink: 0; }
-.upl-acts { display: flex; gap: 6px; flex-shrink: 0; }
+.upl-acts { display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+/* Files view drag-over feedback (whole view is a drop target now) */
+#uploads-view.upl-dragover { outline: 2px dashed var(--primary); outline-offset: -10px; background: rgba(56,189,248,0.04); }
 @media (max-width: 768px) { .upl-when { display: none; } .upl-name { white-space: normal; } .upl-acts .upl-btn { padding: 7px 8px; } }
 
 /* ===== CARD ===== */

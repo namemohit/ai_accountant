@@ -1551,22 +1551,19 @@
         </div>
 
         <!-- Sprint 55 — Upload anything: company-scoped file library -->
-        <div id="uploads-view" class="dashboard-view" style="display: none;">
-            <header>
-                <h1>📎 Files</h1>
-                <p style="color:#94a3b8;">Drop any file — invoices, statements, photos, sheets. Files are saved to <strong id="uploads-co-label">this company</strong> and reusable anywhere (send to chat, download).</p>
-            </header>
-            <div id="uploads-drop" onclick="document.getElementById('uploads-file-input').click()"
-                 ondragover="event.preventDefault(); this.style.borderColor='var(--primary)';"
-                 ondragleave="this.style.borderColor='var(--border)';"
-                 ondrop="event.preventDefault(); this.style.borderColor='var(--border)'; uploadAnything(event.dataTransfer.files);"
-                 style="margin-top:18px; border:2px dashed var(--border); border-radius:14px; padding:34px; text-align:center; cursor:pointer; color:#94a3b8;">
-                <div style="font-size:1.8rem;">📥</div>
-                <div style="margin-top:8px; font-weight:600; color:#e2e8f0;">Drop files here or click to upload</div>
-                <div style="font-size:0.8rem; margin-top:4px;">PDF · images · Excel/CSV · anything</div>
+        <div id="uploads-view" class="dashboard-view" style="display: none;"
+             ondragover="event.preventDefault(); this.classList.add('upl-dragover');"
+             ondragleave="this.classList.remove('upl-dragover');"
+             ondrop="event.preventDefault(); this.classList.remove('upl-dragover'); uploadAnything(event.dataTransfer.files);">
+            <header style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+                <div>
+                    <h1>📎 Files</h1>
+                    <p style="color:#94a3b8; margin-top:2px; font-size:0.85rem;">Saved to <strong id="uploads-co-label">this company</strong> · drag files anywhere here, or reuse them in Chat / Bank Reco.</p>
+                </div>
+                <button onclick="document.getElementById('uploads-file-input').click()" style="flex-shrink:0; display:inline-flex; align-items:center; gap:6px; padding:9px 16px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer; font-size:0.85rem;">➕ Upload</button>
                 <input type="file" id="uploads-file-input" multiple style="display:none;" onchange="uploadAnything(this.files); this.value='';">
-            </div>
-            <div id="uploads-msg" style="font-size:0.82rem; margin-top:10px; color:#94a3b8;"></div>
+            </header>
+            <div id="uploads-msg" style="font-size:0.82rem; margin-top:8px; color:#94a3b8;"></div>
 
             <!-- Workspace inbox: files shared in from other apps, not yet filed to a company.
                  Shows across every company in this workspace until sorted. -->
@@ -4219,7 +4216,7 @@
             const co = _uploadsCo();
             const lbl = document.getElementById('uploads-co-label'); if (lbl) lbl.textContent = co || 'this company';
             const grid = document.getElementById('uploads-grid'); if (!grid) return;
-            if (!window.__uploadsView) { try { window.__uploadsView = localStorage.getItem('uploadsView') || 'grid'; } catch(_) { window.__uploadsView = 'grid'; }
+            if (!window.__uploadsView) { try { window.__uploadsView = localStorage.getItem('uploadsView') || 'list'; } catch(_) { window.__uploadsView = 'list'; }
                 setUploadsView(window.__uploadsView); }
             try {
                 const r = await fetch(`${API}/api/files?company_name=${encodeURIComponent(co)}`);
@@ -4308,9 +4305,9 @@
             }
         }
         function _uploadActions(id, big) {
-            const sz = big ? '' : 'font-size:0.95rem;';
-            return `<button onclick="previewUploadById('${id}')" title="Preview" class="upl-btn"${big?' style="flex:1;min-width:78px;background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%);color:#fff;border:none;"':''}>${big?'Preview':'👁'}</button>
-                <button onclick="sendUploadById('${id}')" title="Send to chat" class="upl-btn"${big?' style="flex:1;min-width:78px;"':''}>${big?'Send to chat':'💬'}</button>
+            return `<button onclick="previewUploadById('${id}')" title="Preview" class="upl-btn">${big?'👁 Preview':'👁'}</button>
+                <button onclick="sendUploadById('${id}')" title="Send to Chat" class="upl-btn">${big?'💬 Chat':'💬'}</button>
+                <button onclick="sendUploadBankById('${id}')" title="Send to Bank Reconciliation" class="upl-btn">${big?'🏦 Bank reco':'🏦'}</button>
                 <button onclick="renameUploadById('${id}')" title="Rename" class="upl-btn">✎</button>
                 <button onclick="downloadUploadById('${id}')" title="Download" class="upl-btn">⬇</button>
                 <button onclick="deleteUploadById('${id}')" title="Delete" class="upl-btn upl-del">✕</button>`;
@@ -4341,6 +4338,7 @@
         }
         function previewUploadById(id) { const f = _fileById(id); if (f) previewUpload(f.file_url, f.original_name, f.file_type); }
         function sendUploadById(id) { const f = _fileById(id); if (f) sendUploadToChat(f.file_url, f.original_name, f.file_type); }
+        function sendUploadBankById(id) { const f = _fileById(id); if (f) sendUploadToBank(f.file_url, f.original_name, f.file_type); }
         function downloadUploadById(id) { const f = _fileById(id); if (f) window.open(f.file_url, '_blank', 'noopener'); }
         function deleteUploadById(id) { deleteUpload(id); }
         function renameUploadById(id) { const f = _fileById(id); if (f) renameUpload(id, f.original_name); }
@@ -4437,6 +4435,21 @@
                 if (typeof _chatMobileConvo === 'function') _chatMobileConvo();   // mobile: show the conversation
                 try { history.replaceState(null, '', '#chat'); } catch(_) {}      // reflect URL, no hashchange
                 setTimeout(() => { if (typeof attachFileToChat === 'function') attachFileToChat(file); }, 200);
+            } catch(e) { try { showChatToast && showChatToast('Could not load that file.', 'warn'); } catch(_) { alert('Could not load that file.'); } }
+        }
+        // Send a library file straight into Bank Reconciliation (parse + auto-reconcile).
+        async function sendUploadToBank(url, name, type) {
+            try {
+                const blob = await (await fetch(url)).blob();
+                const file = new File([blob], name || 'file', { type: type || blob.type });
+                if (window.__agentBySlug && window.__agentBySlug['ai-accountant']) {
+                    window.__activeAgent = 'ai-accountant';
+                    try { localStorage.setItem('activeAgent', 'ai-accountant'); } catch(_) {}
+                    if (typeof _renderNav === 'function') _renderNav();
+                }
+                showView('bank', true);
+                try { history.replaceState(null, '', '#bank'); } catch(_) {}
+                setTimeout(() => { if (typeof bankUploadFile === 'function') bankUploadFile(file); }, 200);
             } catch(e) { try { showChatToast && showChatToast('Could not load that file.', 'warn'); } catch(_) { alert('Could not load that file.'); } }
         }
         async function deleteUpload(id) {
@@ -11828,8 +11841,12 @@
         let bankRecoData = null;
 
         async function handleBankUpload(input) {
-            if (!input.files || input.files.length === 0) return;
-            const file = input.files[0];
+            if (!input || !input.files || input.files.length === 0) return;
+            return bankUploadFile(input.files[0]);
+        }
+        // Reusable: parse + auto-reconcile a bank statement File (also used by Files → Send to Bank Reco).
+        async function bankUploadFile(file) {
+            if (!file) return;
             const user = JSON.parse(localStorage.getItem('currentUser'));
             const companyName = user ? user.company_name : 'Acme Corp';
             const companyId = user && user.company_id ? user.company_id : '';
