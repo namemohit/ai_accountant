@@ -8320,6 +8320,21 @@ def list_org_companies(org_id):
         pput(conn)
 
 
+def list_org_companies_with_gstin(org_id):
+    """Workspace companies (name + gstin) — for matching a shared doc to the user's
+    OWN company (not party-master entries) in the Unallocated inbox suggestion."""
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT name, gstin FROM companies WHERE org_id=%s AND archived_at IS NULL ORDER BY name",
+                    (str(org_id),))
+        return cur.fetchall()
+    finally:
+        cur.close()
+        try: conn.rollback()
+        except Exception: pass
+        pput(conn)
+
+
 def get_companies_for_user(user_id):
     """Return all companies the user has any access to (across all memberships)."""
     conn = get_conn()

@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "163"
+APP_VERSION = "164"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -6812,9 +6812,43 @@ async def api_files_rename(payload: dict):
 
 # ── Unallocated inbox: files shared in from other apps land here (no company yet),
 # scoped to the workspace (org), and the user sorts them into a company later. ──
+def _suggest_company_for_file(file_id, org_id, temp_path):
+    """Background: parse the shared doc and guess which of the USER'S OWN workspace
+    companies it belongs to (match the document's party GSTIN/name against the org's
+    companies — not party-master/ledger entries). Sets suggested_company."""
+    best = None
+    try:
+        raw = parser.parse(temp_path, context="")
+        import re as _re, json as _json
+        m = _re.search(r'(\{.*\})', raw or '', _re.DOTALL)
+        data = _json.loads(m.group(1) if m else (raw or '').strip().replace('```json', '').replace('```', ''))
+        meta = data.get("invoice_metadata") or {}
+        gstins = [(meta.get("billing_party_gstin") or "").strip().upper(),
+                  (meta.get("billed_to_party_gstin") or "").strip().upper()]
+        names = [(meta.get("billing_party_name") or "").strip().lower(),
+                 (meta.get("billed_to_party_name") or "").strip().lower()]
+        comps = db.list_org_companies_with_gstin(org_id) or []
+        for c in comps:                                   # 1) exact GSTIN match wins
+            g = (c.get("gstin") or "").strip().upper()
+            if g and g in gstins:
+                best = c["name"]; break
+        if not best:                                      # 2) fuzzy name match
+            for c in comps:
+                cn = (c.get("name") or "").strip().lower()
+                if cn and any(n and (cn in n or n in cn) for n in names):
+                    best = c["name"]; break
+    except Exception as e:
+        print(f"[suggest_company_for_file] {e}")
+    try: db.set_file_suggestion(file_id, best, "done")
+    except Exception: pass
+    try:
+        if temp_path and os.path.exists(temp_path): os.remove(temp_path)
+    except Exception: pass
+
+
 @app.post("/api/files/upload-unallocated")
 async def api_files_upload_unallocated(file: UploadFile = File(...), company_name: str = Form(None),
-                                       username: str = Form(None)):
+                                       username: str = Form(None), background_tasks: BackgroundTasks = None):
     import uuid as _uuid
     # Resolve the workspace (org) from the active company, so the inbox shows across
     # all that workspace's companies. Fall back to the caller's owned org.
@@ -6845,9 +6879,20 @@ async def api_files_upload_unallocated(file: UploadFile = File(...), company_nam
             f.write(data)
         url = f"/static/uploads/{stored}"
     row = db.save_unallocated_file(org_id, url, original_name=file.filename,
-                                   file_type=ct, size_bytes=len(data), uploaded_by=username)
+                                   file_type=ct, size_bytes=len(data), uploaded_by=username,
+                                   suggest_status="pending")
     if not row:
         raise HTTPException(status_code=500, detail="Could not save the shared file.")
+    # Kick off the AI company-suggestion in the background (parse is slow ~10-20s).
+    try:
+        os.makedirs("static/uploads", exist_ok=True)
+        tmp = f"static/uploads/_suggest_{_uuid.uuid4().hex}{ext}"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        if background_tasks is not None:
+            background_tasks.add_task(_suggest_company_for_file, str(row["id"]), str(org_id), tmp)
+    except Exception as _se:
+        print(f"[upload-unallocated] suggest schedule: {_se}")
     return {"status": "success", "file": {"id": str(row["id"]), "file_url": url,
             "original_name": file.filename, "file_type": ct, "size_bytes": len(data)}}
 

@@ -4147,6 +4147,14 @@
                     <button onclick="allocateFile('${f.id}')" style="padding:7px 14px; background:rgba(74,222,128,0.14); color:#4ade80; border:1px solid rgba(74,222,128,0.35); border-radius:8px; font-weight:600; cursor:pointer; font-size:0.82rem;">File it</button>
                 </div>`;
             }).join('');
+            // If any file is still being analyzed, re-fetch shortly so the AI suggestion
+            // appears without a manual reload (cap the polling so it can't loop forever).
+            if (files.some(f => f.suggest_status === 'pending')) {
+                window.__unallocPolls = (window.__unallocPolls || 0) + 1;
+                if (window.__unallocPolls <= 8) setTimeout(loadUnallocated, 5000);
+            } else {
+                window.__unallocPolls = 0;
+            }
         }
         async function allocateFile(id) {
             const u = (()=>{try{return JSON.parse(localStorage.getItem('currentUser')||'{}')}catch(_){return{}}})();
