@@ -3006,6 +3006,13 @@
                     try { localStorage.setItem('activeAgent', window.__activeAgent); } catch(_) {}
                 }
                 _renderNav();
+                // Actually OPEN the deep-linked view (e.g. #network-requests on refresh),
+                // not just set the agent context — otherwise it falls back to chat.
+                if (document.getElementById(baseView + '-view') || window.__PLATFORM_VIEWS.has(baseView)) {
+                    showView(baseView, true);   // skipHashUpdate: keep the URL as-is
+                } else {
+                    showView('home');
+                }
             } else if (baseView === 'store') {
                 exitToStore();
             } else {
