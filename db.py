@@ -8390,6 +8390,84 @@ def create_company(org_id, name, gstin=None, state_code=None, is_primary=False, 
     return new_id
 
 
+# ── Manage Companies (workspace owner) ──────────────────────────────────────
+def list_workspace_companies(org_id):
+    """Active companies in a workspace (id, name, gstin, state, primary)."""
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""SELECT id, name, gstin, state_code, is_primary
+                       FROM companies WHERE org_id=%s AND archived_at IS NULL
+                       ORDER BY is_primary DESC, name""", (str(org_id),))
+        return [{"id": str(r["id"]), "name": r["name"], "gstin": r["gstin"],
+                 "state_code": r["state_code"], "is_primary": r["is_primary"]} for r in cur.fetchall()]
+    finally:
+        cur.close()
+        try: conn.rollback()
+        except Exception: pass
+        pput(conn)
+
+
+def update_company_details(org_id, company_id, gstin=None, state_code=None):
+    """Edit a company's GSTIN / state (NOT the name — name is a cross-table key)."""
+    conn = pget(); cur = conn.cursor()
+    try:
+        cur.execute("""UPDATE companies SET gstin=%s, state_code=%s
+                       WHERE id=%s AND org_id=%s AND archived_at IS NULL""",
+                    (gstin, state_code, str(company_id), str(org_id)))
+        ok = cur.rowcount > 0; conn.commit()
+        return {"ok": ok} if ok else {"ok": False, "error": "Company not found in this workspace."}
+    except Exception as e:
+        try: conn.rollback()
+        except Exception: pass
+        print(f"[update_company_details] {e}"); return {"ok": False, "error": str(e)}
+    finally:
+        cur.close(); pput(conn)
+
+
+def archive_company(org_id, company_id):
+    """Soft-delete a company (recoverable) + drop its name from the org members' legacy
+    company lists so it leaves the switcher. Refuses to archive the last active company."""
+    import json as _json
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT name FROM companies WHERE id=%s AND org_id=%s AND archived_at IS NULL",
+                    (str(company_id), str(org_id)))
+        row = cur.fetchone()
+        if not row:
+            return {"ok": False, "error": "Company not found in this workspace."}
+        name = row["name"]
+        cur.execute("SELECT COUNT(*) AS c FROM companies WHERE org_id=%s AND archived_at IS NULL", (str(org_id),))
+        if (cur.fetchone()["c"] or 0) <= 1:
+            return {"ok": False, "error": "You can't remove your only company."}
+        cur.execute("UPDATE companies SET archived_at=CURRENT_TIMESTAMP WHERE id=%s AND org_id=%s",
+                    (str(company_id), str(org_id)))
+        # Drop the name from every org member's legacy company list (+ fix their active company).
+        cur.execute("""SELECT au.username, au.companies, au.company_name
+                       FROM accounting_users au
+                       JOIN users u ON u.id = au.users_id
+                       JOIN memberships m ON m.user_id = u.id
+                       WHERE m.org_id=%s""", (str(org_id),))
+        for r in cur.fetchall():
+            comps = r["companies"]
+            if isinstance(comps, str):
+                try: comps = _json.loads(comps)
+                except Exception: comps = []
+            comps = comps or []
+            if name in comps:
+                comps = [c for c in comps if c != name]
+                new_active = r["company_name"] if r["company_name"] != name else (comps[0] if comps else None)
+                cur.execute("UPDATE accounting_users SET companies=%s, company_name=%s WHERE username=%s",
+                            (_json.dumps(comps), new_active, r["username"]))
+        conn.commit()
+        return {"ok": True, "name": name}
+    except Exception as e:
+        try: conn.rollback()
+        except Exception: pass
+        print(f"[archive_company] {e}"); return {"ok": False, "error": str(e)}
+    finally:
+        cur.close(); pput(conn)
+
+
 def create_membership(user_id, org_id, role, scope_company_ids=None, invited_by=None):
     """Add a user to an org with a role."""
     conn = get_conn()

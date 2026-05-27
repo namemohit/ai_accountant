@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "164"
+APP_VERSION = "165"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -7475,6 +7475,74 @@ async def add_company(payload: dict):
         return {"status": "success", "message": f"Added {company_name}"}
     else:
         raise HTTPException(status_code=500, detail="Failed to add company")
+
+
+# ── Manage Companies (workspace owner) — add / edit details / archive ──
+def _manage_company_ctx(username, company_name=None, require_owner=True):
+    """Resolve (users_id, org_id, is_owner) for company management. Org = the active
+    company's workspace (fallback: caller's first owned/managed org)."""
+    users_id, _ = _resolve_caller(username)
+    mems = db.user_memberships_basic(users_id) or []
+    org_id = None
+    if company_name:
+        try: org_id = db.org_id_for_company(company_name, users_id)
+        except Exception: org_id = None
+    if not org_id:
+        m = next((x for x in mems if x["role"] in ("owner", "manager")), None) or (mems[0] if mems else None)
+        org_id = m["org_id"] if m else None
+    if not org_id:
+        raise HTTPException(status_code=403, detail="You don't have a workspace.")
+    role = next((x["role"] for x in mems if str(x["org_id"]) == str(org_id)), None)
+    is_owner = role == "owner"
+    if require_owner and not is_owner:
+        raise HTTPException(status_code=403, detail="Only the workspace owner can manage companies.")
+    return users_id, org_id, is_owner
+
+
+@app.get("/api/companies")
+async def api_companies_list(username: str, company_name: str = None):
+    users_id, org_id, is_owner = _manage_company_ctx(username, company_name, require_owner=False)
+    return {"status": "success", "can_manage": is_owner,
+            "companies": db.list_workspace_companies(org_id)}
+
+
+@app.post("/api/companies/create")
+async def api_companies_create(payload: dict):
+    users_id, org_id, _ = _manage_company_ctx(payload.get("username"), payload.get("company_name"))
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Company name is required.")
+    db.create_company(org_id, name, gstin=(payload.get("gstin") or None),
+                      state_code=(payload.get("state_code") or None))
+    # Project into the owner's legacy list so it shows in the switcher immediately.
+    try: db.add_company_to_user(payload.get("username"), name)
+    except Exception as e: print(f"[companies/create project] {e}")
+    return {"status": "success", "name": name}
+
+
+@app.post("/api/companies/update")
+async def api_companies_update(payload: dict):
+    _, org_id, _ = _manage_company_ctx(payload.get("username"), payload.get("company_name"))
+    cid = payload.get("company_id") or payload.get("id")
+    if not cid:
+        raise HTTPException(status_code=400, detail="company_id is required.")
+    res = db.update_company_details(org_id, cid, gstin=(payload.get("gstin") or None),
+                                    state_code=(payload.get("state_code") or None))
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Could not update."))
+    return {"status": "success"}
+
+
+@app.post("/api/companies/archive")
+async def api_companies_archive(payload: dict):
+    _, org_id, _ = _manage_company_ctx(payload.get("username"), payload.get("company_name"))
+    cid = payload.get("company_id") or payload.get("id")
+    if not cid:
+        raise HTTPException(status_code=400, detail="company_id is required.")
+    res = db.archive_company(org_id, cid)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Could not remove the company."))
+    return {"status": "success", "name": res.get("name")}
 
 @app.get("/api/tally-bridge/status")
 async def tally_bridge_status():

@@ -112,6 +112,9 @@
                             const addOpt = document.createElement('option');
                             addOpt.value = "__ADD_NEW__"; addOpt.innerText = "+ Add New Company";
                             sel.appendChild(addOpt);
+                            const mgOpt = document.createElement('option');
+                            mgOpt.value = "__MANAGE__"; mgOpt.innerText = "⚙️ Manage companies…";
+                            sel.appendChild(mgOpt);
                         });
 
                         const navWhatsapp = document.getElementById('nav-whatsapp');
@@ -180,6 +183,9 @@
                     const addOpt = document.createElement('option');
                     addOpt.value = '__ADD_NEW__'; addOpt.innerText = '+ Add New Company';
                     sel.appendChild(addOpt);
+                    const mgOpt = document.createElement('option');
+                    mgOpt.value = '__MANAGE__'; mgOpt.innerText = '⚙️ Manage companies…';
+                    sel.appendChild(mgOpt);
                 });
                 if (typeof _renderTopbar === 'function') _renderTopbar();
             } catch(_) {}
@@ -232,10 +238,119 @@
             setTimeout(go, 400);
         }
 
+        // ── Manage Companies (workspace owner) — opened from the company switcher ──
+        function _mcUser() { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } }
+        function _mcMsg(t, c) { const m = document.getElementById('mc-msg'); if (m) { m.style.color = c; m.textContent = t; } }
+        async function openManageCompaniesModal() {
+            let ov = document.getElementById('manage-co-modal'); if (ov) ov.remove();
+            ov = document.createElement('div'); ov.id = 'manage-co-modal';
+            ov.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:9999; display:flex; align-items:center; justify-content:center; padding:16px;';
+            ov.onclick = (e) => { if (e.target === ov) ov.remove(); };
+            ov.innerHTML = '<div style="background:var(--bg-surface,#1e1b18); border:1px solid var(--border); border-radius:14px; max-width:560px; width:100%; max-height:85vh; overflow:auto; padding:20px;">'
+                + '<div style="display:flex; justify-content:space-between; align-items:center; gap:10px;"><h3 style="margin:0; color:#f4f4f5;">🏢 Manage companies</h3>'
+                + '<button onclick="document.getElementById(\'manage-co-modal\').remove()" style="background:none;border:none;color:#94a3b8;font-size:1.4rem;cursor:pointer;line-height:1;">×</button></div>'
+                + '<div id="manage-co-body" style="margin-top:14px; color:#94a3b8; font-size:0.85rem;">Loading…</div></div>';
+            document.body.appendChild(ov);
+            await _renderManageCompanies();
+        }
+        async function _renderManageCompanies() {
+            const u = _mcUser();
+            const body = document.getElementById('manage-co-body'); if (!body) return;
+            const active = u.company_name || '';
+            let data;
+            try {
+                const r = await fetch(`${API}/api/companies?username=${encodeURIComponent(u.username||'')}&company_name=${encodeURIComponent(active)}`);
+                data = await r.json();
+                if (!r.ok) throw new Error(data.detail || 'Could not load companies.');
+            } catch(e) { body.innerHTML = `<div style="color:#f87171;">${escapeHtml(e.message)}</div>`; return; }
+            const canManage = !!data.can_manage;
+            const comps = data.companies || [];
+            let html = '';
+            if (!canManage) html += '<div style="color:#fbbf24; margin-bottom:10px;">Only the workspace owner can manage companies.</div>';
+            html += comps.map(c => {
+                const isActive = c.name === active;
+                if (!canManage) return `<div class="card" style="margin-bottom:10px;"><div style="font-weight:600; color:#f4f4f5;">${escapeHtml(c.name)}</div><div style="font-size:0.76rem; color:#64748b; margin-top:3px;">GSTIN: ${escapeHtml(c.gstin||'—')}</div></div>`;
+                return `<div class="card" style="margin-bottom:10px;">
+                    <div style="font-weight:600; color:#f4f4f5;">${escapeHtml(c.name)}${c.is_primary?' <span style="font-size:0.7rem;color:#64748b;">(primary)</span>':''}</div>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px;">
+                        <label style="font-size:0.72rem;color:#94a3b8;">GSTIN<input id="mc-gstin-${c.id}" value="${escapeHtml(c.gstin||'')}" style="width:100%;margin-top:3px;padding:7px 9px;background:var(--bg-light);color:#fff;border:1px solid var(--border);border-radius:7px;"></label>
+                        <label style="font-size:0.72rem;color:#94a3b8;">State code<input id="mc-state-${c.id}" value="${escapeHtml(c.state_code||'')}" style="width:100%;margin-top:3px;padding:7px 9px;background:var(--bg-light);color:#fff;border:1px solid var(--border);border-radius:7px;"></label>
+                    </div>
+                    <div style="display:flex; gap:8px; margin-top:10px;">
+                        <button onclick="mcSave('${c.id}')" style="padding:6px 12px;background:rgba(56,189,248,0.12);color:#38bdf8;border:1px solid rgba(56,189,248,0.3);border-radius:7px;cursor:pointer;font-size:0.8rem;">Save</button>
+                        ${isActive
+                          ? '<button disabled title="Switch to another company first to remove this one" style="padding:6px 12px;background:rgba(255,255,255,0.04);color:#64748b;border:1px solid var(--border);border-radius:7px;font-size:0.8rem;cursor:not-allowed;">Remove</button>'
+                          : `<button onclick="mcArchive('${c.id}', ${JSON.stringify(c.name)})" style="padding:6px 12px;background:rgba(239,68,68,0.1);color:#f87171;border:1px solid rgba(239,68,68,0.25);border-radius:7px;cursor:pointer;font-size:0.8rem;">Remove</button>`}
+                    </div>
+                </div>`;
+            }).join('');
+            if (canManage) {
+                html += `<div class="card" style="margin-top:6px;">
+                    <div style="font-weight:600;color:#e2e8f0;margin-bottom:8px;">Add a company</div>
+                    <input id="mc-new-name" placeholder="Company name" style="width:100%;padding:8px 10px;background:var(--bg-light);color:#fff;border:1px solid var(--border);border-radius:7px;">
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
+                        <input id="mc-new-gstin" placeholder="GSTIN (optional)" style="padding:8px 10px;background:var(--bg-light);color:#fff;border:1px solid var(--border);border-radius:7px;">
+                        <input id="mc-new-state" placeholder="State code (optional)" style="padding:8px 10px;background:var(--bg-light);color:#fff;border:1px solid var(--border);border-radius:7px;">
+                    </div>
+                    <button onclick="mcCreate()" style="margin-top:10px;padding:8px 14px;background:linear-gradient(135deg,var(--primary),var(--primary-light));color:#fff;border:none;border-radius:7px;font-weight:600;cursor:pointer;">Add company</button>
+                </div>
+                <div style="font-size:0.72rem;color:#64748b;margin-top:8px;">Renaming isn’t available yet (a company’s name is used across your records). You can add, edit details, or remove (archive — data is kept).</div>`;
+            }
+            html += '<div id="mc-msg" style="font-size:0.82rem;margin-top:8px;"></div>';
+            body.innerHTML = html;
+        }
+        async function mcSave(id) {
+            const u = _mcUser();
+            const gstin = (document.getElementById('mc-gstin-'+id)||{}).value || '';
+            const state = (document.getElementById('mc-state-'+id)||{}).value || '';
+            try {
+                const r = await fetch(`${API}/api/companies/update`, { method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({ username:u.username, company_name:u.company_name, company_id:id, gstin, state_code:state }) });
+                if (!r.ok) { const d = await r.json(); throw new Error(d.detail||'Save failed.'); }
+                _mcMsg('Saved.', '#4ade80');
+            } catch(e) { _mcMsg(e.message, '#f87171'); }
+        }
+        async function mcArchive(id, name) {
+            if (!confirm(`Remove "${name}"? Its data is kept and can be restored.`)) return;
+            const u = _mcUser();
+            try {
+                const r = await fetch(`${API}/api/companies/archive`, { method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({ username:u.username, company_name:u.company_name, company_id:id }) });
+                if (!r.ok) { const d = await r.json(); throw new Error(d.detail||'Could not remove.'); }
+                _mcMsg(`Removed ${name}.`, '#4ade80');
+                if (typeof refreshCompanies === 'function') await refreshCompanies();
+                await _renderManageCompanies();
+            } catch(e) { _mcMsg(e.message, '#f87171'); }
+        }
+        async function mcCreate() {
+            const u = _mcUser();
+            const name = ((document.getElementById('mc-new-name')||{}).value || '').trim();
+            if (!name) { _mcMsg('Enter a company name.', '#f87171'); return; }
+            const gstin = ((document.getElementById('mc-new-gstin')||{}).value || '').trim();
+            const state = ((document.getElementById('mc-new-state')||{}).value || '').trim();
+            try {
+                const r = await fetch(`${API}/api/companies/create`, { method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({ username:u.username, company_name:u.company_name, name, gstin, state_code:state }) });
+                if (!r.ok) { const d = await r.json(); throw new Error(d.detail||'Could not add.'); }
+                _mcMsg(`Added ${name}.`, '#4ade80');
+                if (typeof refreshCompanies === 'function') await refreshCompanies();
+                await _renderManageCompanies();
+            } catch(e) { _mcMsg(e.message, '#f87171'); }
+        }
+
         async function switchCompany(newCompany) {
             const user = JSON.parse(localStorage.getItem('currentUser'));
             if (!user) return;
-            
+
+            if (newCompany === '__MANAGE__') {
+                // Don't switch — reset the selector to the active company and open the manager.
+                ['active-company-select','active-company-select-mobile','tb-company'].forEach(id => {
+                    const s = document.getElementById(id); if (s) s.value = user.company_name || '';
+                });
+                if (typeof openManageCompaniesModal === 'function') openManageCompaniesModal();
+                return;
+            }
+
             if (newCompany === '__ADD_NEW__') {
                 const companyName = prompt("Enter new company name:");
                 if (!companyName || companyName.trim() === '') {
