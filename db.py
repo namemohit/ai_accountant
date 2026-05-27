@@ -7945,7 +7945,9 @@ def get_parties(company_name="Acme Corp"):
                 return
             seen.add(nm.lower())
             rows.append({
-                "id": None, "company_name": company_name, "name": nm,
+                # Unique synthetic id — the UI de-dupes rows by id, so these must NOT
+                # collide (a shared null id would collapse them all into one row).
+                "id": "virtual::" + nm, "company_name": company_name, "name": nm,
                 "gstin": gstin, "address": address,
                 "bank_name": None, "account_number": None, "ifsc_code": None,
                 "pan": pan, "email": None, "phone": None,
