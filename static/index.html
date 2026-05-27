@@ -4197,6 +4197,12 @@
 
         // ───────────────────── Network agent ─────────────────────
         function _nwUser() { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } }
+        // Active workspace (company switcher) so 'Your ID' + every action use the SAME org.
+        function _nwCo() {
+            const sel = document.getElementById('active-company-select');
+            if (sel && sel.value) return sel.value;
+            return _nwUser().company_name || '';
+        }
         window.__nwMyId = window.__nwMyId || '';
         const _NW_REL_LABELS = {
             ca:'CA / accounting firm', accountant:'Accountant', auditor:'Auditor',
@@ -4212,7 +4218,7 @@
         async function loadNetworkHome() {
             const u = _nwUser();
             try {
-                const r = await fetch(`${API}/api/network/me?username=${encodeURIComponent(u.username||'')}`);
+                const r = await fetch(`${API}/api/network/me?username=${encodeURIComponent(u.username||'')}&company_name=${encodeURIComponent(_nwCo())}`);
                 const d = await r.json();
                 if (r.ok && d.connect_id) {
                     window.__nwMyId = d.connect_id;
@@ -4233,7 +4239,7 @@
             const u = _nwUser();
             try {
                 const r = await fetch(`${API}/api/network/request`, { method:'POST', headers:{'Content-Type':'application/json'},
-                    body: JSON.stringify({ username:u.username, target_connect_id:targetId }) });
+                    body: JSON.stringify({ username:u.username, company_name:_nwCo(), target_connect_id:targetId }) });
                 const d = await r.json();
                 if (!r.ok) return { ok:false, error: d.detail || 'Could not send request.' };
                 return { ok:true, target_name: d.target_name };
@@ -4256,7 +4262,7 @@
             const u = _nwUser();
             const inc = document.getElementById('nw-incoming'), out = document.getElementById('nw-outgoing');
             try {
-                const r = await fetch(`${API}/api/network/requests?username=${encodeURIComponent(u.username||'')}`);
+                const r = await fetch(`${API}/api/network/requests?username=${encodeURIComponent(u.username||'')}&company_name=${encodeURIComponent(_nwCo())}`);
                 const d = await r.json();
                 if (!r.ok) throw new Error(d.detail || 'Could not load requests.');
                 if (inc) inc.innerHTML = (d.incoming||[]).length ? d.incoming.map(_nwIncomingCard).join('')
@@ -4296,7 +4302,7 @@
             const u = _nwUser();
             let companies = [];
             try {
-                const r = await fetch(`${API}/api/network/companies?username=${encodeURIComponent(u.username||'')}`);
+                const r = await fetch(`${API}/api/network/companies?username=${encodeURIComponent(u.username||'')}&company_name=${encodeURIComponent(_nwCo())}`);
                 const d = await r.json();
                 if (r.ok) companies = d.companies || [];
             } catch(_) {}
@@ -4349,7 +4355,7 @@
             show('Granting…', '#94a3b8');
             try {
                 const r = await fetch(`${API}/api/network/approve`, { method:'POST', headers:{'Content-Type':'application/json'},
-                    body: JSON.stringify({ username:u.username, request_id:id, relationship_type:role,
+                    body: JSON.stringify({ username:u.username, company_name:_nwCo(), request_id:id, relationship_type:role,
                         scope_company_ids: scope.length ? scope : null }) });
                 const d = await r.json();
                 if (!r.ok) throw new Error(d.detail || 'Could not approve.');
@@ -4361,7 +4367,7 @@
             const u = _nwUser();
             try {
                 const r = await fetch(`${API}/api/network/decline`, { method:'POST', headers:{'Content-Type':'application/json'},
-                    body: JSON.stringify({ username:u.username, request_id:id }) });
+                    body: JSON.stringify({ username:u.username, company_name:_nwCo(), request_id:id }) });
                 if (!r.ok) { const d = await r.json(); throw new Error(d.detail || 'Could not decline.'); }
             } catch(e) { alert(e.message); }
             loadNetworkRequests();
@@ -4371,7 +4377,7 @@
             const u = _nwUser();
             const box = document.getElementById('nw-connections');
             try {
-                const r = await fetch(`${API}/api/network/connections?username=${encodeURIComponent(u.username||'')}`);
+                const r = await fetch(`${API}/api/network/connections?username=${encodeURIComponent(u.username||'')}&company_name=${encodeURIComponent(_nwCo())}`);
                 const d = await r.json();
                 if (!r.ok) throw new Error(d.detail || 'Could not load connections.');
                 const cs = d.connections || [];
@@ -4399,7 +4405,7 @@
             const u = _nwUser();
             try {
                 const r = await fetch(`${API}/api/network/revoke`, { method:'POST', headers:{'Content-Type':'application/json'},
-                    body: JSON.stringify({ username:u.username, relationship_id:id }) });
+                    body: JSON.stringify({ username:u.username, company_name:_nwCo(), relationship_id:id }) });
                 if (!r.ok) { const d = await r.json(); throw new Error(d.detail || 'Could not revoke.'); }
             } catch(e) { alert(e.message); }
             loadNetworkList();
@@ -4408,7 +4414,7 @@
         async function loadHomeNetworkWidget() {
             const u = _nwUser();
             try {
-                const r = await fetch(`${API}/api/network/me?username=${encodeURIComponent(u.username||'')}`);
+                const r = await fetch(`${API}/api/network/me?username=${encodeURIComponent(u.username||'')}&company_name=${encodeURIComponent(_nwCo())}`);
                 const d = await r.json();
                 if (r.ok && d.connect_id) {
                     window.__nwMyId = d.connect_id;
@@ -4437,7 +4443,7 @@
         async function nwRefreshBadge() {
             const u = _nwUser();
             try {
-                const r = await fetch(`${API}/api/network/requests?username=${encodeURIComponent(u.username||'')}`);
+                const r = await fetch(`${API}/api/network/requests?username=${encodeURIComponent(u.username||'')}&company_name=${encodeURIComponent(_nwCo())}`);
                 const d = await r.json();
                 if (r.ok) {
                     window.__nwPending = (d.incoming||[]).length;
