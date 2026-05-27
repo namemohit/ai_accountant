@@ -842,6 +842,7 @@
                     <div class="chat-session-list" id="chat-session-list"></div>
                 </div>
                 <div class="chat-main">
+                    <button id="chat-back-to-list" onclick="_chatMobileList()" title="Back to chats">‹ Chats</button>
                     <div class="chat-welcome" id="chat-welcome">
                         <div class="chat-welcome-content">
                             <div class="chat-welcome-icon">✦</div>
@@ -5486,7 +5487,12 @@
             if (typeof closeMobileChatSidebar === 'function') closeMobileChatSidebar();
 
             if (view === 'history') { showView('vouchers'); return; }
-            if (view === 'chat') loadChatSessions();
+            if (view === 'chat') {
+                loadChatSessions();
+                // Mobile master/detail: entering Chat lands on the LIST (a specific
+                // conversation deep-link/selection flips to convo via loadChat).
+                _chatMobileList();
+            }
             if (view === 'training') { fetchTrainingStats(); fetchTallySummary(); }
             if (view === 'training-progress') { if (typeof loadTrainingProgress === 'function') loadTrainingProgress(); }
             if (view === 'tasks') loadTasks();
@@ -10475,6 +10481,7 @@
         let _chatLoadSeq = 0;
         async function loadChat(id, skipHashUpdate = false) {
             const seq = ++_chatLoadSeq;          // re-entrancy guard: only the latest load renders
+            _chatMobileConvo();                  // opening a conversation (mobile master/detail)
             currentSessionId = id;
             if (!skipHashUpdate) {
                 window.location.hash = 'chat/' + id;
@@ -10532,7 +10539,19 @@
             document.getElementById('chat-messages').innerHTML = '';
             document.getElementById('chat-suggestions').style.display = 'none';
             loadChatSessions();
+            _chatMobileConvo();   // a new blank chat is a conversation (mobile master/detail)
             if (typeof closeMobileChatSidebar === 'function') closeMobileChatSidebar();
+        }
+
+        // ── Mobile chat master/detail: tap Chat → list; open/new → conversation ──
+        function _chatMobileList() {
+            document.body.classList.add('chatm-list');
+            document.body.classList.remove('chatm-convo');
+            if (typeof loadChatSessions === 'function') loadChatSessions();
+        }
+        function _chatMobileConvo() {
+            document.body.classList.add('chatm-convo');
+            document.body.classList.remove('chatm-list');
         }
 
         // Sprint 84 — mint + copy a public read-only shareable link for a chat.
