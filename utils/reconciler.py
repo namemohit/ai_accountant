@@ -10,6 +10,16 @@ from google import generativeai as genai
 if os.getenv("GEMINI_API_KEY"):
     genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
+# ── Confidence cutoffs for party suggestions (tunable) ──────────────────────
+# Cosine similarity (1 - distance) of the best party candidate must clear
+# PARTY_MIN_SIM for the AI to suggest a party at all — below it we leave the
+# party BLANK and flag the row "Needs Review" rather than blindly proposing the
+# nearest party (which produced "Test Vendor on every row" when only one party
+# was embedded). At/above PARTY_AUTOFILL_SIM the row is marked "AI Ready".
+# Start balanced; calibrate from the match % shown on each row.
+PARTY_MIN_SIM = float(os.getenv("RECON_PARTY_MIN_SIM", "0.60"))
+PARTY_AUTOFILL_SIM = float(os.getenv("RECON_PARTY_AUTOFILL_SIM", "0.70"))
+
 def get_reconciliation_embedding(text):
     try:
         result = genai.embed_content(
@@ -203,18 +213,23 @@ def ai_reconcile_statement(transactions, company_name, company_id=None, progress
                 d = h["data"] or {}
                 candidate_narrations.append({"narration": d.get("narration"), "party": d.get("party")})
 
-        # Default suggestions from vector retrieval
-        suggested_party = candidate_parties[0]["name"] if candidate_parties else (tx.get("party_name") or "")
+        # Party suggestion is gated by a similarity floor — don't blindly propose
+        # the nearest party when it's unrelated (e.g. only one party embedded).
+        party_sim = max(0.0, min(1.0, 1.0 - candidate_parties[0]["distance"])) if candidate_parties else 0.0
+        party_ok = party_sim >= PARTY_MIN_SIM
+        suggested_party = candidate_parties[0]["name"] if (candidate_parties and party_ok) else ""
         suggested_head = candidate_heads[0]["name"] if candidate_heads else ("Sales Account" if is_credit else "Suspense A/c")
-        vector_conf = max(0.0, 1.0 - (candidate_heads[0]["distance"] if candidate_heads else 1.0))
 
         item = {
             "bank_transaction": tx, "status": "unmatched",
             "suggested_party": suggested_party, "suggested_expense_head": suggested_head,
             "suggested_bank_ledger": default_bank, "voucher_type": voucher_type,
-            "confidence": round(vector_conf, 3),
+            # confidence now reflects the PARTY-match similarity (what we gate on +
+            # show as "match %"); 0 when no confident party was found.
+            "confidence": round(party_sim, 3),
             "tally_voucher_id": None, "voucher_number": None,
-            "rationale": "Vector retrieval (pending AI review)",
+            "rationale": ("Vector retrieval (pending AI review)" if party_ok
+                          else f"No confident party match (best {round(party_sim*100)}%) — needs review"),
             "candidate_parties": [p["name"] for p in candidate_parties[:5]],
             "candidate_heads": [h["name"] for h in candidate_heads[:8]],
             "candidate_narrations": candidate_narrations,
@@ -224,10 +239,11 @@ def ai_reconcile_statement(transactions, company_name, company_id=None, progress
             "_is_credit": is_credit,
         }
 
-        # Skip Gemini if vector match is very strong (saves time + cost)
-        if vector_conf >= 0.7 and candidate_parties:
+        # Strong party match → AI Ready, skip Gemini. Otherwise let Gemini reason
+        # (it may surface a party from the narration, or return "" = needs review).
+        if party_ok and party_sim >= PARTY_AUTOFILL_SIM:
             item["status"] = "auto_filled"
-            item["rationale"] = f"High-confidence vector match ({round(vector_conf*100)}%)"
+            item["rationale"] = f"High-confidence party match ({round(party_sim*100)}%)"
         else:
             needs_ai.append((len(results), item))  # store position + item
 
@@ -290,13 +306,26 @@ Return the array only, no markdown fences, no commentary.
                         li = entry.get("line_idx")
                         if li is None or li >= len(chunk): continue
                         results_pos, item = chunk[li]
-                        if entry.get("party"): item["suggested_party"] = entry["party"]
-                        if entry.get("head"): item["suggested_expense_head"] = entry["head"]
+                        gconf = None
                         if entry.get("confidence") is not None:
-                            item["confidence"] = round(float(entry["confidence"]), 3)
-                        if entry.get("rationale"): item["rationale"] = entry["rationale"]
-                        if item["confidence"] >= 0.6:
-                            item["status"] = "auto_filled"
+                            gconf = round(float(entry["confidence"]), 3)
+                            item["confidence"] = gconf
+                        if entry.get("head"): item["suggested_expense_head"] = entry["head"]
+                        gparty = (entry.get("party") or "").strip()
+                        # Apply the same party floor to Gemini's self-reported
+                        # confidence: below PARTY_MIN_SIM we don't trust the party →
+                        # leave it blank for human review rather than guess.
+                        if gparty and (gconf is None or gconf >= PARTY_MIN_SIM):
+                            item["suggested_party"] = gparty
+                            if gconf is not None and gconf >= PARTY_AUTOFILL_SIM:
+                                item["status"] = "auto_filled"
+                            if entry.get("rationale"): item["rationale"] = entry["rationale"]
+                        else:
+                            item["suggested_party"] = ""
+                            item["status"] = "unmatched"
+                            item["rationale"] = ("No confident party match"
+                                + (f" (best {round(gconf*100)}%)" if gconf is not None else "")
+                                + " — needs review")
                         results[results_pos] = item
                 print(f"[AI RECON] Gemini batch {chunk_start//CHUNK + 1} processed {len(ai_array) if m else 0} suggestions", flush=True)
             except Exception as e:

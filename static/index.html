@@ -12640,11 +12640,18 @@
                 // pgroup picks the right master group when adding a new party — a
                 // credit (money in) ⇒ customer (Sundry Debtors); a debit ⇒ vendor.
                 const pgroup = amt >= 0 ? 'Sundry Debtors' : 'Sundry Creditors';
+                // Party-match % (r.confidence = cosine similarity of the AI's best
+                // party guess). Shows how sure the AI is so the cutoff is calibratable:
+                // ≥70% green (AI Ready), 60–70% amber, <60% red (left blank, needs review).
+                const _pc = (r.confidence !== null && r.confidence !== undefined) ? Math.round(r.confidence * 100) : null;
+                const matchBadge = (editable && _pc !== null)
+                    ? `<div class="party-match" style="margin-top:3px; font-size:0.66rem; color:${_pc >= 70 ? '#10b981' : (_pc >= 60 ? '#f59e0b' : '#ef4444')};">${_pc >= 60 ? '🎯 match ' + _pc + '%' : '⚠️ low match ' + _pc + '%'}</div>`
+                    : '';
                 const partyCell = editable
                     ? `<div class="party-combo">
                          <input type="text" value="${(r.party || '').replace(/"/g, '&quot;')}" data-id="${r.id}" data-field="party" data-pgroup="${pgroup}" class="party-combo-input" placeholder="Search or add party…" autocomplete="off" onfocus="showPartyMenu(this)" oninput="showPartyMenu(this)" onkeydown="partyComboKey(event,this)" onblur="hidePartyMenu(this)">
                          <div class="party-combo-menu" style="display:none;"></div>
-                       </div>`
+                       </div>${matchBadge}`
                     : `<span style="color:#cbd5e1;">${r.party || '—'}</span>`;
                 const headCell = editable
                     ? `<input type="text" list="bank-head-list" value="${(r.head || '').replace(/"/g, '&quot;')}" data-id="${r.id}" data-field="head" class="bank-inline" placeholder="Search head…" style="background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:4px; padding:3px 6px; font-size:0.78rem; width: 150px;">`
