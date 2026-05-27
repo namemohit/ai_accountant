@@ -4004,18 +4004,44 @@ async def bank_ledger_options(company_id: str = None, company_name: str = None):
             ORDER BY name
         """, (company_id, company_name, company_id, company_name))
         rows = cur.fetchall()
-        cur.close(); conn.close()
         parties, heads, banks = [], [], []
+        # Case-insensitive party set (preserve first-seen casing) so the dropdown
+        # shows the FULL party list with no dupes.
+        party_map = {}
+        def _add_party(nm):
+            nm = (nm or "").strip()
+            if nm and nm.lower() not in party_map:
+                party_map[nm.lower()] = nm
         for r in rows:
             grp = (r.get("parent_group") or "").lower()
             nm = r.get("name")
             if not nm: continue
             if "sundry" in grp or "debtor" in grp or "creditor" in grp:
-                parties.append(nm)
+                _add_party(nm)
             elif "bank account" in grp or "cash-in-hand" in grp or "cash in hand" in grp:
                 banks.append(nm)
             elif "expense" in grp or "income" in grp or "revenue" in grp or "sales" in grp or "purchase" in grp:
                 heads.append(nm)
+        # Broaden the party list beyond Sundry ledgers: include parties seen on the
+        # company's invoices and parties learned into the RAG store (knowledge_base),
+        # so the dropdown reflects every party the company actually deals with.
+        try:
+            cur.execute("""SELECT DISTINCT party_name FROM invoices
+                           WHERE company_name = %s AND party_name IS NOT NULL AND party_name <> ''""",
+                        (company_name,))
+            for r in cur.fetchall(): _add_party(r.get("party_name"))
+        except Exception:
+            conn.rollback()
+        try:
+            cur.execute("""SELECT DISTINCT data->>'party' AS p FROM knowledge_base
+                           WHERE type='tally_master_party' AND data->>'company_name' = %s
+                             AND COALESCE(data->>'party','') <> ''""",
+                        (company_name,))
+            for r in cur.fetchall(): _add_party(r.get("p"))
+        except Exception:
+            conn.rollback()
+        cur.close(); conn.close()
+        parties = sorted(party_map.values(), key=lambda s: s.lower())
         return {"status": "success", "parties": parties, "heads": heads, "banks": banks}
     except Exception as e:
         import traceback; traceback.print_exc()
