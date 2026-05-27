@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "177"
+APP_VERSION = "178"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -3481,6 +3481,109 @@ async def post_bank_transactions_to_tally(payload: dict):
             "status": "success",
             "posted": posted, "learned": learned, "skipped": skipped,
             "message": f"Posted {posted} vouchers, recorded {learned} learnings."
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _mass_learn_bank_parties(company_name, company_id, lines):
+    """Background task: teach the reconciler each submitted line's narration→party
+    (tally_master_party, idempotent). Covers AI-suggested lines never individually
+    confirmed — submitting them is the bulk acceptance the AI learns from."""
+    for ln in lines:
+        try:
+            db.learn_bank_party(company_name, ln.get("description") or "",
+                                ln.get("party") or "", get_embedding,
+                                company_id, str(ln.get("id")))
+        except Exception as e:
+            print(f"[submit-to-vouchers] learn error {ln.get('id')}: {e}", flush=True)
+
+
+@app.post("/api/bank/submit-to-vouchers")
+async def submit_bank_to_vouchers(payload: dict, background_tasks: BackgroundTasks = None):
+    """Submit all reconciled-but-not-yet-in-books bank lines to the Voucher section:
+    build a double-entry voucher per line and INSERT into tally_vouchers (so they show
+    in the Vouchers tab). Only creates Voucher-section entries — pushing to Tally stays
+    the Voucher section's own job. At submit, the AI bulk-learns each line's
+    narration→party mapping (background). Body: {company_name, company_id?}."""
+    try:
+        company_name = (payload.get("company_name") or "").strip()
+        if not company_name:
+            raise HTTPException(status_code=400, detail="company_name required")
+        company_id = payload.get("company_id") or _resolve_company_id_by_name(company_name)
+        rows = db.get_submittable_bank_lines(company_id, company_name)
+        if not rows:
+            return {"status": "success", "submitted": 0, "skipped": 0,
+                    "message": "No new reconciled lines to submit."}
+        submitted = 0
+        skipped = 0
+        learned_lines = []
+        for r in rows:
+            party = (r.get("party") or "").strip()
+            head = (r.get("head") or "").strip()
+            bank = (r.get("bank_ledger") or "Bank Account").strip()
+            amount = abs(float(r["amount"]))
+            vtype = r.get("voucher_type") or ("Receipt" if float(r["amount"]) > 0 else "Payment")
+            desc = (r.get("description") or "").strip()
+            ref = (r.get("reference") or "").strip()
+            date_compact = (str(r["date"]).replace("-", "") if r.get("date") else "")
+            if vtype == "Receipt":
+                ledger_entries = [
+                    {"ledger_name": bank, "amount": amount, "is_debit": True},
+                    {"ledger_name": head or party or "Sales Account", "amount": -amount, "is_debit": False},
+                ]
+            else:
+                ledger_entries = [
+                    {"ledger_name": head or "Suspense A/c", "amount": amount, "is_debit": True},
+                    {"ledger_name": bank, "amount": -amount, "is_debit": False},
+                ]
+            voucher = {
+                "date": date_compact, "type": vtype, "voucher_type": vtype,
+                "party": party or head,
+                "number": ref or f"BANK-{str(r['id'])[:8]}",
+                "amount": amount, "narration": desc,
+                "ledger_entries": ledger_entries,
+                "reference_no": ref, "instrument_number": ref,
+                "currency": "INR", "tally_master_id": None,
+            }
+            ok_v, err_v = db.validate_voucher_for_post(voucher)
+            if not ok_v:
+                print(f"[submit-to-vouchers] skip unbalanced row {r['id']}: {err_v}")
+                skipped += 1
+                continue
+            try:
+                save_res = db.save_tally_vouchers(company_name, [voucher])
+                if save_res.get("upserted"):
+                    submitted += 1
+                    db.update_bank_transaction(r["id"], {"status": "posted", "human_touched": True},
+                                               company_id=company_id)
+                    learned_lines.append({"id": r["id"], "description": desc, "party": party})
+            except Exception as ve:
+                print(f"[submit-to-vouchers] voucher save error {r['id']}: {ve}")
+                skipped += 1
+        # Backfill company_id on the freshly inserted vouchers
+        if company_id:
+            try:
+                conn_bf = db.get_conn(); cur_bf = conn_bf.cursor()
+                cur_bf.execute("UPDATE tally_vouchers SET company_id = %s "
+                               "WHERE company_name = %s AND company_id IS NULL",
+                               (company_id, company_name))
+                conn_bf.commit(); cur_bf.close(); conn_bf.close()
+            except Exception as bf:
+                print(f"[submit-to-vouchers] backfill: {bf}")
+        # Mass-learn every submitted line (background — embeds are slow).
+        if learned_lines:
+            if background_tasks is not None:
+                background_tasks.add_task(_mass_learn_bank_parties, company_name, company_id, learned_lines)
+            else:
+                _mass_learn_bank_parties(company_name, company_id, learned_lines)
+        return {
+            "status": "success", "submitted": submitted, "skipped": skipped,
+            "message": f"Submitted {submitted} entr{'y' if submitted == 1 else 'ies'} to the Voucher section."
+                       + (f" Skipped {skipped}." if skipped else ""),
         }
     except HTTPException:
         raise

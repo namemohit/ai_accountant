@@ -5698,6 +5698,35 @@ def get_rerunnable_bank_lines(company_id=None, company_name=None, upload_id=None
         cur.close(); pput(conn)
 
 
+def get_submittable_bank_lines(company_id=None, company_name=None):
+    """Bank-statement lines ready to become NEW vouchers in the Voucher section:
+    a party is assigned, the line is AI-ready/manually-set, and it isn't already in
+    the books (not Linked, not Posted, not blank). These are what 'Submit to Vouchers'
+    creates."""
+    where = ["bt.source = 'bank_statement'",
+             "bt.status = 'ai_filled'",
+             "COALESCE(bt.party, '') <> ''",
+             "bt.linked_id IS NULL"]
+    params = []
+    if company_id and company_name:
+        where.append("(bt.company_id = %s OR (bt.company_id IS NULL AND bt.company_name = %s))")
+        params += [company_id, company_name]
+    elif company_id:
+        where.append("bt.company_id = %s"); params.append(company_id)
+    elif company_name:
+        where.append("bt.company_name = %s"); params.append(company_name)
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute(f"""SELECT id, date, description, reference, amount, party, head,
+                               bank_ledger, voucher_type, human_touched
+                        FROM bank_transactions bt
+                        WHERE {' AND '.join(where)}
+                        ORDER BY bt.source_row_idx NULLS LAST, bt.date""", params)
+        return cur.fetchall()
+    finally:
+        cur.close(); pput(conn)
+
+
 def bank_health_check(company_id, company_name):
     """Compute health metrics for the Bank tab Health Check card.
 

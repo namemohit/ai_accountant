@@ -1043,6 +1043,7 @@
                         <div style="flex: 1;"></div>
                         <input type="file" id="ai-bank-input" accept=".csv,.xlsx,.xls,.pdf" style="display:none" onchange="handleBankUpload(this)">
                         <button id="bank-rerun-btn" onclick="rerunBankReco()" title="Re-run the AI on the unreconciled lines only, using anything you've taught it since (e.g. parties you added). Lines you already fixed are left untouched." style="background: rgba(168,85,247,0.12); color: #c084fc; font-weight: 600; padding: 6px 12px; border-radius: 6px; border: 1px solid rgba(168,85,247,0.4); cursor: pointer; font-size: 0.8rem; margin-bottom: 6px; margin-right: 8px;">🔄 Re-run AI (unreconciled)</button>
+                        <button id="bank-submit-btn" onclick="submitBankToVouchers()" title="Send all reconciled lines (with a party, not already in the books) to the Voucher section as vouchers. The AI also learns from every line submitted." style="background: #10b981; color: white; font-weight: bold; padding: 6px 14px; border-radius: 6px; border: none; cursor: pointer; font-size: 0.8rem; margin-bottom: 6px; margin-right: 8px;">✅ Submit to Vouchers</button>
                         <button onclick="document.getElementById('ai-bank-input').click()" style="background: linear-gradient(135deg, #38bdf8 0%, #a855f7 100%); color: white; font-weight: bold; padding: 6px 14px; border-radius: 6px; border: none; cursor: pointer; font-size: 0.8rem; margin-bottom: 6px;">📤 Upload Statement</button>
                         <!-- Sync Now removed — all Tally sync now lives in Vouchers ▸ Import/Export. -->
                     </div>
@@ -1122,12 +1123,9 @@
                 </div><!-- /controls card -->
                 </div><!-- /sticky-controls -->
 
-                <!-- Bulk action bar (non-sticky — only appears when rows are selected) -->
-                <div id="bank-bulk-bar" style="display: none; margin-top: 10px; padding: 10px 14px; background: rgba(56,189,248,0.06); border: 1px solid rgba(56,189,248,0.2); border-radius: 6px; gap:8px; align-items:center;">
-                    <span id="bank-selected-count" style="color: #cbd5e1; font-size: 0.85rem; margin-right: 8px;">0 selected</span>
-                    <button onclick="postSelectedBankToTally()" style="background: #10b981; color: white; font-weight: bold; padding: 6px 14px; border-radius: 6px; border: none; cursor: pointer; font-size: 0.8rem;">📤 Post to Tally</button>
-                    <button onclick="document.querySelectorAll('.bank-select').forEach(c => c.checked = false); updateBankSelectedCount();" style="background: transparent; color: #94a3b8; border: 1px solid var(--border); padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 0.8rem;">Clear</button>
-                </div>
+                <!-- Selected-rows "Post to Tally" bar retired — submitting now goes
+                     through the always-visible "✅ Submit to Vouchers" button (all
+                     eligible lines), which creates Voucher-section entries. -->
 
                 <!-- Sprint 12 — Triage hint banner (visible only when filter = needs_attention) -->
                 <div id="bank-triage-hint" style="margin-top: 10px; padding: 8px 12px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 6px; color: #cbd5e1; font-size: 0.82rem; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
@@ -1144,7 +1142,6 @@
                         <table style="width: 100%; border-collapse: collapse; font-size: 0.8rem;">
                             <thead style="position: sticky; top: 0; background: var(--bg-surface); z-index: 1;">
                                 <tr style="border-bottom: 2px solid var(--border); color: #94a3b8;">
-                                    <th style="padding: 10px;"><input type="checkbox" onchange="document.querySelectorAll('.bank-select').forEach(c => { c.checked = this.checked; }); updateBankSelectedCount();"></th>
                                     <th style="text-align: left; padding: 10px;">Date</th>
                                     <th style="text-align: left; padding: 10px;">Description / Ref</th>
                                     <th style="text-align: left; padding: 10px;">Party</th>
@@ -1155,7 +1152,7 @@
                                     <th style="text-align: left; padding: 10px;" title="Who reconciled this row — AI engine, human, or both">Reconciled By</th>
                                 </tr>
                             </thead>
-                            <tbody id="bank-tx-tbody"><tr><td colspan="9" style="text-align:center; padding:20px; color:#64748b;">Loading bank transactions…</td></tr></tbody>
+                            <tbody id="bank-tx-tbody"><tr><td colspan="8" style="text-align:center; padding:20px; color:#64748b;">Loading bank transactions…</td></tr></tbody>
                         </table>
                         <!-- Datalists for inline party / head / bank dropdowns. Populated by loadBankLedgerOptions() -->
                         <datalist id="bank-head-list"></datalist>
@@ -12424,7 +12421,7 @@
         async function loadBankTransactions() {
             const co = _getActiveCompanyForBank();
             if (!co.company_name) {
-                document.getElementById('bank-tx-tbody').innerHTML = '<tr><td colspan="9" style="text-align:center; padding:20px; color:#64748b;">Select a company first.</td></tr>';
+                document.getElementById('bank-tx-tbody').innerHTML = '<tr><td colspan="8" style="text-align:center; padding:20px; color:#64748b;">Select a company first.</td></tr>';
                 return;
             }
             loadBankLedgerOptions();  // fire-and-forget; cached after first call
@@ -12458,7 +12455,7 @@
                 const j = await res.json();
                 renderBankTable(j.data.rows, j.data.total, j.data.stats);
             } catch (e) {
-                document.getElementById('bank-tx-tbody').innerHTML = `<tr><td colspan="9" style="text-align:center; padding:20px; color:#ef4444;">Error: ${e.message}</td></tr>`;
+                document.getElementById('bank-tx-tbody').innerHTML = `<tr><td colspan="8" style="text-align:center; padding:20px; color:#ef4444;">Error: ${e.message}</td></tr>`;
             }
         }
 
@@ -12654,7 +12651,7 @@
             setStat('bank-stat-posted',        s.posted);
 
             if (!rows || !rows.length) {
-                tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:20px; color:#64748b;">No bank statement lines yet. Click "Upload Statement" above to reconcile a bank statement.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; padding:20px; color:#64748b;">No bank statement lines yet. Click "Upload Statement" above to reconcile a bank statement.</td></tr>';
                 return;
             }
 
@@ -12710,7 +12707,6 @@
 
                 return `
                 <tr style="border-bottom: 1px solid rgba(255,255,255,0.04);">
-                    <td style="padding: 8px;"><input type="checkbox" class="bank-select" value="${r.id}" onchange="updateBankSelectedCount()"></td>
                     <td style="padding: 8px; color:#cbd5e1; white-space:nowrap; font-size:0.78rem;">${r.date || '—'}</td>
                     <td style="padding: 8px; max-width: 280px;">
                         <div style="color:#e2e8f0;">${(r.description || '').substring(0, 100)} ${sourceLink}</div>
@@ -12843,10 +12839,10 @@
                 const tr = input.closest('tr');
                 if (d && tr) {
                     const tds = tr.querySelectorAll(':scope > td');
-                    if (tds.length >= 9) {
+                    if (tds.length >= 8) {
                         const linked = d.linked_id ? ' <span style="color:#a855f7; font-size:0.7rem;" title="Linked across sources">🔗</span>' : '';
-                        tds[7].innerHTML = _tallyStatusCell(d) + linked;
-                        tds[8].innerHTML = _reconciledByBadge(d.ai_touched, d.human_touched, d.confidence);
+                        tds[6].innerHTML = _tallyStatusCell(d) + linked;  // Tally Status
+                        tds[7].innerHTML = _reconciledByBadge(d.ai_touched, d.human_touched, d.confidence);  // Reconciled By
                     }
                     if (mb) {
                         const _pc = (d.confidence !== null && d.confidence !== undefined) ? Math.round(d.confidence * 100) : null;
@@ -12915,45 +12911,34 @@
             }
         }
 
-        function updateBankSelectedCount() {
-            const selected = document.querySelectorAll('.bank-select:checked').length;
-            const bar = document.getElementById('bank-bulk-bar');
-            const countEl = document.getElementById('bank-selected-count');
-            if (selected > 0) {
-                bar.style.display = 'flex';
-                countEl.innerText = `${selected} selected`;
-            } else {
-                bar.style.display = 'none';
-            }
-        }
-
-        async function postSelectedBankToTally() {
-            const ids = Array.from(document.querySelectorAll('.bank-select:checked')).map(c => c.value);
-            if (!ids.length) { alert('Select at least one row.'); return; }
+        // Submit all reconciled-but-not-yet-in-books lines to the Voucher section.
+        // Creates tally_vouchers entries (they appear in the Vouchers tab) and the
+        // server bulk-learns each line's narration→party. Pushing to Tally stays the
+        // Voucher section's own job.
+        async function submitBankToVouchers() {
             const co = _getActiveCompanyForBank();
+            if (!co.company_name) { alert('Select a company first.'); return; }
             const cid = await _ensureBankCompanyId();
             if (cid) co.company_id = cid;
-            if (!confirm(`Post ${ids.length} bank transactions as Tally vouchers? This will create entries in Books → Vouchers.`)) return;
+            if (!confirm('Submit all reconciled lines (with a party, not already in the books) to the Voucher section? The AI will also learn from every line submitted.')) return;
+            const btn = document.getElementById('bank-submit-btn');
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) { btn.disabled = true; btn.innerHTML = '⏳ Submitting…'; }
             try {
-                const res = await fetch(`${API}/api/bank-transactions/post-to-tally`, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        company_name: co.company_name,
-                        company_id: co.company_id,
-                        tx_ids: ids,
-                    })
+                const res = await fetch(`${API}/api/bank/submit-to-vouchers`, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ company_name: co.company_name, company_id: co.company_id })
                 });
                 const j = await res.json();
-                if (res.ok) {
-                    alert(`✅ ${j.message}`);
-                    loadBankTransactions();
-                    loadBankHealth();
-                } else {
-                    alert('Posting failed: ' + (j.detail || 'unknown'));
-                }
+                if (!res.ok) throw new Error(j.detail || 'submit failed');
+                if (j.submitted === 0) alert('No new reconciled lines to submit. (Lines need a party and must not already be in the books.)');
+                else alert(`✅ Submitted ${j.submitted} entr${j.submitted === 1 ? 'y' : 'ies'} to the Voucher section — the AI also learned from them.${j.skipped ? ' Skipped ' + j.skipped + '.' : ''}`);
+                await loadBankTransactions();
+                if (typeof loadBankHealth === 'function') loadBankHealth();
             } catch (e) {
-                alert('Connection error.');
+                alert('Submit failed: ' + e.message);
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
             }
         }
 
