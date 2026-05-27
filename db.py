@@ -8427,7 +8427,15 @@ NETWORK_REL_ROLES = {
     "other":      "viewer",       # custom — approver can override the role
 }
 
+_NETWORK_SCHEMA_READY = False
+
 def _ensure_network_schema():
+    # Run once per process. The DDL here (ALTER TABLE / CREATE TABLE) takes an
+    # AccessExclusiveLock; doing it on every network call serialized requests and
+    # could deadlock against concurrent readers. The schema is stable after first run.
+    global _NETWORK_SCHEMA_READY
+    if _NETWORK_SCHEMA_READY:
+        return
     conn = get_conn(); cur = conn.cursor()
     try:
         cur.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS connect_id TEXT UNIQUE")
@@ -8455,6 +8463,7 @@ def _ensure_network_schema():
         try: cur.execute("ALTER TABLE org_relationships ALTER COLUMN granted_role DROP NOT NULL")
         except Exception: pass
         conn.commit()
+        _NETWORK_SCHEMA_READY = True
     except Exception as e:
         conn.rollback(); print(f"[_ensure_network_schema] {e}")
     finally:
@@ -8980,6 +8989,10 @@ try:
         _seed_agents()  # ensure first-party catalog + core auto-installs (incl. Network)
     except Exception as _se:
         print(f"[startup _seed_agents] {_se}")
+    try:
+        _ensure_network_schema()  # create Network tables once at boot (avoids per-request DDL locks)
+    except Exception as _ne:
+        print(f"[startup _ensure_network_schema] {_ne}")
     print(f"Cloud Database Initialized Successfully. ({seeded} recon templates loaded)")
 except Exception as e:
     print(f"Cloud DB Error: {e}")

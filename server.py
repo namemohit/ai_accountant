@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "155"
+APP_VERSION = "156"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -6593,6 +6593,23 @@ async def api_network_revoke(payload: dict):
         raise HTTPException(status_code=403, detail="That connection isn't yours to revoke.")
     res = db.revoke_relationship(rel_id)
     return {"status": "success" if res.get("ok") else "error", **res}
+
+
+@app.get("/api/user/companies")
+async def api_user_companies_list(username: str):
+    """Fresh list of companies the caller can access (legacy projection — same source
+    the login uses). Lets the company switcher pick up newly-shared companies without
+    a re-login."""
+    u = db.get_user_by_username(username)
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found.")
+    companies = u.get("companies")
+    if isinstance(companies, str):
+        try: companies = json.loads(companies)
+        except Exception: companies = None
+    if not companies:
+        companies = [u.get("company_name") or "Acme Corp"]
+    return {"status": "success", "companies": companies, "company_name": u.get("company_name")}
 
 
 # =============================================================================

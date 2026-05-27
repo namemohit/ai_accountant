@@ -152,6 +152,40 @@
         }
         checkAuth();
 
+        // Refresh the company switcher from the server so newly-shared companies (e.g. a
+        // CA granted access via Network) appear without a re-login. Source = same legacy
+        // list the login uses. Updates localStorage + both selects, preserving the active pick.
+        async function refreshCompanies() {
+            let u; try { u = JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return; }
+            if (!u || !u.username) return;
+            try {
+                const r = await fetch(`${API}/api/user/companies?username=${encodeURIComponent(u.username)}`);
+                const d = await r.json();
+                if (!r.ok || !Array.isArray(d.companies)) return;
+                const fresh = d.companies;
+                if (JSON.stringify(fresh) === JSON.stringify(u.companies || [])) return;   // unchanged
+                u.companies = fresh;
+                try { localStorage.setItem('currentUser', JSON.stringify(u)); } catch(_) {}
+                const active = u.company_name;
+                ['active-company-select', 'active-company-select-mobile'].forEach(id => {
+                    const sel = document.getElementById(id); if (!sel) return;
+                    const keep = sel.value && sel.value !== '__ADD_NEW__' ? sel.value : active;
+                    sel.innerHTML = '';
+                    fresh.forEach(c => {
+                        const o = document.createElement('option');
+                        o.value = c; o.innerText = c;
+                        if (c === keep) o.selected = true;
+                        sel.appendChild(o);
+                    });
+                    const addOpt = document.createElement('option');
+                    addOpt.value = '__ADD_NEW__'; addOpt.innerText = '+ Add New Company';
+                    sel.appendChild(addOpt);
+                });
+                if (typeof _renderTopbar === 'function') _renderTopbar();
+            } catch(_) {}
+        }
+        window.addEventListener('load', () => { setTimeout(refreshCompanies, 400); });
+
         // Sprint 58 — PWA Share Target pickup. The service worker stashes shared files
         // in the 'yantrai-shared' cache and redirects here; upload them to the active
         // company's library via the existing uploader (token + company already in JS).
