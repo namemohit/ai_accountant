@@ -4245,6 +4245,18 @@
             return _nwUser().company_name || '';
         }
         window.__nwMyId = window.__nwMyId || '';
+        // Cache the (stable) Workspace ID per active company so it paints instantly on
+        // revisit; we still revalidate in the background.
+        function _nwMeKey() { return '__nw_me_' + (_nwCo() || ''); }
+        function _nwReadMe() { try { return JSON.parse(localStorage.getItem(_nwMeKey()) || 'null'); } catch(_) { return null; } }
+        function _nwWriteMe(o) { try { localStorage.setItem(_nwMeKey(), JSON.stringify(o)); } catch(_) {} }
+        async function _nwFetchMe() {
+            const u = _nwUser();
+            const r = await fetch(`${API}/api/network/me?username=${encodeURIComponent(u.username||'')}&company_name=${encodeURIComponent(_nwCo())}`);
+            const d = await r.json();
+            if (r.ok && d.connect_id) { window.__nwMyId = d.connect_id; _nwWriteMe({connect_id:d.connect_id, org_name:d.org_name}); return d; }
+            return null;
+        }
         const _NW_REL_LABELS = {
             ca:'CA / accounting firm', accountant:'Accountant', auditor:'Auditor',
             staff:'Staff / Junior', manager:'Manager', other:'Other' };
@@ -4256,17 +4268,14 @@
             staff:'They’ll get junior access — limited entry.',
             other:'They’ll get view-only access (custom).' };
 
+        function _nwPaintMe(d) {
+            if (!d || !d.connect_id) return;
+            const idEl = document.getElementById('nw-my-id'); if (idEl) idEl.textContent = d.connect_id;
+            const nm = document.getElementById('nw-my-name'); if (nm) nm.textContent = d.org_name ? `(${d.org_name})` : '';
+        }
         async function loadNetworkHome() {
-            const u = _nwUser();
-            try {
-                const r = await fetch(`${API}/api/network/me?username=${encodeURIComponent(u.username||'')}&company_name=${encodeURIComponent(_nwCo())}`);
-                const d = await r.json();
-                if (r.ok && d.connect_id) {
-                    window.__nwMyId = d.connect_id;
-                    const idEl = document.getElementById('nw-my-id'); if (idEl) idEl.textContent = d.connect_id;
-                    const nm = document.getElementById('nw-my-name'); if (nm) nm.textContent = d.org_name ? `(${d.org_name})` : '';
-                }
-            } catch(_) {}
+            _nwPaintMe(_nwReadMe());                 // instant from cache
+            try { _nwPaintMe(await _nwFetchMe()); } catch(_) {}   // revalidate
             nwRefreshBadge();
         }
         function nwCopyId() {
@@ -4310,10 +4319,10 @@
                     : '<div style="color:#64748b; font-size:0.85rem;">No incoming requests.</div>';
                 if (out) out.innerHTML = (d.outgoing||[]).length ? d.outgoing.map(_nwOutgoingCard).join('')
                     : '<div style="color:#64748b; font-size:0.85rem;">No pending outgoing requests.</div>';
+                _nwSetBadge((d.incoming||[]).length);   // reuse this fetch — no second round-trip
             } catch(e) {
                 if (inc) inc.innerHTML = `<div style="color:#f87171; font-size:0.85rem;">${escapeHtml(e.message)}</div>`;
             }
-            nwRefreshBadge();
         }
         function _nwIncomingCard(x) {
             const who = escapeHtml(x.requester_name || 'A workspace');
@@ -4457,16 +4466,13 @@
             } catch(e) { alert(e.message); }
             loadNetworkList();
         }
-        // Home widget: populate the Workspace ID + pending-requests badge.
+        // Home widget: populate the Workspace ID (instant from cache, then revalidate) + badge.
         async function loadHomeNetworkWidget() {
-            const u = _nwUser();
+            const c = _nwReadMe();
+            if (c && c.connect_id) { const el = document.getElementById('home-net-id'); if (el) el.textContent = c.connect_id; }
             try {
-                const r = await fetch(`${API}/api/network/me?username=${encodeURIComponent(u.username||'')}&company_name=${encodeURIComponent(_nwCo())}`);
-                const d = await r.json();
-                if (r.ok && d.connect_id) {
-                    window.__nwMyId = d.connect_id;
-                    const el = document.getElementById('home-net-id'); if (el) el.textContent = d.connect_id;
-                }
+                const d = await _nwFetchMe();
+                if (d) { const el = document.getElementById('home-net-id'); if (el) el.textContent = d.connect_id; }
             } catch(_) {}
             nwRefreshBadge();
         }
@@ -4486,17 +4492,18 @@
                 show(res.error || 'Could not send request.', '#f87171');
             }
         }
+        function _nwSetBadge(n) {
+            window.__nwPending = n || 0;
+            const b = document.getElementById('nw-home-badge');
+            if (b) { b.textContent = window.__nwPending || ''; b.style.display = window.__nwPending ? 'inline-flex' : 'none'; }
+        }
         // Pending-incoming count → Home widget + (future) badges.
         async function nwRefreshBadge() {
             const u = _nwUser();
             try {
                 const r = await fetch(`${API}/api/network/requests?username=${encodeURIComponent(u.username||'')}&company_name=${encodeURIComponent(_nwCo())}`);
                 const d = await r.json();
-                if (r.ok) {
-                    window.__nwPending = (d.incoming||[]).length;
-                    const b = document.getElementById('nw-home-badge');
-                    if (b) { b.textContent = window.__nwPending || ''; b.style.display = window.__nwPending ? 'inline-flex' : 'none'; }
-                }
+                if (r.ok) _nwSetBadge((d.incoming||[]).length);
             } catch(_) {}
         }
 

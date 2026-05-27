@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "156"
+APP_VERSION = "158"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -6473,7 +6473,7 @@ def _network_ctx(username, company_name=None, org_id=None, require_role=True):
     'me' and every action use the SAME resolution, so the shown ID always matches the
     workspace actions run on. When require_role, the caller must be owner/manager."""
     users_id, _ = _resolve_caller(username)
-    mems = db.get_user_memberships(users_id) or []
+    mems = db.user_memberships_basic(users_id) or []   # light: no N+1 company fetch
     allow = ("owner", "manager")
     owned = [x for x in mems if x["role"] in allow]
     chosen = None

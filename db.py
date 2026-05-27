@@ -1000,7 +1000,7 @@ def init_db():
     conn.close()
 
 def get_user_by_username(username: str):
-    conn = get_conn()
+    conn = pget()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cursor.execute("SELECT * FROM accounting_users WHERE username = %s", (username,))
@@ -1011,7 +1011,9 @@ def get_user_by_username(username: str):
         return None
     finally:
         cursor.close()
-        conn.close()
+        try: conn.rollback()      # release read snapshot before returning to pool
+        except Exception: pass
+        pput(conn)
 
 
 def _ensure_company_files():
@@ -2491,7 +2493,7 @@ def org_id_for_company(company_name, caller_users_id=None):
     own owned org."""
     if not company_name:
         return None
-    conn = get_conn(); cur = conn.cursor()
+    conn = pget(); cur = conn.cursor()
     try:
         if caller_users_id:
             cur.execute("""
@@ -2513,7 +2515,10 @@ def org_id_for_company(company_name, caller_users_id=None):
             if r: return r[0]
         return None
     finally:
-        cur.close(); conn.close()
+        cur.close()
+        try: conn.rollback()
+        except Exception: pass
+        pput(conn)
 
 
 def recent_ledger(org_id, limit=20):
@@ -8086,6 +8091,25 @@ def _full_role_key(short_role, org_type):
     return f"{prefix}_{short_role}"
 
 
+def user_memberships_basic(user_id):
+    """Lightweight: (org_id, role) per membership in join order — no per-org company
+    fetch (avoids the N+1 in get_user_memberships). Used by hot paths like Network."""
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT m.org_id, m.role
+            FROM memberships m JOIN organizations o ON o.id = m.org_id
+            WHERE m.user_id = %s AND o.archived_at IS NULL
+            ORDER BY m.joined_at ASC
+        """, (str(user_id),))
+        return cur.fetchall()
+    finally:
+        cur.close()
+        try: conn.rollback()
+        except Exception: pass
+        pput(conn)
+
+
 def get_user_memberships(user_id):
     """Return all memberships for a user, including org + companies list per membership."""
     conn = get_conn()
@@ -8165,13 +8189,16 @@ def user_can(user_id, permission, company_id=None):
 
 def list_org_companies(org_id):
     """Companies in one org (id + name) — used by the Network approve scope picker."""
-    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("SELECT id, name FROM companies WHERE org_id=%s AND archived_at IS NULL ORDER BY name",
                     (str(org_id),))
         return [{"id": str(r["id"]), "name": r["name"]} for r in cur.fetchall()]
     finally:
-        cur.close(); conn.close()
+        cur.close()
+        try: conn.rollback()
+        except Exception: pass
+        pput(conn)
 
 
 def get_companies_for_user(user_id):
@@ -8475,7 +8502,7 @@ def _gen_connect_id():
 def get_or_create_connect_id(org_id):
     """Stable AnyDesk-style Workspace ID for an org (generated once)."""
     _ensure_network_schema()
-    conn = get_conn(); cur = conn.cursor()
+    conn = pget(); cur = conn.cursor()
     try:
         cur.execute("SELECT connect_id FROM organizations WHERE id=%s", (org_id,))
         row = cur.fetchone()
@@ -8492,32 +8519,41 @@ def get_or_create_connect_id(org_id):
         cur.execute("SELECT connect_id FROM organizations WHERE id=%s", (org_id,))
         r2 = cur.fetchone(); return r2[0] if r2 else None
     finally:
-        cur.close(); conn.close()
+        cur.close()
+        try: conn.rollback()
+        except Exception: pass
+        pput(conn)
 
 def org_by_connect_id(code):
     _ensure_network_schema()
     code = (code or "").strip().upper()
-    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("SELECT id, name FROM organizations WHERE UPPER(connect_id)=%s AND archived_at IS NULL", (code,))
         return cur.fetchone()
     finally:
-        cur.close(); conn.close()
+        cur.close()
+        try: conn.rollback()
+        except Exception: pass
+        pput(conn)
 
 def get_org_name(org_id):
-    conn = get_conn(); cur = conn.cursor()
+    conn = pget(); cur = conn.cursor()
     try:
         cur.execute("SELECT name FROM organizations WHERE id=%s", (str(org_id),))
         r = cur.fetchone(); return r[0] if r else None
     finally:
-        cur.close(); conn.close()
+        cur.close()
+        try: conn.rollback()
+        except Exception: pass
+        pput(conn)
 
 def grant_membership(user_id, org_id, role, scope_company_ids=None, invited_by=None):
     """Create/update a membership (user → org, role + company scope) and project the
     granted companies' names into legacy accounting_users.companies. Reused by the
     connect-code accept flow and the Network approve flow."""
     import json as _json
-    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         scope = scope_company_ids
         if isinstance(scope, str):
@@ -8538,16 +8574,18 @@ def grant_membership(user_id, org_id, role, scope_company_ids=None, invited_by=N
         """, (str(user_id), str(org_id), role, scope_json, str(invited_by) if invited_by else None))
         cur.execute("SELECT username FROM users WHERE id=%s", (str(user_id),))
         urow = cur.fetchone(); uname = urow["username"] if urow else None
-        conn.commit(); cur.close(); conn.close()
+        conn.commit(); cur.close(); pput(conn)
         if uname:
             for cname in company_names:
                 try: add_company_to_user(uname, cname)
                 except Exception as pe: print(f"[grant_membership project] {pe}")
         return {"ok": True, "companies": company_names}
     except Exception as e:
-        conn.rollback();
-        try: cur.close(); conn.close()
+        try: conn.rollback()
         except Exception: pass
+        try: cur.close()
+        except Exception: pass
+        pput(conn, bad=True)
         print(f"[grant_membership] {e}"); return {"ok": False, "error": str(e)}
 
 def create_relationship_request(requester_org_id, target_org_id, requested_by):
@@ -8557,13 +8595,14 @@ def create_relationship_request(requester_org_id, target_org_id, requested_by):
     _ensure_network_schema()
     if str(requester_org_id) == str(target_org_id):
         return {"ok": False, "error": "You can't connect a workspace to itself."}
-    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""SELECT id, status FROM org_relationships
                        WHERE requester_org_id=%s AND target_org_id=%s AND status IN ('pending','active')
                        LIMIT 1""", (str(requester_org_id), str(target_org_id)))
         ex = cur.fetchone()
         if ex:
+            conn.rollback()
             return {"ok": False, "error": f"A {ex['status']} connection already exists with that workspace."}
         cur.execute("""INSERT INTO org_relationships
             (requester_org_id, target_org_id, grantee_user_id, requested_by, status)
@@ -8573,15 +8612,17 @@ def create_relationship_request(requester_org_id, target_org_id, requested_by):
         rid = cur.fetchone()["id"]; conn.commit()
         return {"ok": True, "id": str(rid)}
     except Exception as e:
-        conn.rollback(); print(f"[create_relationship_request] {e}"); return {"ok": False, "error": str(e)}
+        try: conn.rollback()
+        except Exception: pass
+        print(f"[create_relationship_request] {e}"); return {"ok": False, "error": str(e)}
     finally:
-        cur.close(); conn.close()
+        cur.close(); pput(conn)
 
 def list_relationship_requests(org_id):
     """Pending requests where this org is the TARGET (incoming, to approve) or the
     REQUESTER (outgoing, awaiting their approval)."""
     _ensure_network_schema()
-    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""
             SELECT r.*, ro.name AS requester_name, ro.connect_id AS requester_connect_id,
@@ -8596,7 +8637,10 @@ def list_relationship_requests(org_id):
         out = [_relrow(x) for x in rows if str(x["requester_org_id"]) == str(org_id)]
         return {"incoming": inc, "outgoing": out}
     finally:
-        cur.close(); conn.close()
+        cur.close()
+        try: conn.rollback()
+        except Exception: pass
+        pput(conn)
 
 def _relrow(x):
     return {"id": str(x["id"]), "relationship_type": x["relationship_type"],
@@ -8612,17 +8656,17 @@ def approve_relationship(rel_id, relationship_type=None, scope_company_ids=None)
     if not relationship_type:
         return {"ok": False, "error": "Pick their role before granting access."}
     grant_role = NETWORK_REL_ROLES.get(relationship_type, "viewer")
-    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("SELECT * FROM org_relationships WHERE id=%s", (str(rel_id),))
         r = cur.fetchone()
-        if not r: return {"ok": False, "error": "Request not found."}
-        if r["status"] != "pending": return {"ok": False, "error": f"Already {r['status']}."}
-        cur.close(); conn.close()
+        if not r: conn.rollback(); cur.close(); pput(conn); return {"ok": False, "error": "Request not found."}
+        if r["status"] != "pending": conn.rollback(); cur.close(); pput(conn); return {"ok": False, "error": f"Already {r['status']}."}
+        conn.rollback(); cur.close(); pput(conn)
         g = grant_membership(r["grantee_user_id"], r["target_org_id"], grant_role,
                              scope_company_ids, invited_by=None)
         if not g.get("ok"): return {"ok": False, "error": g.get("error", "grant failed")}
-        conn2 = get_conn(); cur2 = conn2.cursor()
+        conn2 = pget(); cur2 = conn2.cursor()
         try:
             import json as _json
             sj = _json.dumps([str(s) for s in scope_company_ids]) if scope_company_ids else None
@@ -8632,26 +8676,28 @@ def approve_relationship(rel_id, relationship_type=None, scope_company_ids=None)
                          (relationship_type, grant_role, sj, str(rel_id)))
             conn2.commit()
         finally:
-            cur2.close(); conn2.close()
+            cur2.close(); pput(conn2)
         return {"ok": True, "companies": g.get("companies", [])}
     except Exception as e:
         print(f"[approve_relationship] {e}"); return {"ok": False, "error": str(e)}
 
 def decline_relationship(rel_id):
     _ensure_network_schema()
-    conn = get_conn(); cur = conn.cursor()
+    conn = pget(); cur = conn.cursor()
     try:
         cur.execute("UPDATE org_relationships SET status='declined', updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status='pending'", (str(rel_id),))
         conn.commit(); return {"ok": True}
     except Exception as e:
-        conn.rollback(); print(f"[decline_relationship] {e}"); return {"ok": False, "error": str(e)}
+        try: conn.rollback()
+        except Exception: pass
+        print(f"[decline_relationship] {e}"); return {"ok": False, "error": str(e)}
     finally:
-        cur.close(); conn.close()
+        cur.close(); pput(conn)
 
 def list_connections(org_id):
     """Active relationships where this org is on either side."""
     _ensure_network_schema()
-    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""
             SELECT r.*, ro.name AS requester_name, ro.connect_id AS requester_connect_id,
@@ -8671,11 +8717,14 @@ def list_connections(org_id):
                         "direction": "they access mine" if mine_is_target else "I access theirs"})
         return out
     finally:
-        cur.close(); conn.close()
+        cur.close()
+        try: conn.rollback()
+        except Exception: pass
+        pput(conn)
 
 def revoke_relationship(rel_id):
     _ensure_network_schema()
-    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("SELECT grantee_user_id, target_org_id FROM org_relationships WHERE id=%s", (str(rel_id),))
         r = cur.fetchone()
@@ -8685,9 +8734,11 @@ def revoke_relationship(rel_id):
         cur.execute("UPDATE org_relationships SET status='revoked', updated_at=CURRENT_TIMESTAMP WHERE id=%s", (str(rel_id),))
         conn.commit(); return {"ok": True}
     except Exception as e:
-        conn.rollback(); print(f"[revoke_relationship] {e}"); return {"ok": False, "error": str(e)}
+        try: conn.rollback()
+        except Exception: pass
+        print(f"[revoke_relationship] {e}"); return {"ok": False, "error": str(e)}
     finally:
-        cur.close(); conn.close()
+        cur.close(); pput(conn)
 
 
 def list_connection_codes(org_id):
