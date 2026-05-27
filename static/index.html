@@ -3348,10 +3348,14 @@
                 html += `<span class="tb-divider"></span>`;
                 // App name → return to the agent's own launcher (its first view).
                 html += `<span class="tb-appname" style="cursor:pointer" title="Apps" onclick="showView('${_firstViewOf(active)}')">${meta.icon || '🤖'} ${escapeHtml(meta.name || active)}</span>`;
-                // Breadcrumb only for a deeper sub-screen that ISN'T already a tab — the
-                // highlighted tab already shows the current screen, so don't duplicate it.
-                const _curIsTab = meta.views && meta.views.includes(cur);
-                if (curTitle && !_curIsTab) html += `<span class="tb-crumb">› ${curTitle}</span>`;
+                // Show the open skill as a breadcrumb whenever it isn't already a
+                // VISIBLE tab. Launcher-style agents (e.g. Tally Agent) render skills
+                // as a grid, not topbar tabs, so without this the skill name never
+                // appears — the bar would just say the agent name.
+                const _curNavEl = document.querySelector(`nav .nav-item[data-view="${cur}"]`);
+                const _curIsVisibleTab = !!(meta.views && meta.views.includes(cur)
+                                            && _curNavEl && _curNavEl.style.display !== 'none');
+                if (curTitle && !_curIsVisibleTab) html += `<span class="tb-crumb">› ${curTitle}</span>`;
                 html += `<span class="tb-divider"></span>`;
                 // Tabs from the hidden sidebar nav items that belong to this agent.
                 document.querySelectorAll('nav .nav-item[data-view]').forEach(el => {
