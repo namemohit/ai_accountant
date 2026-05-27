@@ -8645,7 +8645,8 @@ def list_connections(org_id):
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""
-            SELECT r.*, ro.name AS requester_name, to2.name AS target_name
+            SELECT r.*, ro.name AS requester_name, ro.connect_id AS requester_connect_id,
+                         to2.name AS target_name, to2.connect_id AS target_connect_id
             FROM org_relationships r
             JOIN organizations ro ON ro.id=r.requester_org_id
             JOIN organizations to2 ON to2.id=r.target_org_id
@@ -8657,6 +8658,7 @@ def list_connections(org_id):
             out.append({"id": str(x["id"]), "relationship_type": x["relationship_type"],
                         "granted_role": x["granted_role"],
                         "other_name": x["requester_name"] if mine_is_target else x["target_name"],
+                        "other_connect_id": x["requester_connect_id"] if mine_is_target else x["target_connect_id"],
                         "direction": "they access mine" if mine_is_target else "I access theirs"})
         return out
     finally:

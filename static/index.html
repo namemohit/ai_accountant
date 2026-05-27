@@ -4401,10 +4401,12 @@
             const dir = x.direction === 'they access mine'
                 ? `They access your workspace (${escapeHtml(x.granted_role)})`
                 : `You access their workspace (${escapeHtml(x.granted_role)})`;
+            const wid = x.other_connect_id ? `<div style="font-size:0.74rem; color:#64748b; font-family:ui-monospace,monospace; letter-spacing:1px; margin-top:2px;">${escapeHtml(x.other_connect_id)}</div>` : '';
             return `<div class="card" style="max-width:620px; margin-bottom:10px;">
                 <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
                     <div>
                         <div style="font-weight:600; color:#f4f4f5;">${escapeHtml(x.other_name||'Workspace')}</div>
+                        ${wid}
                         <div style="font-size:0.78rem; color:#94a3b8; margin-top:3px;">${escapeHtml(rel)} · ${dir}</div>
                     </div>
                     <button onclick="nwRevoke('${x.id}')" style="padding:6px 12px; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.25); border-radius:8px; cursor:pointer; font-size:0.8rem;">Revoke</button>
