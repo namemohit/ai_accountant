@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "150"
+APP_VERSION = "151"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -6463,13 +6463,19 @@ async def api_org_members(username: str, org_id: str = None):
 # the relationship type maps to the access role granted.
 # =============================================================================
 def _network_ctx(username, company_name=None, org_id=None, require_role=True):
-    """Resolve (users_id, org_id) for Network, bound to the caller's ACTIVE workspace
-    (the company switcher) so 'Your ID' and every action operate on the SAME org. Order:
-    explicit org_id → the org that owns the active company → the caller's first owned/
-    managed org. When require_role, the caller must be owner/manager of that org."""
+    """Resolve (users_id, org_id) for Network. The Network you manage is a workspace you
+    OWN/MANAGE — not necessarily the company you're currently viewing (the switcher can
+    point at someone else's workspace you only have access to). Order:
+      1. explicit org_id (if a member),
+      2. the active company's org — but only if the caller owns/manages it,
+      3. the caller's first owned/managed workspace,
+      4. (display only) first membership, so 'Your ID' still shows something.
+    'me' and every action use the SAME resolution, so the shown ID always matches the
+    workspace actions run on. When require_role, the caller must be owner/manager."""
     users_id, _ = _resolve_caller(username)
     mems = db.get_user_memberships(users_id) or []
     allow = ("owner", "manager")
+    owned = [x for x in mems if x["role"] in allow]
     chosen = None
     if org_id:
         chosen = next((x for x in mems if str(x["org_id"]) == str(org_id)), None)
@@ -6477,16 +6483,18 @@ def _network_ctx(username, company_name=None, org_id=None, require_role=True):
         try:
             oid = db.org_id_for_company(company_name, users_id)
             if oid:
-                chosen = next((x for x in mems if str(x["org_id"]) == str(oid)), None)
+                m = next((x for x in mems if str(x["org_id"]) == str(oid)), None)
+                if m and m["role"] in allow:   # only bind if you actually own/manage it
+                    chosen = m
         except Exception:
             chosen = None
     if not chosen:
-        chosen = next((x for x in mems if x["role"] in allow), None) or (mems[0] if mems else None)
+        chosen = owned[0] if owned else (mems[0] if mems else None)
     if not chosen:
         raise HTTPException(status_code=403, detail="You don't have a workspace to use Network.")
     if require_role and chosen["role"] not in allow:
         raise HTTPException(status_code=403,
-                            detail="Only an owner or manager of this workspace can manage its network.")
+                            detail="Only an owner or manager of a workspace can manage its network.")
     return users_id, chosen["org_id"]
 
 
