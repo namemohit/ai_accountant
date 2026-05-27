@@ -1042,6 +1042,7 @@
                         <button id="bank-tab-logs-btn" class="bank-tab-btn" onclick="switchBankTab('logs')" style="background: transparent; border: none; color: #94a3b8; padding: 10px 18px; cursor: pointer; font-weight: 500; border-bottom: 2px solid transparent; font-size: 0.92rem;" title="Audit log of every event affecting bank transactions (syncs, statement uploads, links, etc.)">📜 Event Logs <span id="bank-tab-logs-count" style="color: #64748b; font-size: 0.78rem;"></span></button>
                         <div style="flex: 1;"></div>
                         <input type="file" id="ai-bank-input" accept=".csv,.xlsx,.xls,.pdf" style="display:none" onchange="handleBankUpload(this)">
+                        <button id="bank-rerun-btn" onclick="rerunBankReco()" title="Re-run the AI on the unreconciled lines only, using anything you've taught it since (e.g. parties you added). Lines you already fixed are left untouched." style="background: rgba(168,85,247,0.12); color: #c084fc; font-weight: 600; padding: 6px 12px; border-radius: 6px; border: 1px solid rgba(168,85,247,0.4); cursor: pointer; font-size: 0.8rem; margin-bottom: 6px; margin-right: 8px;">🔄 Re-run AI (unreconciled)</button>
                         <button onclick="document.getElementById('ai-bank-input').click()" style="background: linear-gradient(135deg, #38bdf8 0%, #a855f7 100%); color: white; font-weight: bold; padding: 6px 14px; border-radius: 6px; border: none; cursor: pointer; font-size: 0.8rem; margin-bottom: 6px;">📤 Upload Statement</button>
                         <!-- Sync Now removed — all Tally sync now lives in Vouchers ▸ Import/Export. -->
                     </div>
@@ -12458,6 +12459,31 @@
                 renderBankTable(j.data.rows, j.data.total, j.data.stats);
             } catch (e) {
                 document.getElementById('bank-tx-tbody').innerHTML = `<tr><td colspan="9" style="text-align:center; padding:20px; color:#ef4444;">Error: ${e.message}</td></tr>`;
+            }
+        }
+
+        async function rerunBankReco() {
+            const co = _getActiveCompanyForBank();
+            if (!co.company_name) { alert('Select a company first.'); return; }
+            const cid = await _ensureBankCompanyId();
+            if (cid) co.company_id = cid;
+            const btn = document.getElementById('bank-rerun-btn');
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) { btn.disabled = true; btn.innerHTML = '⏳ Re-running…'; }
+            try {
+                const res = await fetch(`${API}/api/bank/rerun-reconcile`, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ company_name: co.company_name, company_id: co.company_id })
+                });
+                const j = await res.json();
+                if (!res.ok) throw new Error(j.detail || 're-run failed');
+                if (j.total === 0) alert('No unreconciled lines to re-run. (Lines you already fixed are left untouched.)');
+                else alert(`Re-ran AI on ${j.total} unreconciled line${j.total!==1?'s':''} using the latest learning. ${j.updated} updated.`);
+                await loadBankTransactions();
+            } catch (e) {
+                alert('Re-run failed: ' + e.message);
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
             }
         }
 

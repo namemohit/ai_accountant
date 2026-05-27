@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "174"
+APP_VERSION = "175"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -3087,6 +3087,70 @@ async def bank_confirm_reconciliation(payload: dict):
             "learnings_saved": learned,
             "message": f"Posted {posted} vouchers and saved {learned} learning patterns."
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/bank/rerun-reconcile")
+async def bank_rerun_reconcile(payload: dict):
+    """Re-run the AI reconciler on ONLY the unreconciled, not-yet-human-edited lines
+    of the uploaded statement(s), using the latest learned knowledge (e.g. parties
+    the user just added, which are embedded into knowledge_base). Lines the user has
+    already fixed (human_touched) or that are matched/posted are left untouched.
+    Body: {company_name, company_id?, upload_id?}."""
+    try:
+        company_name = (payload.get("company_name") or "").strip()
+        if not company_name:
+            raise HTTPException(status_code=400, detail="company_name required")
+        company_id = payload.get("company_id") or _resolve_company_id_by_name(company_name)
+        upload_id = payload.get("upload_id")
+        rows = db.get_rerunnable_bank_lines(company_id, company_name, upload_id)
+        if not rows:
+            return {"status": "success", "total": 0, "updated": 0,
+                    "message": "No unreconciled lines to re-run."}
+        # Reconstruct the tx list (prefer the original parsed payload; fall back to columns)
+        txns = []
+        for r in rows:
+            p = r.get("source_payload") or {}
+            if isinstance(p, str):
+                try: p = json.loads(p)
+                except Exception: p = {}
+            txns.append({
+                "date": (str(r["date"]) if r.get("date") else p.get("date")),
+                "description": p.get("description") or r.get("description") or "",
+                "reference": p.get("reference") or r.get("reference") or "",
+                "amount": float(r.get("amount") if r.get("amount") is not None else (p.get("amount") or 0)),
+                "party_name": p.get("party_name") or "",
+                "transaction_type": p.get("transaction_type") or "Other",
+            })
+        from utils.reconciler import ai_reconcile_statement
+        import asyncio as _aio
+        loop = _aio.get_event_loop()
+        reconciled = await loop.run_in_executor(
+            None, lambda: ai_reconcile_statement(txns, company_name,
+                                                 company_id=company_id, file_hint=""))
+        updated = 0
+        for r, sug in zip(rows, reconciled):
+            status = ("matched"   if sug["status"] == "auto_matched" else
+                      "ai_filled" if sug["status"] == "auto_filled"  else
+                      "unmatched")
+            upd = {
+                "party":       sug.get("suggested_party") or "",
+                "head":        sug.get("suggested_expense_head") or "",
+                "bank_ledger": sug.get("suggested_bank_ledger") or "",
+                "status":      status,
+                "confidence":  sug.get("confidence", 0),
+                "rationale":   sug.get("rationale"),
+                "ai_touched":  True,
+            }
+            # user_id=None → AI-driven update; human_touched stays FALSE so the row
+            # remains a re-run candidate until a human curates it.
+            db.update_bank_transaction(str(r["id"]), upd, user_id=None, company_id=company_id)
+            updated += 1
+        return {"status": "success", "total": len(rows), "updated": updated}
     except HTTPException:
         raise
     except Exception as e:

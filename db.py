@@ -5670,6 +5670,34 @@ def update_bank_transaction(tx_id, updates, user_id=None, company_id=None):
     return row
 
 
+def get_rerunnable_bank_lines(company_id=None, company_name=None, upload_id=None):
+    """Unreconciled, not-yet-human-edited bank-statement lines — the targets for an
+    AI re-run. Excludes matched/posted lines and anything a human already touched
+    (so manual fixes are preserved). Optionally scope to one statement upload."""
+    where = ["bt.source = 'bank_statement'",
+             "bt.status IN ('ai_filled','unmatched')",
+             "COALESCE(bt.human_touched, FALSE) = FALSE"]
+    params = []
+    if company_id and company_name:
+        where.append("(bt.company_id = %s OR (bt.company_id IS NULL AND bt.company_name = %s))")
+        params += [company_id, company_name]
+    elif company_id:
+        where.append("bt.company_id = %s"); params.append(company_id)
+    elif company_name:
+        where.append("bt.company_name = %s"); params.append(company_name)
+    if upload_id:
+        where.append("bt.source_file_id = %s"); params.append(upload_id)
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute(f"""SELECT id, date, description, reference, amount, source_payload, source_row_idx
+                        FROM bank_transactions bt
+                        WHERE {' AND '.join(where)}
+                        ORDER BY bt.source_row_idx NULLS LAST, bt.date""", params)
+        return cur.fetchall()
+    finally:
+        cur.close(); pput(conn)
+
+
 def bank_health_check(company_id, company_name):
     """Compute health metrics for the Bank tab Health Check card.
 
