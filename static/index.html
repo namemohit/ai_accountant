@@ -1339,7 +1339,7 @@
                     <button onclick="nwCopyId()" style="padding:7px 14px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; cursor:pointer; font-size:0.82rem;">📋 Copy</button>
                 </div>
                 <div id="nw-my-name" style="font-size:0.82rem; color:#64748b; margin-top:6px;"></div>
-                <div style="font-size:0.78rem; color:#64748b; margin-top:10px;">Share this ID with someone you want to give access to your books. They enter it and pick how you’re related; you approve.</div>
+                <div style="font-size:0.78rem; color:#64748b; margin-top:10px;">Share this ID with anyone who needs access to your books. They enter it and send a request — you choose their role and which companies to share when you approve.</div>
             </div>
 
             <div class="card" style="margin-top:18px; max-width:560px;">
@@ -1350,11 +1350,6 @@
                 <div style="font-size:0.76rem; color:#64748b; margin-top:8px;">They choose your role and which companies to share when they accept your request.</div>
                 <button onclick="nwSendRequest()" style="margin-top:14px; padding:9px 18px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer;">Send connection request</button>
                 <div id="nw-req-msg" style="font-size:0.82rem; margin-top:10px;"></div>
-            </div>
-
-            <div style="margin-top:18px; max-width:560px;">
-                <span style="font-size:0.82rem; color:#94a3b8;">Prefer a one-time code instead of a Workspace ID?</span>
-                <button onclick="if(typeof openConnectionsModal==='function')openConnectionsModal()" style="margin-left:8px; padding:6px 12px; background:transparent; color:var(--primary-light); border:1px solid var(--border); border-radius:8px; cursor:pointer; font-size:0.8rem;">Invite a teammate by code</button>
             </div>
         </div>
 
@@ -3187,8 +3182,10 @@
                 html += `<span class="tb-divider"></span>`;
                 // App name → return to the agent's own launcher (its first view).
                 html += `<span class="tb-appname" style="cursor:pointer" title="Apps" onclick="showView('${_firstViewOf(active)}')">${meta.icon || '🤖'} ${escapeHtml(meta.name || active)}</span>`;
-                // Current skill name (breadcrumb) so it's clear which screen is open.
-                if (curTitle) html += `<span class="tb-crumb">› ${curTitle}</span>`;
+                // Breadcrumb only for a deeper sub-screen that ISN'T already a tab — the
+                // highlighted tab already shows the current screen, so don't duplicate it.
+                const _curIsTab = meta.views && meta.views.includes(cur);
+                if (curTitle && !_curIsTab) html += `<span class="tb-crumb">› ${curTitle}</span>`;
                 html += `<span class="tb-divider"></span>`;
                 // Tabs from the hidden sidebar nav items that belong to this agent.
                 document.querySelectorAll('nav .nav-item[data-view]').forEach(el => {
