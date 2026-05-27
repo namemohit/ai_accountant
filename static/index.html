@@ -12631,24 +12631,44 @@
             loadBankTransactions();
         }
 
+        // Bucket a row into ONE Tally-Status bucket using the exact same
+        // mutually-exclusive order as _tallyStatusCell — so the strip always
+        // matches the column (no double-counting).
+        function _bankStatusBucket(r) {
+            if (r.status === 'posted') return 'posted';
+            if (r.linked_id || (r.status === 'matched' && r.source === 'bank_statement')) return 'linked';
+            if (r.status === 'ai_filled') return 'ai_ready';
+            if (r.status === 'unmatched') return 'needs_review';
+            return null;
+        }
+
+        // Recompute + render the stats strip from the currently-loaded rows. Called
+        // on table render AND after every inline reconcile so it stays live.
+        function refreshBankStats() {
+            const rows = window._bankRows || [];
+            const c = { linked: 0, ai_ready: 0, needs_review: 0, posted: 0 };
+            rows.forEach(r => { const b = _bankStatusBucket(r); if (b && c[b] !== undefined) c[b]++; });
+            const setStat = (id, n) => {
+                const el = document.getElementById(id);
+                if (el) el.innerText = (n == null ? 0 : n).toLocaleString('en-IN');
+            };
+            setStat('bank-stat-total',        (window._bankTotal != null) ? window._bankTotal : rows.length);
+            setStat('bank-stat-linked',       c.linked);
+            setStat('bank-stat-ai-ready',     c.ai_ready);
+            setStat('bank-stat-needs-review', c.needs_review);
+            setStat('bank-stat-posted',       c.posted);
+        }
+
         function renderBankTable(rows, total, stats) {
             const tbody = document.getElementById('bank-tx-tbody');
             // Sprint 12 — update triage hint count whenever results come back
             const hintCount = document.getElementById('bank-triage-hint-count');
             if (hintCount) hintCount.innerText = (total != null) ? total.toLocaleString('en-IN') : '0';
 
-            // Sprint 16 — stat strip is now server-side; reads j.data.stats (5-state vocab).
-            // Buckets are mutually exclusive and always sum to `total`.
-            const setStat = (id, n) => {
-                const el = document.getElementById(id);
-                if (el) el.innerText = (n == null ? 0 : n).toLocaleString('en-IN');
-            };
-            const s = stats || {linked:0, ai_ready:0, needs_review:0, posted:0};
-            setStat('bank-stat-total',         total || 0);
-            setStat('bank-stat-linked',        s.linked);
-            setStat('bank-stat-ai-ready',      s.ai_ready);
-            setStat('bank-stat-needs-review',  s.needs_review);
-            setStat('bank-stat-posted',        s.posted);
+            // Keep the loaded rows so the strip can be recomputed live after inline edits.
+            window._bankRows = rows || [];
+            window._bankTotal = total;
+            refreshBankStats();
 
             if (!rows || !rows.length) {
                 tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; padding:20px; color:#64748b;">No bank statement lines yet. Click "Upload Statement" above to reconcile a bank statement.</td></tr>';
@@ -12844,6 +12864,14 @@
                         tds[6].innerHTML = _tallyStatusCell(d) + linked;  // Tally Status
                         tds[7].innerHTML = _reconciledByBadge(d.ai_touched, d.human_touched, d.confidence);  // Reconciled By
                     }
+                    // Keep the cached row in sync + recompute the stats strip live.
+                    const cached = (window._bankRows || []).find(x => String(x.id) === String(id));
+                    if (cached) {
+                        cached.status = d.status; cached.party = d.party;
+                        cached.confidence = d.confidence; cached.ai_touched = d.ai_touched;
+                        cached.human_touched = d.human_touched; cached.linked_id = d.linked_id;
+                    }
+                    if (typeof refreshBankStats === 'function') refreshBankStats();
                     if (mb) {
                         const _pc = (d.confidence !== null && d.confidence !== undefined) ? Math.round(d.confidence * 100) : null;
                         if (_pc !== null && value) {
