@@ -13870,19 +13870,21 @@
         async function loadPartyMaster(force) {
             const tbody = document.getElementById('party-master-tbody');
             if (!tbody) return;
+            const currentUser = JSON.parse(localStorage.getItem('currentUser') || '{}');
+            const companyName = currentUser ? (currentUser.company_name || 'Acme Corp') : 'Acme Corp';
             // Guard: collapse the rapid duplicate calls (switchSchemaSubView + showView
             // wrapper + #masters→#schema hashchange) into a single load so the table
-            // doesn't visibly flash/refresh on its own.
+            // doesn't flash. Company-scoped + short window so a company switch ALWAYS
+            // reloads (never serves another company's parties).
             if (!force) {
                 if (window._partyMasterLoading) return;
-                if (window._partyMasterLoadedAt && (Date.now() - window._partyMasterLoadedAt) < 1500) return;
+                if (window._partyMasterLoadedFor === companyName
+                    && window._partyMasterLoadedAt && (Date.now() - window._partyMasterLoadedAt) < 1500) return;
             }
             window._partyMasterLoading = true;
             tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding: 20px; color: #94a3b8;"><i class="fas fa-spinner fa-spin"></i> Loading party master directory...</td></tr>`;
-            
+
             try {
-                const currentUser = JSON.parse(localStorage.getItem('currentUser'));
-                const companyName = currentUser ? currentUser.company_name : 'Acme Corp';
                 const response = await fetch(`${API}/parties?company_name=${encodeURIComponent(companyName)}`);
                 const result = await response.json();
                 
@@ -13906,6 +13908,7 @@
             } finally {
                 window._partyMasterLoading = false;
                 window._partyMasterLoadedAt = Date.now();
+                window._partyMasterLoadedFor = companyName;
             }
         }
 

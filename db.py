@@ -7924,38 +7924,66 @@ def save_or_update_party(company_name, name, gstin=None, address=None, bank_name
         conn.close()
 
 def get_parties(company_name="Acme Corp"):
-    """Party Master directory = the UNION of the `parties` table and the Sundry
-    Debtor/Creditor ledgers in `tally_ledgers` (where Bank-Reco-added parties live),
-    de-duplicated case-insensitively by name. The richer `parties` row wins when a
-    name exists in both; tally_ledgers-only names are mapped into the same shape so a
-    party added in Bank Reco shows up here too."""
+    """Party Master directory = the UNION of every place a party for this company can
+    live, de-duplicated case-insensitively by name, so a party touched anywhere in
+    Bank Reco shows up here:
+      1. `parties` table (rich, editable rows — these win on a name clash)
+      2. `tally_ledgers` Sundry Debtor/Creditor ledgers (gives gstin/pan/address)
+      3. distinct `bank_transactions.party` (parties assigned on a bank line — incl.
+         AI-suggested ones that were never explicitly 'Added' as a ledger)
+      4. `knowledge_base` tally_master_party (parties the AI learned)"""
     conn = get_conn()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cursor.execute("SELECT * FROM parties WHERE company_name = %s ORDER BY name ASC", (company_name,))
         rows = cursor.fetchall()
         seen = {(r.get("name") or "").strip().lower() for r in rows}
-        # Pull Sundry Debtor/Creditor ledgers not already represented in `parties`.
+
+        def _add(nm, gstin=None, pan=None, address=None):
+            nm = (nm or "").strip()
+            if not nm or nm.lower() in seen:
+                return
+            seen.add(nm.lower())
+            rows.append({
+                "id": None, "company_name": company_name, "name": nm,
+                "gstin": gstin, "address": address,
+                "bank_name": None, "account_number": None, "ifsc_code": None,
+                "pan": pan, "email": None, "phone": None,
+                "created_at": None, "company_id": None,
+            })
+
+        # 2. Sundry Debtor/Creditor ledgers
         cursor.execute("""
             SELECT name, gstin, pan, address FROM tally_ledgers
             WHERE company_name = %s
               AND (LOWER(COALESCE(parent_group,'')) LIKE '%%sundry%%'
                    OR LOWER(COALESCE(parent_group,'')) LIKE '%%debtor%%'
                    OR LOWER(COALESCE(parent_group,'')) LIKE '%%creditor%%')
-            ORDER BY name ASC
         """, (company_name,))
         for L in cursor.fetchall():
-            nm = (L.get("name") or "").strip()
-            if not nm or nm.lower() in seen:
-                continue
-            seen.add(nm.lower())
-            rows.append({
-                "id": None, "company_name": company_name, "name": nm,
-                "gstin": L.get("gstin"), "address": L.get("address"),
-                "bank_name": None, "account_number": None, "ifsc_code": None,
-                "pan": L.get("pan"), "email": None, "phone": None,
-                "created_at": None, "company_id": None,
-            })
+            _add(L.get("name"), L.get("gstin"), L.get("pan"), L.get("address"))
+
+        # 3. Parties assigned on bank-reco lines (AI-suggested or manually set)
+        try:
+            cursor.execute("""SELECT DISTINCT party FROM bank_transactions
+                              WHERE company_name = %s AND COALESCE(party,'') <> ''""",
+                           (company_name,))
+            for r in cursor.fetchall():
+                _add(r.get("party"))
+        except Exception:
+            conn.rollback()
+
+        # 4. Parties the AI learned (knowledge_base)
+        try:
+            cursor.execute("""SELECT DISTINCT data->>'party' AS p FROM knowledge_base
+                              WHERE type='tally_master_party' AND data->>'company_name' = %s
+                                AND COALESCE(data->>'party','') <> ''""",
+                           (company_name,))
+            for r in cursor.fetchall():
+                _add(r.get("p"))
+        except Exception:
+            conn.rollback()
+
         rows.sort(key=lambda r: (r.get("name") or "").lower())
         return rows
     except Exception as e:
