@@ -1998,4 +1998,28 @@ input[type="text"].ya:focus, select.ya:focus {
   .home-net-strip .hns-sep { display: none; }
 }
 
+/* ── Bank Reco party column: searchable dropdown + inline Add ── */
+.party-combo { position: relative; width: 170px; }
+.party-combo-input {
+  width: 100%; box-sizing: border-box;
+  background: var(--bg-light); color: #fff;
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 3px 6px; font-size: 0.78rem;
+}
+.party-combo-menu {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 60;
+  max-height: 220px; overflow-y: auto; margin-top: 2px;
+  background: var(--bg-surface, #0f172a);
+  border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+}
+.party-opt {
+  padding: 6px 10px; font-size: 0.78rem; color: #e2e8f0; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.party-opt:hover { background: rgba(255,255,255,0.06); }
+.party-add { color: #38bdf8; font-weight: 600; border-bottom: 1px solid var(--border); }
+.party-empty { color: #64748b; cursor: default; }
+.party-empty:hover { background: transparent; }
+
 

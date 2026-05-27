@@ -7371,6 +7371,38 @@ def save_tally_ledgers(company_name, ledgers):
     return count
 
 
+def add_party_ledger(company_name, name, group="Sundry Debtors", company_id=None):
+    """Add a single party to the company's ledger master (the source the Bank-Reco
+    party dropdown reads from). Idempotent on (company_name, name). `group` should be
+    a Sundry Debtors/Creditors group so bank-ledger-options classifies it as a party.
+    Returns {status, name, group}. The ledger is created in Tally when a voucher
+    referencing it is posted; this only seeds the local master + dropdown."""
+    name = (name or "").strip()
+    if not name:
+        return {"status": "error", "message": "name required"}
+    group = (group or "Sundry Debtors").strip()
+    conn = pget()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO tally_ledgers (id, company_id, company_name, name, parent_group, group_path, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
+            ON CONFLICT (company_name, name) DO UPDATE SET
+                parent_group = COALESCE(tally_ledgers.parent_group, EXCLUDED.parent_group),
+                company_id   = COALESCE(tally_ledgers.company_id, EXCLUDED.company_id),
+                updated_at   = CURRENT_TIMESTAMP
+        """, (str(uuid.uuid4()), company_id, company_name, name, group, group))
+        conn.commit()
+        cur.close()
+        return {"status": "success", "name": name, "group": group}
+    except Exception as e:
+        conn.rollback()
+        print(f"Error in add_party_ledger: {e}")
+        return {"status": "error", "message": str(e)}
+    finally:
+        pput(conn)
+
+
 def save_tally_stock_items(company_name, items):
     if not items:
         return 0

@@ -1161,7 +1161,6 @@
                             <tbody id="bank-tx-tbody"><tr><td colspan="9" style="text-align:center; padding:20px; color:#64748b;">Loading bank transactions…</td></tr></tbody>
                         </table>
                         <!-- Datalists for inline party / head / bank dropdowns. Populated by loadBankLedgerOptions() -->
-                        <datalist id="bank-party-list"></datalist>
                         <datalist id="bank-head-list"></datalist>
                         <datalist id="bank-bank-list"></datalist>
                     </div>
@@ -12399,9 +12398,11 @@
                     if (!dl) return;
                     dl.innerHTML = (items || []).map(n => `<option value="${(n || '').replace(/"/g, '&quot;')}"></option>`).join('');
                 };
-                fill('bank-party-list', j.parties);
                 fill('bank-head-list',  j.heads);
                 fill('bank-bank-list',  j.banks);
+                // Party column uses a custom searchable dropdown (not a datalist) —
+                // keep the parties as a JS array so the combo menu + inline-add work.
+                window._bankParties = (j.parties || []).slice();
 
                 // Sprint 14 — also populate the "Bank" filter dropdown
                 const sel = document.getElementById('bank-filter-bank-ledger');
@@ -12635,8 +12636,15 @@
                 const amt = parseFloat(r.amount || 0);
                 const amtColor = amt >= 0 ? '#10b981' : '#ef4444';
                 const editable = (r.status === 'ai_filled' || r.status === 'unmatched');
+                // Party column: custom searchable dropdown with inline "Add party".
+                // pgroup picks the right master group when adding a new party — a
+                // credit (money in) ⇒ customer (Sundry Debtors); a debit ⇒ vendor.
+                const pgroup = amt >= 0 ? 'Sundry Debtors' : 'Sundry Creditors';
                 const partyCell = editable
-                    ? `<input type="text" list="bank-party-list" value="${(r.party || '').replace(/"/g, '&quot;')}" data-id="${r.id}" data-field="party" class="bank-inline" placeholder="Search party…" style="background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:4px; padding:3px 6px; font-size:0.78rem; width: 150px;">`
+                    ? `<div class="party-combo">
+                         <input type="text" value="${(r.party || '').replace(/"/g, '&quot;')}" data-id="${r.id}" data-field="party" data-pgroup="${pgroup}" class="party-combo-input" placeholder="Search or add party…" autocomplete="off" onfocus="showPartyMenu(this)" oninput="showPartyMenu(this)" onkeydown="partyComboKey(event,this)" onblur="hidePartyMenu(this)">
+                         <div class="party-combo-menu" style="display:none;"></div>
+                       </div>`
                     : `<span style="color:#cbd5e1;">${r.party || '—'}</span>`;
                 const headCell = editable
                     ? `<input type="text" list="bank-head-list" value="${(r.head || '').replace(/"/g, '&quot;')}" data-id="${r.id}" data-field="head" class="bank-inline" placeholder="Search head…" style="background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:4px; padding:3px 6px; font-size:0.78rem; width: 150px;">`
@@ -12697,6 +12705,83 @@
             } catch (e) {
                 input.style.borderColor = '#ef4444';
                 console.error(e);
+            }
+        }
+
+        // ── Party column: searchable dropdown + inline "Add party" ──────────
+        function _escAttr(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+
+        function showPartyMenu(input) {
+            const menu = input.parentElement.querySelector('.party-combo-menu');
+            if (!menu) return;
+            const q = (input.value || '').trim();
+            const ql = q.toLowerCase();
+            const parties = window._bankParties || [];
+            const matches = parties.filter(p => p.toLowerCase().includes(ql)).slice(0, 50);
+            const exact = parties.some(p => p.toLowerCase() === ql);
+            let html = '';
+            if (q && !exact) {
+                html += `<div class="party-opt party-add" data-add="${_escAttr(q)}" onmousedown="event.preventDefault(); addPartyInline(this)">➕ Add “${_escAttr(q)}”</div>`;
+            }
+            html += matches.map(p =>
+                `<div class="party-opt" data-val="${_escAttr(p)}" onmousedown="event.preventDefault(); pickParty(this)">${_escAttr(p)}</div>`
+            ).join('');
+            if (!html) html = `<div class="party-opt party-empty">No parties yet — type a name to add one</div>`;
+            menu.innerHTML = html;
+            menu.style.display = 'block';
+        }
+
+        function hidePartyMenu(input) {
+            // Delay so an option's mousedown/click resolves before we hide + save.
+            const menu = input.parentElement.querySelector('.party-combo-menu');
+            setTimeout(() => { if (menu) menu.style.display = 'none'; updateBankRowInline(input); }, 160);
+        }
+
+        function pickParty(optEl) {
+            const combo = optEl.closest('.party-combo');
+            const input = combo.querySelector('.party-combo-input');
+            input.value = optEl.getAttribute('data-val') || '';
+            combo.querySelector('.party-combo-menu').style.display = 'none';
+            updateBankRowInline(input);
+        }
+
+        async function addPartyInline(optEl) {
+            const combo = optEl.closest('.party-combo');
+            const input = combo.querySelector('.party-combo-input');
+            const name = optEl.getAttribute('data-add') || (input.value || '').trim();
+            if (!name) return;
+            const group = input.getAttribute('data-pgroup') || 'Sundry Debtors';
+            const co = _getActiveCompanyForBank();
+            try {
+                const res = await fetch(`${API}/api/parties/create`, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ company_name: co.company_name, company_id: co.company_id, name, group })
+                });
+                if (res.ok) {
+                    window._bankParties = window._bankParties || [];
+                    if (!window._bankParties.some(p => p.toLowerCase() === name.toLowerCase())) {
+                        window._bankParties.push(name);
+                        window._bankParties.sort((a, b) => a.localeCompare(b));
+                    }
+                    // Keep the company-scoped cache fresh so a table re-render shows it too.
+                    window._bankLedgerOptionsLoadedFor = null;
+                }
+            } catch (e) { console.warn('add party failed', e); }
+            input.value = name;
+            combo.querySelector('.party-combo-menu').style.display = 'none';
+            updateBankRowInline(input);
+        }
+
+        function partyComboKey(ev, input) {
+            const menu = input.parentElement.querySelector('.party-combo-menu');
+            if (ev.key === 'Enter') {
+                ev.preventDefault();
+                const first = menu && menu.querySelector('.party-opt:not(.party-empty)');
+                if (!first) { input.blur(); return; }
+                if (first.classList.contains('party-add')) addPartyInline(first);
+                else pickParty(first);
+            } else if (ev.key === 'Escape') {
+                if (menu) menu.style.display = 'none';
             }
         }
 

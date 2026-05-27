@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "172"
+APP_VERSION = "173"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -3994,11 +3994,15 @@ async def bank_ledger_options(company_id: str = None, company_name: str = None):
             company_id = _resolve_company_id_by_name(company_name)
         conn = db.get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
+        # Match by company_id when known, but also fall back to company_name so
+        # rows with a NULL company_id (e.g. parties added via /api/parties/create,
+        # or companies not registered in `companies`) still appear in the dropdown.
         cur.execute("""
             SELECT name, parent_group FROM tally_ledgers
-            WHERE company_id = %s
+            WHERE (company_id = %s OR (company_id IS NULL AND company_name = %s)
+                   OR (%s IS NULL AND company_name = %s))
             ORDER BY name
-        """, (company_id,))
+        """, (company_id, company_name, company_id, company_name))
         rows = cur.fetchall()
         cur.close(); conn.close()
         parties, heads, banks = [], [], []
@@ -4015,6 +4019,32 @@ async def bank_ledger_options(company_id: str = None, company_name: str = None):
         return {"status": "success", "parties": parties, "heads": heads, "banks": banks}
     except Exception as e:
         import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/parties/create")
+async def create_party_endpoint(payload: dict):
+    """Add a new party to the company's ledger master so it appears in the
+    Bank-Reco party dropdown for all future rows. Body: {company_name, company_id?,
+    name, group?}. group defaults to 'Sundry Debtors' (customer); pass
+    'Sundry Creditors' for a vendor. Does NOT post to Tally — that happens when a
+    voucher referencing the party is posted."""
+    try:
+        company_name = (payload.get("company_name") or "").strip()
+        name = (payload.get("name") or "").strip()
+        if not company_name or not name:
+            raise HTTPException(status_code=400, detail="company_name and name required")
+        company_id = payload.get("company_id")
+        if not company_id:
+            company_id = _resolve_company_id_by_name(company_name)
+        group = payload.get("group") or "Sundry Debtors"
+        res = db.add_party_ledger(company_name, name, group=group, company_id=company_id)
+        if res.get("status") != "success":
+            raise HTTPException(status_code=500, detail=res.get("message", "add party failed"))
+        return res
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
