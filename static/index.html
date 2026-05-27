@@ -3044,6 +3044,14 @@
                 // not just set the agent context — otherwise it falls back to chat.
                 if (document.getElementById(baseView + '-view') || window.__PLATFORM_VIEWS.has(baseView)) {
                     showView(baseView, true);   // skipHashUpdate: keep the URL as-is
+                    // Deep link to a specific chat (#chat/<id>) — load that conversation's
+                    // messages (hashchange doesn't fire on initial page load).
+                    if (baseView === 'chat') {
+                        const sessionId = rawHash.split('/')[1];
+                        if (sessionId && typeof loadChat === 'function') {
+                            setTimeout(() => loadChat(sessionId, true), 60);
+                        }
+                    }
                 } else {
                     showView('home');
                 }
@@ -10273,8 +10281,16 @@
             document.getElementById('chat-messages').style.display = 'flex';
             document.getElementById('chat-messages').innerHTML = '';
             const _u = JSON.parse(localStorage.getItem('currentUser') || '{}').username || '';
-            const res = await fetch(`${API}/chat/messages/${id}?username=${encodeURIComponent(_u)}`);
-            const msgs = await res.json();
+            let msgs = [];
+            try {
+                const res = await fetch(`${API}/chat/messages/${id}?username=${encodeURIComponent(_u)}`);
+                msgs = await res.json();
+                if (!res.ok || !Array.isArray(msgs)) throw new Error((msgs && msgs.detail) || 'Could not load this conversation.');
+            } catch (e) {
+                document.getElementById('chat-messages').innerHTML =
+                    `<div style="color:#94a3b8; font-size:0.85rem; padding:16px;">Couldn't load this conversation. <a href="#" onclick="loadChat('${id}');return false;" style="color:var(--primary-light);">Retry</a></div>`;
+                return;
+            }
             let lastFileUrl = null;
             msgs.forEach(m => {
                 if (m.role === 'user') {

@@ -25,16 +25,42 @@ def _pool():
             print(f"[pool init] {e}")
             _POOL = False   # fall back to direct connections
     return _POOL
+import time as _time
+_PREPING_AFTER_IDLE = 20.0   # seconds; only validate connections idle longer than this
+
 def pget():
     p = _pool()
-    return p.getconn() if p else psycopg2.connect(DB_URL)
+    if not p:
+        return psycopg2.connect(DB_URL)
+    # Cloud Postgres drops idle connections, but the pool doesn't know — a handed-out
+    # dead connection raises "server closed the connection unexpectedly" on first use
+    # (→ 500s after the app sits idle). Pre-ping ONLY connections that have been idle a
+    # while (recently-used ones are almost certainly alive), so hot paths stay fast.
+    for _ in range(4):
+        conn = p.getconn()
+        idle = _time.time() - getattr(conn, "_last_used", 0)
+        if idle < _PREPING_AFTER_IDLE:
+            return conn
+        try:
+            cur = conn.cursor(); cur.execute("SELECT 1"); cur.fetchone(); cur.close()
+            return conn
+        except Exception:
+            try: p.putconn(conn, close=True)   # discard the dead connection
+            except Exception:
+                try: conn.close()
+                except Exception: pass
+    # Pool unhealthy → fall back to a fresh direct connection so the request still works.
+    return psycopg2.connect(DB_URL)
 def pput(conn, bad=False):
     p = _pool()
     if not p:
         try: conn.close()
         except Exception: pass
         return
-    try: p.putconn(conn, close=bad)
+    try:
+        try: conn._last_used = _time.time()   # stamp so pget can skip pre-ping when fresh
+        except Exception: pass
+        p.putconn(conn, close=bad)
     except Exception:
         try: conn.close()
         except Exception: pass
