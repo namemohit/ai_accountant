@@ -919,7 +919,10 @@
 
         <!-- Schema View -->
         <div id="schema-view" class="dashboard-view" style="display: none;">
-            <header>
+            <!-- Page header hidden to save vertical space — the topbar breadcrumb
+                 ("Tally Agent › Party Master / Ledgers / Item Master") already names
+                 the open section. _renderMastersSection still updates these (harmless). -->
+            <header style="display: none;">
                 <h1>Masters</h1>
                 <p style="color: #94a3b8;">Party Master and Item Master power every downstream rule — GST, TDS, ITR, HSN summaries. Keep them complete and accurate.</p>
             </header>
@@ -943,22 +946,20 @@
             
             <div id="schema-subview-parties" class="card" style="display: none; padding-top: 12px;">
                 <!-- Sticky controls bar (matches Bank Reco chrome) -->
-                <div style="position: sticky; top: 0; z-index: 5; background: var(--bg-surface, var(--card-bg)); padding: 4px 0 12px; border-bottom: 1px solid var(--border); margin-bottom: 14px;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
-                        <div>
-                            <h3 style="margin-bottom: 4px;">👥 Business Party Profiles</h3>
-                            <p style="color: #94a3b8; font-size: 0.85rem; margin: 0;">Sundry debtors &amp; creditors — learned from invoices, bank reco, and Tally. GSTIN, PAN &amp; bank payout for GST/TDS.</p>
-                        </div>
+                <div style="position: sticky; top: 0; z-index: 5; background: var(--bg-surface, var(--card-bg)); padding: 4px 0 10px; border-bottom: 1px solid var(--border); margin-bottom: 12px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
                         <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                            <input type="text" id="party-search" placeholder="🔍 Search parties…" oninput="filterPartyMaster()" style="padding: 6px 12px; border-radius: 6px; background: var(--bg-light); color: white; border: 1px solid var(--border); font-size: 0.85rem; outline: none; width: 240px;">
-                            <select id="party-ai-gap-filter" onchange="filterPartyMaster()" title="Filter to parties with a pending AI suggestion" style="padding: 6px 12px; border-radius: 6px; background: var(--bg-light); color: white; border: 1px solid var(--border); font-size: 0.85rem;">
+                            <input type="text" id="party-search" placeholder="🔍 Search parties…" oninput="filterPartyMaster()" style="padding: 6px 12px; border-radius: 6px; background: var(--bg-light); color: white; border: 1px solid var(--border); font-size: 0.82rem; outline: none; width: 220px;">
+                            <select id="party-ai-gap-filter" onchange="filterPartyMaster()" title="Filter to parties with a pending AI suggestion" style="padding: 6px 12px; border-radius: 6px; background: var(--bg-light); color: white; border: 1px solid var(--border); font-size: 0.82rem;">
                                 <option value="">🤖 AI Gap: all</option>
                             </select>
-                            <button class="btn" onclick="openAddPartyModal()" style="padding: 6px 14px; border-radius: 6px; font-weight: bold; background: var(--accent); color: white; border: none; cursor: pointer; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 6px;"><i class="fas fa-plus"></i> Add Party</button>
-                            <button id="master-ai-scan-btn" onclick="runMasterAIScan()" title="AI walks Party + Item master and proposes fills for missing GSTIN / PAN / Place of Supply / HSN / GST rate / Unit / Standard Rate. Review inline — nothing changes until you Apply." style="padding: 6px 14px; border-radius: 6px; font-weight: 600; background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%); color: white; border: none; cursor: pointer; font-size: 0.85rem;">🔬 Run AI Master Gap Scan</button>
+                        </div>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <button onclick="openAddPartyModal()" style="padding: 5px 12px; border-radius: 6px; font-weight: 600; background: var(--accent); color: white; border: none; cursor: pointer; font-size: 0.8rem; white-space: nowrap; display: inline-flex; align-items: center; gap: 5px;"><i class="fas fa-plus"></i> Add Party</button>
+                            <button id="master-ai-scan-btn" onclick="runMasterAIScan()" title="AI walks Party + Item master and proposes fills for missing GSTIN / PAN / Place of Supply / HSN / GST rate / Unit / Standard Rate. Review inline — nothing changes until you Apply." style="padding: 5px 12px; border-radius: 6px; font-weight: 600; background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%); color: white; border: none; cursor: pointer; font-size: 0.8rem; white-space: nowrap;">🔬 Run AI Master Gap Scan</button>
                         </div>
                     </div>
-                    <div id="master-ai-scan-status" style="font-size: 0.75rem; color: #cbd5e1; margin-top: 8px; text-align: right;"></div>
+                    <div id="master-ai-scan-status" style="font-size: 0.74rem; color: #cbd5e1; margin-top: 6px; text-align: right;"></div>
                 </div>
 
                 <!-- Scrollable table card with sticky header (matches Bank Reco) -->
