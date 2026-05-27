@@ -8163,6 +8163,17 @@ def user_can(user_id, permission, company_id=None):
         conn.close()
 
 
+def list_org_companies(org_id):
+    """Companies in one org (id + name) — used by the Network approve scope picker."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT id, name FROM companies WHERE org_id=%s AND archived_at IS NULL ORDER BY name",
+                    (str(org_id),))
+        return [{"id": str(r["id"]), "name": r["name"]} for r in cur.fetchall()]
+    finally:
+        cur.close(); conn.close()
+
+
 def get_companies_for_user(user_id):
     """Return all companies the user has any access to (across all memberships)."""
     conn = get_conn()
@@ -8437,6 +8448,12 @@ def _ensure_network_schema():
             )""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_orgrel_target ON org_relationships(target_org_id, status)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_orgrel_req ON org_relationships(requester_org_id, status)")
+        # Role + relationship are chosen by the ACCEPTOR at approval, not at request time,
+        # so they must be nullable while the request is pending (idempotent, non-destructive).
+        try: cur.execute("ALTER TABLE org_relationships ALTER COLUMN relationship_type DROP NOT NULL")
+        except Exception: pass
+        try: cur.execute("ALTER TABLE org_relationships ALTER COLUMN granted_role DROP NOT NULL")
+        except Exception: pass
         conn.commit()
     except Exception as e:
         conn.rollback(); print(f"[_ensure_network_schema] {e}")
@@ -8524,12 +8541,13 @@ def grant_membership(user_id, org_id, role, scope_company_ids=None, invited_by=N
         except Exception: pass
         print(f"[grant_membership] {e}"); return {"ok": False, "error": str(e)}
 
-def create_relationship_request(requester_org_id, target_org_id, relationship_type, requested_by):
-    """Requester asks for <relationship_type> access to the target's workspace."""
+def create_relationship_request(requester_org_id, target_org_id, requested_by):
+    """Requester just asks to connect to the target's workspace. The ACCEPTOR assigns the
+    role + chooses which companies to share at approval, so relationship_type/granted_role
+    stay NULL until then."""
     _ensure_network_schema()
     if str(requester_org_id) == str(target_org_id):
         return {"ok": False, "error": "You can't connect a workspace to itself."}
-    role = NETWORK_REL_ROLES.get(relationship_type, "viewer")
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""SELECT id, status FROM org_relationships
@@ -8539,9 +8557,9 @@ def create_relationship_request(requester_org_id, target_org_id, relationship_ty
         if ex:
             return {"ok": False, "error": f"A {ex['status']} connection already exists with that workspace."}
         cur.execute("""INSERT INTO org_relationships
-            (requester_org_id, target_org_id, relationship_type, granted_role, grantee_user_id, requested_by)
-            VALUES (%s,%s,%s,%s,%s,%s) RETURNING id""",
-            (str(requester_org_id), str(target_org_id), relationship_type, role,
+            (requester_org_id, target_org_id, grantee_user_id, requested_by, status)
+            VALUES (%s,%s,%s,%s,'pending') RETURNING id""",
+            (str(requester_org_id), str(target_org_id),
              str(requested_by) if requested_by else None, str(requested_by) if requested_by else None))
         rid = cur.fetchone()["id"]; conn.commit()
         return {"ok": True, "id": str(rid)}
@@ -8578,16 +8596,19 @@ def _relrow(x):
             "target_name": x.get("target_name"), "target_connect_id": x.get("target_connect_id"),
             "created_at": x["created_at"].isoformat() if x.get("created_at") else None}
 
-def approve_relationship(rel_id, role=None, scope_company_ids=None):
-    """Target approves → grant the requester's user access to the target workspace."""
+def approve_relationship(rel_id, relationship_type=None, scope_company_ids=None):
+    """Acceptor approves → assigns the role (via relationship_type) + which companies to share,
+    and grants the requester's user scoped access to the acceptor's workspace."""
     _ensure_network_schema()
+    if not relationship_type:
+        return {"ok": False, "error": "Pick their role before granting access."}
+    grant_role = NETWORK_REL_ROLES.get(relationship_type, "viewer")
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("SELECT * FROM org_relationships WHERE id=%s", (str(rel_id),))
         r = cur.fetchone()
         if not r: return {"ok": False, "error": "Request not found."}
         if r["status"] != "pending": return {"ok": False, "error": f"Already {r['status']}."}
-        grant_role = role or r["granted_role"]
         cur.close(); conn.close()
         g = grant_membership(r["grantee_user_id"], r["target_org_id"], grant_role,
                              scope_company_ids, invited_by=None)
@@ -8596,9 +8617,10 @@ def approve_relationship(rel_id, role=None, scope_company_ids=None):
         try:
             import json as _json
             sj = _json.dumps([str(s) for s in scope_company_ids]) if scope_company_ids else None
-            cur2.execute("""UPDATE org_relationships SET status='active', granted_role=%s,
-                            scope_company_ids=%s::jsonb, updated_at=CURRENT_TIMESTAMP WHERE id=%s""",
-                         (grant_role, sj, str(rel_id)))
+            cur2.execute("""UPDATE org_relationships SET status='active', relationship_type=%s,
+                            granted_role=%s, scope_company_ids=%s::jsonb,
+                            updated_at=CURRENT_TIMESTAMP WHERE id=%s""",
+                         (relationship_type, grant_role, sj, str(rel_id)))
             conn2.commit()
         finally:
             cur2.close(); conn2.close()

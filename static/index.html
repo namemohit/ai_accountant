@@ -1236,14 +1236,6 @@
                 <button class="hns-btn" onclick="nwCopyId()" title="Copy your Workspace ID">📋</button>
                 <span class="hns-sep"></span>
                 <input id="home-net-target" class="hns-input" placeholder="Connect to ID…" autocomplete="off">
-                <select id="home-net-rel" class="hns-input hns-rel">
-                    <option value="" selected disabled>Choose relationship…</option>
-                    <option value="ca">They are my CA / accounting firm</option>
-                    <option value="accountant">They are my Accountant</option>
-                    <option value="auditor">They are my Auditor</option>
-                    <option value="staff">They are my Staff / Junior</option>
-                    <option value="other">Other — they decide the access</option>
-                </select>
                 <button class="hns-btn hns-go" onclick="homeNetConnect()">Connect</button>
                 <span id="home-net-msg" class="hns-msg" style="display:none;"></span>
                 <span class="hns-sep"></span>
@@ -1355,17 +1347,7 @@
                 <label style="font-size:0.78rem; color:#94a3b8;">Their Workspace ID
                     <input id="nw-target-id" placeholder="YTR-123-456" autocomplete="off" style="width:100%; margin-top:4px; padding:9px 11px; background:var(--bg-light); color:#fff; border:1px solid var(--border); border-radius:8px; font-family:ui-monospace,monospace; letter-spacing:1px;">
                 </label>
-                <label style="font-size:0.78rem; color:#94a3b8; display:block; margin-top:12px;">How are they related to you?
-                    <select id="nw-rel-type" style="width:100%; margin-top:4px; padding:9px 11px; background:var(--bg-light); color:#fff; border:1px solid var(--border); border-radius:8px;">
-                        <option value="" selected disabled>Choose relationship…</option>
-                        <option value="ca">They are my CA / accounting firm — manage my books</option>
-                        <option value="accountant">They are my Accountant — enter & edit vouchers</option>
-                        <option value="auditor">They are my Auditor — view only</option>
-                        <option value="staff">They are my Staff / Junior — limited entry</option>
-                        <option value="other">Other — they decide the access</option>
-                    </select>
-                </label>
-                <div id="nw-rel-hint" style="font-size:0.76rem; color:#64748b; margin-top:8px;"></div>
+                <div style="font-size:0.76rem; color:#64748b; margin-top:8px;">They choose your role and which companies to share when they accept your request.</div>
                 <button onclick="nwSendRequest()" style="margin-top:14px; padding:9px 18px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer;">Send connection request</button>
                 <div id="nw-req-msg" style="font-size:0.82rem; margin-top:10px;"></div>
             </div>
@@ -4222,21 +4204,16 @@
         const _NW_REL_LABELS = {
             ca:'CA / accounting firm', accountant:'Accountant', auditor:'Auditor',
             staff:'Staff / Junior', manager:'Manager', other:'Other' };
+        // Shown on the ACCEPTOR's approve panel — what each role grants the requester.
         const _NW_ROLE_HINTS = {
             ca:'They’ll get manager access — full books management.',
             accountant:'They’ll get accountant access — enter & edit vouchers.',
             auditor:'They’ll get view-only access.',
             staff:'They’ll get junior access — limited entry.',
-            other:'You’ll choose what access to grant when they accept.' };
+            other:'They’ll get view-only access (custom).' };
 
         async function loadNetworkHome() {
             const u = _nwUser();
-            const hint = document.getElementById('nw-rel-hint');
-            const sel = document.getElementById('nw-rel-type');
-            if (sel && hint && !sel.__wired) {
-                const upd = () => { hint.textContent = _NW_ROLE_HINTS[sel.value] || ''; };
-                sel.addEventListener('change', upd); sel.__wired = true; upd();
-            }
             try {
                 const r = await fetch(`${API}/api/network/me?username=${encodeURIComponent(u.username||'')}`);
                 const d = await r.json();
@@ -4254,12 +4231,12 @@
             try { navigator.clipboard.writeText(id); } catch(_) {}
             try { showChatToast && showChatToast('Workspace ID copied'); } catch(_) {}
         }
-        // Shared request sender → { ok, target_name } | { ok:false, error }.
-        async function _nwSendRequest(targetId, relType) {
+        // Shared request sender (ID only) → { ok, target_name } | { ok:false, error }.
+        async function _nwSendRequest(targetId) {
             const u = _nwUser();
             try {
                 const r = await fetch(`${API}/api/network/request`, { method:'POST', headers:{'Content-Type':'application/json'},
-                    body: JSON.stringify({ username:u.username, target_connect_id:targetId, relationship_type:relType }) });
+                    body: JSON.stringify({ username:u.username, target_connect_id:targetId }) });
                 const d = await r.json();
                 if (!r.ok) return { ok:false, error: d.detail || 'Could not send request.' };
                 return { ok:true, target_name: d.target_name };
@@ -4267,18 +4244,14 @@
         }
         async function nwSendRequest() {
             const tgt = (document.getElementById('nw-target-id')||{}).value || '';
-            const rel = (document.getElementById('nw-rel-type')||{}).value || '';
             const msg = document.getElementById('nw-req-msg');
             const show = (txt, color) => { if (msg) { msg.style.color=color; msg.textContent=txt; } };
             if (!tgt.trim()) { show('Enter the Workspace ID you want to connect to.', '#f87171'); return; }
-            if (!rel) { show('Please pick how you’re related.', '#f87171'); return; }
             show('Sending…', '#94a3b8');
-            const res = await _nwSendRequest(tgt.trim(), rel);
+            const res = await _nwSendRequest(tgt.trim());
             if (res.ok) {
-                show(`Request sent to ${res.target_name||'that workspace'}. They’ll see it under Requests.`, '#4ade80');
+                show(`Request sent to ${res.target_name||'that workspace'}. They choose your role & companies when they accept.`, '#4ade80');
                 const ti = document.getElementById('nw-target-id'); if (ti) ti.value='';
-                const rs = document.getElementById('nw-rel-type'); if (rs) rs.value='';
-                const h = document.getElementById('nw-rel-hint'); if (h) h.textContent='';
             } else { show(res.error, '#f87171'); }
         }
 
@@ -4300,34 +4273,92 @@
         }
         function _nwIncomingCard(x) {
             const who = escapeHtml(x.requester_name || x.requester_connect_id || 'A workspace');
-            const rel = _NW_REL_LABELS[x.relationship_type] || x.relationship_type;
-            return `<div class="card" style="max-width:620px; margin-bottom:10px;">
+            return `<div class="card" style="max-width:620px; margin-bottom:10px;" id="nw-card-${x.id}">
                 <div style="font-weight:600; color:#f4f4f5;">${who}</div>
-                <div style="font-size:0.8rem; color:#94a3b8; margin-top:3px;">Wants to connect as your <b>${escapeHtml(rel)}</b> — will get <b>${escapeHtml(x.granted_role)}</b> access to your workspace.</div>
-                <div style="display:flex; gap:8px; margin-top:12px;">
-                    <button onclick="nwApprove('${x.id}')" style="padding:7px 14px; background:rgba(74,222,128,0.14); color:#4ade80; border:1px solid rgba(74,222,128,0.35); border-radius:8px; font-weight:600; cursor:pointer;">Approve</button>
+                <div style="font-size:0.8rem; color:#94a3b8; margin-top:3px;">Wants to connect to your workspace. You choose their role and which companies to share.</div>
+                <div class="nw-row-actions" style="display:flex; gap:8px; margin-top:12px;">
+                    <button onclick="nwOpenApprove('${x.id}')" style="padding:7px 14px; background:rgba(74,222,128,0.14); color:#4ade80; border:1px solid rgba(74,222,128,0.35); border-radius:8px; font-weight:600; cursor:pointer;">Approve…</button>
                     <button onclick="nwDecline('${x.id}')" style="padding:7px 12px; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.25); border-radius:8px; cursor:pointer;">Decline</button>
                 </div>
+                <div id="nw-approve-${x.id}" class="nw-approve-panel" style="display:none;"></div>
             </div>`;
         }
         function _nwOutgoingCard(x) {
             const who = escapeHtml(x.target_name || x.target_connect_id || 'A workspace');
-            const rel = _NW_REL_LABELS[x.relationship_type] || x.relationship_type;
             return `<div class="card" style="max-width:620px; margin-bottom:10px;">
                 <div style="font-weight:600; color:#f4f4f5;">${who}</div>
-                <div style="font-size:0.8rem; color:#94a3b8; margin-top:3px;">You asked to connect as their <b>${escapeHtml(rel)}</b> — awaiting their approval.</div>
+                <div style="font-size:0.8rem; color:#94a3b8; margin-top:3px;">Waiting for them to accept your request.</div>
             </div>`;
+        }
+        // Acceptor opens the approve panel: pick a role + choose which companies to share.
+        async function nwOpenApprove(id) {
+            const panel = document.getElementById('nw-approve-' + id);
+            const actions = document.querySelector(`#nw-card-${id} .nw-row-actions`);
+            if (!panel) return;
+            if (panel.style.display !== 'none') { nwCancelApprove(id); return; }
+            const u = _nwUser();
+            let companies = [];
+            try {
+                const r = await fetch(`${API}/api/network/companies?username=${encodeURIComponent(u.username||'')}`);
+                const d = await r.json();
+                if (r.ok) companies = d.companies || [];
+            } catch(_) {}
+            const roleOpts = ['ca','accountant','auditor','staff','other']
+                .map(v => `<option value="${v}">${escapeHtml(_NW_REL_LABELS[v])}</option>`).join('');
+            const coRows = companies.length
+                ? companies.map(c => `<label class="nw-co-row"><input type="checkbox" class="nw-co-${id}" value="${escapeHtml(c.id)}" checked> ${escapeHtml(c.name)}</label>`).join('')
+                : '<div style="color:#64748b; font-size:0.8rem;">No companies in your workspace yet.</div>';
+            panel.innerHTML = `
+                <div style="margin-top:6px; padding-top:12px; border-top:1px solid var(--border);">
+                    <label style="font-size:0.76rem; color:#94a3b8;">Their role
+                        <select id="nw-ap-role-${id}" onchange="nwApRoleHint('${id}')" style="width:100%; margin-top:4px; padding:8px 10px; background:var(--bg-light); color:#fff; border:1px solid var(--border); border-radius:8px;">
+                            <option value="" selected disabled>Choose their role…</option>
+                            ${roleOpts}
+                        </select>
+                    </label>
+                    <div id="nw-ap-hint-${id}" style="font-size:0.74rem; color:#64748b; margin-top:6px;"></div>
+                    <div style="font-size:0.76rem; color:#94a3b8; margin-top:12px;">Companies to share</div>
+                    <div class="nw-co-list">${coRows}</div>
+                    <div style="display:flex; gap:8px; margin-top:12px;">
+                        <button onclick="nwApprove('${id}')" style="padding:7px 14px; background:rgba(74,222,128,0.14); color:#4ade80; border:1px solid rgba(74,222,128,0.35); border-radius:8px; font-weight:600; cursor:pointer;">Grant access</button>
+                        <button onclick="nwCancelApprove('${id}')" style="padding:7px 12px; background:rgba(255,255,255,0.05); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; cursor:pointer;">Cancel</button>
+                    </div>
+                    <div id="nw-ap-msg-${id}" style="font-size:0.8rem; margin-top:8px;"></div>
+                </div>`;
+            panel.style.display = 'block';
+            if (actions) actions.style.display = 'none';
+        }
+        function nwApRoleHint(id) {
+            const sel = document.getElementById('nw-ap-role-' + id);
+            const hint = document.getElementById('nw-ap-hint-' + id);
+            if (sel && hint) hint.textContent = _NW_ROLE_HINTS[sel.value] || '';
+        }
+        function nwCancelApprove(id) {
+            const panel = document.getElementById('nw-approve-' + id);
+            const actions = document.querySelector(`#nw-card-${id} .nw-row-actions`);
+            if (panel) { panel.style.display = 'none'; panel.innerHTML = ''; }
+            if (actions) actions.style.display = 'flex';
         }
         async function nwApprove(id) {
             const u = _nwUser();
+            const role = (document.getElementById('nw-ap-role-' + id)||{}).value || '';
+            const msg = document.getElementById('nw-ap-msg-' + id);
+            const show = (txt, color) => { if (msg) { msg.style.color=color; msg.textContent=txt; } };
+            if (!role) { show('Pick their role first.', '#f87171'); return; }
+            const scope = Array.from(document.querySelectorAll('.nw-co-' + id))
+                .filter(c => c.checked).map(c => c.value);
+            const total = document.querySelectorAll('.nw-co-' + id).length;
+            if (total > 0 && scope.length === 0) { show('Pick at least one company to share.', '#f87171'); return; }
+            show('Granting…', '#94a3b8');
             try {
                 const r = await fetch(`${API}/api/network/approve`, { method:'POST', headers:{'Content-Type':'application/json'},
-                    body: JSON.stringify({ username:u.username, request_id:id }) });
+                    body: JSON.stringify({ username:u.username, request_id:id, relationship_type:role,
+                        scope_company_ids: scope.length ? scope : null }) });
                 const d = await r.json();
                 if (!r.ok) throw new Error(d.detail || 'Could not approve.');
                 try { showChatToast && showChatToast('Connected.'); } catch(_) {}
-            } catch(e) { alert(e.message); }
-            loadNetworkRequests();
+                loadNetworkRequests();
+            } catch(e) { show(e.message, '#f87171'); }
         }
         async function nwDecline(id) {
             const u = _nwUser();
@@ -4389,21 +4420,17 @@
             } catch(_) {}
             nwRefreshBadge();
         }
-        // Connect straight from the Home strip — relationship is mandatory; sends the request
-        // without leaving Home.
+        // Connect straight from the Home strip — just the ID; the acceptor decides role + companies.
         async function homeNetConnect() {
             const tgt = (document.getElementById('home-net-target')||{}).value || '';
-            const rel = (document.getElementById('home-net-rel')||{}).value || '';
             const msg = document.getElementById('home-net-msg');
             const show = (txt, color) => { if (msg) { msg.style.display=''; msg.style.color=color; msg.textContent=txt; } };
             if (!tgt.trim()) { show('Enter a Workspace ID.', '#f87171'); return; }
-            if (!rel) { show('Please pick how you’re related.', '#f87171'); return; }
             show('Sending…', '#94a3b8');
-            const res = await _nwSendRequest(tgt.trim(), rel);
+            const res = await _nwSendRequest(tgt.trim());
             if (res.ok) {
-                show(`Request sent to ${res.target_name || 'that workspace'}. They’ll see it under Requests.`, '#4ade80');
+                show(`Request sent to ${res.target_name || 'that workspace'}. They choose your role & companies when they accept.`, '#4ade80');
                 const ti = document.getElementById('home-net-target'); if (ti) ti.value='';
-                const rs = document.getElementById('home-net-rel'); if (rs) rs.value='';
                 nwRefreshBadge();
             } else {
                 show(res.error || 'Could not send request.', '#f87171');

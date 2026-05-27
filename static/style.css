@@ -1957,10 +1957,19 @@ input[type="text"].ya:focus, select.ya:focus {
   border: 1px solid var(--border); border-radius: 8px; font-size: 0.82rem;
   font-family: ui-monospace, monospace; letter-spacing: 1px; width: 150px;
 }
-.home-net-strip .hns-rel {
-  width: auto; font-family: inherit; letter-spacing: normal; cursor: pointer;
-}
 .home-net-strip .hns-msg { font-size: 0.78rem; white-space: nowrap; }
+
+/* Network approve panel (acceptor picks role + companies) */
+.nw-approve-panel .nw-co-list {
+  margin-top: 6px; display: flex; flex-direction: column; gap: 6px;
+  max-height: 220px; overflow-y: auto;
+}
+.nw-approve-panel .nw-co-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 0.84rem; color: #e2e8f0; cursor: pointer;
+  padding: 5px 8px; background: var(--bg-light); border: 1px solid var(--border); border-radius: 8px;
+}
+.nw-approve-panel .nw-co-row input { accent-color: var(--primary, #4ade80); }
 .home-net-strip .hns-btn {
   padding: 6px 11px; background: rgba(255,255,255,0.05); color: #cbd5e1;
   border: 1px solid var(--border); border-radius: 8px; font-size: 0.8rem; cursor: pointer;

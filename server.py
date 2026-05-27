@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "147"
+APP_VERSION = "148"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -6482,18 +6482,25 @@ async def api_network_request(payload: dict):
     users_id, _ = _resolve_caller(payload.get("username"))
     org_id = _network_org(users_id, payload.get("org_id"))
     target_code = (payload.get("target_connect_id") or "").strip()
-    rel_type = (payload.get("relationship_type") or "other").strip().lower()
     if not target_code:
         raise HTTPException(status_code=400, detail="Enter the workspace ID you want to connect to.")
     target = db.org_by_connect_id(target_code)
     if not target:
         raise HTTPException(status_code=404, detail="No workspace found with that ID.")
+    # Requestor just sends an ID; the acceptor assigns the role + companies on approval.
     res = db.create_relationship_request(
-        requester_org_id=org_id, target_org_id=target["id"],
-        relationship_type=rel_type, requested_by=users_id)
+        requester_org_id=org_id, target_org_id=target["id"], requested_by=users_id)
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("error", "Could not send request."))
     return {"status": "success", "id": res["id"], "target_name": target.get("name")}
+
+
+@app.get("/api/network/companies")
+async def api_network_companies(username: str, org_id: str = None):
+    """The caller's own workspace companies — for the acceptor's scope picker."""
+    users_id, _ = _resolve_caller(username)
+    org_id = _network_org(users_id, org_id)
+    return {"status": "success", "companies": db.list_org_companies(org_id)}
 
 
 @app.get("/api/network/requests")
@@ -6514,7 +6521,10 @@ async def api_network_approve(payload: dict):
     reqs = db.list_relationship_requests(org_id)
     if not any(r["id"] == str(rel_id) for r in reqs.get("incoming", [])):
         raise HTTPException(status_code=403, detail="That request isn't yours to approve.")
-    res = db.approve_relationship(rel_id, role=payload.get("role"),
+    rel_type = (payload.get("relationship_type") or "").strip().lower()
+    if not rel_type:
+        raise HTTPException(status_code=400, detail="Pick their role before granting access.")
+    res = db.approve_relationship(rel_id, relationship_type=rel_type,
                                   scope_company_ids=payload.get("scope_company_ids"))
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("error", "Could not approve."))
