@@ -4426,9 +4426,17 @@
             try {
                 const blob = await (await fetch(url)).blob();
                 const file = new File([blob], name || 'file', { type: type || blob.type });
-                if (typeof enterAgent === 'function' && window.__agentBySlug && window.__agentBySlug['ai-accountant']) enterAgent('ai-accountant');
-                else showView('chat');
-                setTimeout(() => { if (typeof attachFileToChat === 'function') attachFileToChat(file); }, 250);
+                // Land directly in the Tally CHAT conversation with the file attached.
+                if (window.__agentBySlug && window.__agentBySlug['ai-accountant']) {
+                    window.__activeAgent = 'ai-accountant';
+                    try { localStorage.setItem('activeAgent', 'ai-accountant'); } catch(_) {}
+                    if (typeof _renderNav === 'function') _renderNav();
+                }
+                // skipHashUpdate so we don't trigger the mobile "land on chat list" handler.
+                showView('chat', true);
+                if (typeof _chatMobileConvo === 'function') _chatMobileConvo();   // mobile: show the conversation
+                try { history.replaceState(null, '', '#chat'); } catch(_) {}      // reflect URL, no hashchange
+                setTimeout(() => { if (typeof attachFileToChat === 'function') attachFileToChat(file); }, 200);
             } catch(e) { try { showChatToast && showChatToast('Could not load that file.', 'warn'); } catch(_) { alert('Could not load that file.'); } }
         }
         async function deleteUpload(id) {
@@ -5326,6 +5334,13 @@
             // Bank Register (deprecated) → redirect to Bank Reco
             if (view === 'bankregister') {
                 view = 'bank';
+            }
+            // Home is the launcher — no active agent. Clear it so the agent header/skill bar
+            // don't persist over Home (mobile bottom-nav return didn't clear it before).
+            if (view === 'home' && window.__activeAgent) {
+                window.__activeAgent = null;
+                try { localStorage.removeItem('activeAgent'); } catch(_) {}
+                if (typeof _renderNav === 'function') _renderNav();
             }
             // Sprint 60 — Home is a full-width Android launcher: hide the sidebar on Home.
             document.body.classList.toggle('home-active', view === 'home');
