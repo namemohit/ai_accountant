@@ -1101,14 +1101,7 @@
                             <option value="amount_desc">💰 Largest amount</option>
                             <option value="amount_asc">💰 Smallest amount</option>
                             <option value="status">🏷️ By status</option>
-                            <option value="source">🔌 By source</option>
                         </select>
-                        <label style="display:flex; align-items:center; gap:4px; font-size:0.8rem; color:#94a3b8;">
-                            <input type="radio" name="bank-view" value="per_source" checked onchange="loadBankTransactions()"> Per-source
-                        </label>
-                        <label style="display:flex; align-items:center; gap:4px; font-size:0.8rem; color:#94a3b8;" title="Hides one side of every cross-source linked pair (e.g., Tally voucher matched to bank statement line). Only useful after a statement has been uploaded.">
-                            <input type="radio" name="bank-view" value="collapsed" onchange="loadBankTransactions()"> Collapsed
-                        </label>
                         <button onclick="clearBankFilters()" title="Reset all filters and sort to defaults" style="padding: 6px 10px; background: rgba(239,68,68,0.1); color: #ef4444; border: 1px solid rgba(239,68,68,0.3); border-radius: 6px; font-size: 0.78rem; cursor: pointer;">✕ Clear filters</button>
                     </div>
 
