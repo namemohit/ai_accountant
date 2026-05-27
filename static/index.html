@@ -4282,9 +4282,11 @@
             nwRefreshBadge();
         }
         function _nwIncomingCard(x) {
-            const who = escapeHtml(x.requester_name || x.requester_connect_id || 'A workspace');
+            const who = escapeHtml(x.requester_name || 'A workspace');
+            const wid = x.requester_connect_id ? `<div style="font-size:0.74rem; color:#64748b; font-family:ui-monospace,monospace; letter-spacing:1px; margin-top:2px;">${escapeHtml(x.requester_connect_id)}</div>` : '';
             return `<div class="card" style="max-width:620px; margin-bottom:10px;" id="nw-card-${x.id}">
                 <div style="font-weight:600; color:#f4f4f5;">${who}</div>
+                ${wid}
                 <div style="font-size:0.8rem; color:#94a3b8; margin-top:3px;">Wants to connect to your workspace. You choose their role and which companies to share.</div>
                 <div class="nw-row-actions" style="display:flex; gap:8px; margin-top:12px;">
                     <button onclick="nwOpenApprove('${x.id}')" style="padding:7px 14px; background:rgba(74,222,128,0.14); color:#4ade80; border:1px solid rgba(74,222,128,0.35); border-radius:8px; font-weight:600; cursor:pointer;">Approve…</button>
@@ -4294,9 +4296,11 @@
             </div>`;
         }
         function _nwOutgoingCard(x) {
-            const who = escapeHtml(x.target_name || x.target_connect_id || 'A workspace');
+            const who = escapeHtml(x.target_name || 'A workspace');
+            const wid = x.target_connect_id ? `<div style="font-size:0.74rem; color:#64748b; font-family:ui-monospace,monospace; letter-spacing:1px; margin-top:2px;">${escapeHtml(x.target_connect_id)}</div>` : '';
             return `<div class="card" style="max-width:620px; margin-bottom:10px;">
                 <div style="font-weight:600; color:#f4f4f5;">${who}</div>
+                ${wid}
                 <div style="font-size:0.8rem; color:#94a3b8; margin-top:3px;">Waiting for them to accept your request.</div>
             </div>`;
         }
