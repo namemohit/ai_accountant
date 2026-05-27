@@ -4324,12 +4324,18 @@
                 if (inc) inc.innerHTML = `<div style="color:#f87171; font-size:0.85rem;">${escapeHtml(e.message)}</div>`;
             }
         }
+        // Identity block: owner's name as the title, with workspace name + ID beneath.
+        function _nwIdentity(owner, wsName, cid) {
+            const title = escapeHtml(owner || wsName || 'A workspace');
+            const sub = [];
+            if (owner && wsName) sub.push(escapeHtml(wsName));
+            if (cid) sub.push(`<span style="font-family:ui-monospace,monospace; letter-spacing:1px;">${escapeHtml(cid)}</span>`);
+            const subHtml = sub.length ? `<div style="font-size:0.74rem; color:#64748b; margin-top:2px;">${sub.join(' · ')}</div>` : '';
+            return `<div style="font-weight:600; color:#f4f4f5;">${title}</div>${subHtml}`;
+        }
         function _nwIncomingCard(x) {
-            const who = escapeHtml(x.requester_name || 'A workspace');
-            const wid = x.requester_connect_id ? `<div style="font-size:0.74rem; color:#64748b; font-family:ui-monospace,monospace; letter-spacing:1px; margin-top:2px;">${escapeHtml(x.requester_connect_id)}</div>` : '';
             return `<div class="card" style="max-width:620px; margin-bottom:10px;" id="nw-card-${x.id}">
-                <div style="font-weight:600; color:#f4f4f5;">${who}</div>
-                ${wid}
+                ${_nwIdentity(x.requester_owner, x.requester_name, x.requester_connect_id)}
                 <div style="font-size:0.8rem; color:#94a3b8; margin-top:3px;">Wants to connect to your workspace. You choose their role and which companies to share.</div>
                 <div class="nw-row-actions" style="display:flex; gap:8px; margin-top:12px;">
                     <button onclick="nwOpenApprove('${x.id}')" style="padding:7px 14px; background:rgba(74,222,128,0.14); color:#4ade80; border:1px solid rgba(74,222,128,0.35); border-radius:8px; font-weight:600; cursor:pointer;">Approve…</button>
@@ -4339,11 +4345,8 @@
             </div>`;
         }
         function _nwOutgoingCard(x) {
-            const who = escapeHtml(x.target_name || 'A workspace');
-            const wid = x.target_connect_id ? `<div style="font-size:0.74rem; color:#64748b; font-family:ui-monospace,monospace; letter-spacing:1px; margin-top:2px;">${escapeHtml(x.target_connect_id)}</div>` : '';
             return `<div class="card" style="max-width:620px; margin-bottom:10px;">
-                <div style="font-weight:600; color:#f4f4f5;">${who}</div>
-                ${wid}
+                ${_nwIdentity(x.target_owner, x.target_name, x.target_connect_id)}
                 <div style="font-size:0.8rem; color:#94a3b8; margin-top:3px;">Waiting for them to accept your request.</div>
             </div>`;
         }
@@ -4444,12 +4447,10 @@
             const dir = x.direction === 'they access mine'
                 ? `They access your workspace (${escapeHtml(x.granted_role)})`
                 : `You access their workspace (${escapeHtml(x.granted_role)})`;
-            const wid = x.other_connect_id ? `<div style="font-size:0.74rem; color:#64748b; font-family:ui-monospace,monospace; letter-spacing:1px; margin-top:2px;">${escapeHtml(x.other_connect_id)}</div>` : '';
             return `<div class="card" style="max-width:620px; margin-bottom:10px;">
                 <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
                     <div>
-                        <div style="font-weight:600; color:#f4f4f5;">${escapeHtml(x.other_name||'Workspace')}</div>
-                        ${wid}
+                        ${_nwIdentity(x.other_owner, x.other_name, x.other_connect_id)}
                         <div style="font-size:0.78rem; color:#94a3b8; margin-top:3px;">${escapeHtml(rel)} · ${dir}</div>
                     </div>
                     <button onclick="nwRevoke('${x.id}')" style="padding:6px 12px; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.25); border-radius:8px; cursor:pointer; font-size:0.8rem;">Revoke</button>

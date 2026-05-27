@@ -8626,10 +8626,21 @@ def list_relationship_requests(org_id):
     try:
         cur.execute("""
             SELECT r.*, ro.name AS requester_name, ro.connect_id AS requester_connect_id,
-                         to2.name AS target_name, to2.connect_id AS target_connect_id
+                         to2.name AS target_name, to2.connect_id AS target_connect_id,
+                         rown.owner AS requester_owner, town.owner AS target_owner
             FROM org_relationships r
             JOIN organizations ro ON ro.id = r.requester_org_id
             JOIN organizations to2 ON to2.id = r.target_org_id
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(au.name, au.username) AS owner
+                FROM memberships m JOIN accounting_users au ON au.users_id = m.user_id
+                WHERE m.org_id = ro.id AND m.role='owner' ORDER BY m.joined_at ASC LIMIT 1
+            ) rown ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(au.name, au.username) AS owner
+                FROM memberships m JOIN accounting_users au ON au.users_id = m.user_id
+                WHERE m.org_id = to2.id AND m.role='owner' ORDER BY m.joined_at ASC LIMIT 1
+            ) town ON TRUE
             WHERE r.status='pending' AND (r.target_org_id=%s OR r.requester_org_id=%s)
             ORDER BY r.created_at DESC""", (str(org_id), str(org_id)))
         rows = cur.fetchall()
@@ -8646,7 +8657,9 @@ def _relrow(x):
     return {"id": str(x["id"]), "relationship_type": x["relationship_type"],
             "granted_role": x["granted_role"], "status": x["status"],
             "requester_name": x.get("requester_name"), "requester_connect_id": x.get("requester_connect_id"),
+            "requester_owner": x.get("requester_owner"),
             "target_name": x.get("target_name"), "target_connect_id": x.get("target_connect_id"),
+            "target_owner": x.get("target_owner"),
             "created_at": x["created_at"].isoformat() if x.get("created_at") else None}
 
 def approve_relationship(rel_id, relationship_type=None, scope_company_ids=None):
@@ -8701,10 +8714,21 @@ def list_connections(org_id):
     try:
         cur.execute("""
             SELECT r.*, ro.name AS requester_name, ro.connect_id AS requester_connect_id,
-                         to2.name AS target_name, to2.connect_id AS target_connect_id
+                         to2.name AS target_name, to2.connect_id AS target_connect_id,
+                         rown.owner AS requester_owner, town.owner AS target_owner
             FROM org_relationships r
             JOIN organizations ro ON ro.id=r.requester_org_id
             JOIN organizations to2 ON to2.id=r.target_org_id
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(au.name, au.username) AS owner
+                FROM memberships m JOIN accounting_users au ON au.users_id = m.user_id
+                WHERE m.org_id = ro.id AND m.role='owner' ORDER BY m.joined_at ASC LIMIT 1
+            ) rown ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(au.name, au.username) AS owner
+                FROM memberships m JOIN accounting_users au ON au.users_id = m.user_id
+                WHERE m.org_id = to2.id AND m.role='owner' ORDER BY m.joined_at ASC LIMIT 1
+            ) town ON TRUE
             WHERE r.status='active' AND (r.requester_org_id=%s OR r.target_org_id=%s)
             ORDER BY r.updated_at DESC""", (str(org_id), str(org_id)))
         out = []
@@ -8712,6 +8736,7 @@ def list_connections(org_id):
             mine_is_target = str(x["target_org_id"]) == str(org_id)
             out.append({"id": str(x["id"]), "relationship_type": x["relationship_type"],
                         "granted_role": x["granted_role"],
+                        "other_owner": x["requester_owner"] if mine_is_target else x["target_owner"],
                         "other_name": x["requester_name"] if mine_is_target else x["target_name"],
                         "other_connect_id": x["requester_connect_id"] if mine_is_target else x["target_connect_id"],
                         "direction": "they access mine" if mine_is_target else "I access theirs"})
