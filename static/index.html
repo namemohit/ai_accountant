@@ -8824,7 +8824,10 @@
         // Send a single turn (optional text + optional file) and render the reply.
         // Returns true on success, false on error/out-of-tokens (so a sequential
         // multi-file run can stop early). Awaiting this keeps replies in order.
+        let _chatSending = false;
         async function _sendOneToChat(msg, fileToSend) {
+            if (_chatSending) return false;   // a turn is already in flight — ignore duplicate sends
+            _chatSending = true;
             document.getElementById('chat-welcome').style.display = 'none';
             document.getElementById('chat-messages').style.display = 'flex';
             document.getElementById('chat-suggestions').style.display = 'none';
@@ -8859,6 +8862,8 @@
                 thinking.remove();
                 appendAIMessage({ text: 'Error: ' + err.message });
                 return false;
+            } finally {
+                _chatSending = false;   // release the in-flight lock for the next send
             }
         }
 
@@ -10272,14 +10277,17 @@
             });
         }
 
+        let _chatLoadSeq = 0;
         async function loadChat(id, skipHashUpdate = false) {
+            const seq = ++_chatLoadSeq;          // re-entrancy guard: only the latest load renders
             currentSessionId = id;
             if (!skipHashUpdate) {
                 window.location.hash = 'chat/' + id;
             }
             document.getElementById('chat-welcome').style.display = 'none';
-            document.getElementById('chat-messages').style.display = 'flex';
-            document.getElementById('chat-messages').innerHTML = '';
+            const box = document.getElementById('chat-messages');
+            box.style.display = 'flex';
+            box.innerHTML = '<div style="color:#64748b; font-size:0.85rem; padding:16px;">Loading…</div>';
             const _u = JSON.parse(localStorage.getItem('currentUser') || '{}').username || '';
             let msgs = [];
             try {
@@ -10287,25 +10295,33 @@
                 msgs = await res.json();
                 if (!res.ok || !Array.isArray(msgs)) throw new Error((msgs && msgs.detail) || 'Could not load this conversation.');
             } catch (e) {
-                document.getElementById('chat-messages').innerHTML =
+                if (seq !== _chatLoadSeq) return;   // superseded by a newer load
+                box.innerHTML =
                     `<div style="color:#94a3b8; font-size:0.85rem; padding:16px;">Couldn't load this conversation. <a href="#" onclick="loadChat('${id}');return false;" style="color:var(--primary-light);">Retry</a></div>`;
                 return;
             }
+            if (seq !== _chatLoadSeq) return;       // a newer loadChat started → don't double-render
+            box.innerHTML = '';                      // clear the "Loading…" once, then render fresh
             let lastFileUrl = null;
             msgs.forEach(m => {
-                if (m.role === 'user') {
-                    if (m.ui_type === 'file' && m.ui_data) {
-                        lastFileUrl = m.ui_data.file_url;
-                        appendUserMessage(m.content, m.ui_data.file_url, m.ui_data.filename);
+                try {
+                    if (m.role === 'user') {
+                        if (m.ui_type === 'file' && m.ui_data) {
+                            lastFileUrl = m.ui_data.file_url;
+                            appendUserMessage(m.content, m.ui_data.file_url, m.ui_data.filename);
+                        } else {
+                            appendUserMessage(m.content);
+                        }
                     } else {
-                        appendUserMessage(m.content);
+                        const aiData = { id: m.id, text: m.content, ui_type: m.ui_type, ui_data: m.ui_data };
+                        if (lastFileUrl) aiData.file_url = lastFileUrl;
+                        appendAIMessage(aiData);
                     }
-                } else {
-                    const aiData = { id: m.id, text: m.content, ui_type: m.ui_type, ui_data: m.ui_data };
-                    if (lastFileUrl) {
-                        aiData.file_url = lastFileUrl;
-                    }
-                    appendAIMessage(aiData);
+                } catch (err) {
+                    // Never let one un-renderable message blank the whole conversation:
+                    // fall back to the plain reply text so it's still visible.
+                    console.warn('[loadChat] could not render a message:', err);
+                    try { if (m.role !== 'user') appendAIMessage({ text: m.content || '(reply could not be displayed)' }); } catch(_) {}
                 }
             });
             loadChatSessions();
