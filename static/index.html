@@ -9102,8 +9102,8 @@
                 <div class="invoice-header-editor" id="meta-${tableId}" style="margin-top: 16px; margin-bottom: 16px; padding: 16px; background: rgba(30, 41, 59, 0.4); border: 1px solid var(--border); border-radius: 8px;">
                     <div style="font-weight: 600; margin-bottom: 12px; font-size: 0.95rem; color: white; display: flex; align-items: center; justify-content: space-between; gap: 8px;">
                         <span style="display: flex; align-items: center; gap: 8px;"><i class="fas fa-edit" style="color: var(--primary);"></i> ${_cardTitle}${_isMoney ? ` · <span style="font-size:0.7rem; background:rgba(245,158,11,0.18); color:#f59e0b; padding:1px 8px; border-radius:10px;">${escapeHtml(_vt)}</span>` : ''}</span>
-                        <span class="wa-status-badge" style="display: flex; align-items: center; gap: 6px; font-size: 0.8rem; font-weight: 500; background: rgba(255,255,255,0.03); padding: 4px 8px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.05); color: ${isSynced ? '#38bdf8' : '#94a3b8'}; transition: all 0.3s ease;">
-                            ${isSynced ? '<i class="fas fa-check-double" style="color: #38bdf8; font-size: 0.95rem;"></i> Synced with Tally' : '<i class="fas fa-clock" style="color: #94a3b8; font-size: 0.95rem;"></i> Pending Sync'}
+                        <span class="wa-status-badge" style="display: flex; align-items: center; gap: 6px; font-size: 0.8rem; font-weight: 500; background: rgba(255,255,255,0.03); padding: 4px 8px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.05); color: ${isTrulySynced ? '#38bdf8' : '#94a3b8'}; transition: all 0.3s ease;">
+                            ${isTrulySynced ? '<i class="fas fa-check-double" style="color: #38bdf8; font-size: 0.95rem;"></i> Synced with Tally' : '<i class="fas fa-clock" style="color: #94a3b8; font-size: 0.95rem;"></i> Pending Sync'}
                         </span>
                     </div>
                     <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 12px; margin-bottom: 12px;">
@@ -9151,7 +9151,7 @@
                     return h;
                 });
 
-                let actionHeaderHtml = isSynced ? '' : '<th>Actions</th>';
+                let actionHeaderHtml = isLocked ? '' : '<th>Actions</th>';
                 let tableHtml = metaFormHtml + `<div class="chat-ui-table-container">
                     <table id="${tableId}"${fileUrlAttr}${msgIdAttr}${vtypeAttr}>
                         <thead><tr>`;
@@ -9195,7 +9195,7 @@
                         tableHtml += `<td ${editableAttr} data-original="${safeCell}" data-col="${headers[cellIndex] || 'column'}" oninput="highlightCell(this)"${blurAttr}>${safeCell}</td>`;
                     });
                     
-                    let actionCellHtml = isSynced ? '' : `
+                    let actionCellHtml = isLocked ? '' : `
                         <td>
                             <button class="table-action-btn delete" onclick="deleteRow(this)" title="Remove Item"><i class="fas fa-trash"></i></button>
                         </td>`;
