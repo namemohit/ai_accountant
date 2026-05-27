@@ -3377,6 +3377,12 @@
         function _curViewTitle() {
             const cur = window.__currentView || '';
             if (!cur || cur === 'home') return '';
+            // Masters is a focused single-section screen — name the open section
+            // (Ledgers / Party Master / Item Master) rather than a generic "Masters".
+            if (cur === 'schema') {
+                const sec = window.__masterSection || 'coa';
+                return (_MASTER_SECTIONS[sec] && _MASTER_SECTIONS[sec].title) || 'Masters';
+            }
             if (_PLATFORM_TITLES[cur]) return _PLATFORM_TITLES[cur];
             const active = window.__activeAgent;
             if (active && cur === _firstViewOf(active)) return '';   // agent's own launcher
@@ -3866,6 +3872,9 @@
             parties:   { icon: '👥', title: 'Party Master', sub: 'Sundry debtors & creditors — GSTIN, PAN, place of supply. Keep them complete for GST & TDS.', gap: true },
             items:     { icon: '📦', title: 'Item Master',  sub: 'Stock items — HSN, GST rate, unit. Powers GSTR-1/3B HSN summaries.', gap: true },
         };
+        // Remember the last-opened master section so a refresh / direct #masters /
+        // back-button restores it (instead of always defaulting to Ledgers).
+        window.__masterSection = (() => { try { return localStorage.getItem('masterSection') || 'coa'; } catch(_) { return 'coa'; } })();
         function _renderMastersSection(sub) {
             const meta = _MASTER_SECTIONS[sub] || _MASTER_SECTIONS.coa;
             const hdr = document.querySelector('#schema-view header');
@@ -3882,6 +3891,7 @@
         }
         function _aiaccMaster(sub) {
             window.__masterSection = sub;
+            try { localStorage.setItem('masterSection', sub); } catch(_) {}
             // If already on the Masters view, re-render in place (showView would no-op the hook timing)
             showView('schema');
             if (typeof _renderMastersSection === 'function') _renderMastersSection(sub);
