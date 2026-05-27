@@ -210,11 +210,25 @@
             // Clean the ?shared marker from the URL.
             try { if (location.search.includes('shared')) history.replaceState({}, '', location.pathname + location.hash); } catch(_) {}
             if (!files.length) return;
-            const go = () => {
+            // Don't guess a company — shared files land in the workspace "Unallocated files"
+            // inbox; the user sorts them into the right company later (with an AI suggestion).
+            const go = async () => {
+                const u = (()=>{try{return JSON.parse(localStorage.getItem('currentUser')||'{}')}catch(_){return{}}})();
+                const co = (document.getElementById('active-company-select')||{}).value || u.company_name || '';
+                let done = 0;
+                for (const file of files) {
+                    try {
+                        const fd = new FormData();
+                        fd.append('file', file); fd.append('company_name', co); fd.append('username', u.username||'');
+                        const r = await fetch(`${API}/api/files/upload-unallocated`, { method:'POST', body: fd });
+                        if (r.ok) done++;
+                    } catch(_) {}
+                }
                 if (typeof showView === 'function') showView('uploads');
-                if (typeof uploadAnything === 'function') uploadAnything(files);
+                if (typeof loadUploads === 'function') loadUploads();
+                try { showChatToast && showChatToast(`${done} file${done>1?'s':''} saved to Unallocated files — sort anytime.`); } catch(_) {}
             };
-            // Defer slightly so the app shell + uploads view are ready.
+            // Defer slightly so the app shell + session are ready.
             setTimeout(go, 400);
         }
 
@@ -1437,6 +1451,15 @@
                 <input type="file" id="uploads-file-input" multiple style="display:none;" onchange="uploadAnything(this.files); this.value='';">
             </div>
             <div id="uploads-msg" style="font-size:0.82rem; margin-top:10px; color:#94a3b8;"></div>
+
+            <!-- Workspace inbox: files shared in from other apps, not yet filed to a company.
+                 Shows across every company in this workspace until sorted. -->
+            <div id="unallocated-section" style="display:none; margin-top:18px;">
+                <h3 style="margin:0 0 4px; font-size:1rem; color:#e2e8f0;">📥 Unallocated files <span id="unalloc-count" style="color:#64748b; font-weight:500;"></span></h3>
+                <p style="margin:0 0 10px; font-size:0.78rem; color:#94a3b8;">Shared into this workspace but not yet filed to a company. Pick the right company and file it.</p>
+                <div id="unallocated-list"></div>
+            </div>
+
             <div style="display:flex; align-items:center; gap:12px; margin-top:18px; flex-wrap:wrap;">
                 <h3 style="margin:0; font-size:1rem; color:#e2e8f0;">All files <span id="uploads-count" style="color:#64748b; font-weight:500;"></span></h3>
                 <input id="uploads-search" oninput="renderUploads()" placeholder="🔍 Search files…"
@@ -4088,6 +4111,55 @@
                 window.__uploads = (d && d.files) || [];
                 renderUploads();
             } catch(e) { grid.innerHTML = '<div style="color:#f87171; font-size:0.85rem;">Could not load files.</div>'; }
+            loadUnallocated();
+        }
+        // Workspace inbox — shared-in files not yet filed to a company (shown in every company view).
+        async function loadUnallocated() {
+            const sec = document.getElementById('unallocated-section');
+            const list = document.getElementById('unallocated-list');
+            if (!sec || !list) return;
+            const u = _nwUser ? _nwUser() : (()=>{try{return JSON.parse(localStorage.getItem('currentUser')||'{}')}catch(_){return{}}})();
+            const co = _uploadsCo();
+            let files = [];
+            try {
+                const r = await fetch(`${API}/api/files/unallocated?username=${encodeURIComponent(u.username||'')}&company_name=${encodeURIComponent(co)}`);
+                const d = await r.json();
+                files = (d && d.files) || [];
+            } catch(_) {}
+            if (!files.length) { sec.style.display = 'none'; list.innerHTML = ''; return; }
+            sec.style.display = 'block';
+            const cnt = document.getElementById('unalloc-count'); if (cnt) cnt.textContent = `(${files.length})`;
+            const companies = (u.companies || [u.company_name]).filter(Boolean);
+            list.innerHTML = files.map(f => {
+                const opts = companies.map(c => {
+                    const sel = (f.suggested_company && c === f.suggested_company) || (!f.suggested_company && c === co) ? ' selected' : '';
+                    return `<option value="${escapeHtml(c)}"${sel}>${escapeHtml(c)}</option>`;
+                }).join('');
+                const hint = f.suggest_status === 'pending' ? '<span style="font-size:0.72rem; color:#64748b;">Analyzing…</span>'
+                    : (f.suggested_company ? `<span style="font-size:0.72rem; color:#4ade80;">Likely: ${escapeHtml(f.suggested_company)}</span>` : '');
+                return `<div class="card" style="max-width:680px; margin-bottom:10px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+                    <span style="font-size:1.3rem;">${_fileIcon(f.file_type, f.original_name)}</span>
+                    <div style="flex:1; min-width:160px;">
+                        <div style="font-weight:600; color:#f4f4f5; word-break:break-word;">${escapeHtml(f.original_name||'file')}</div>
+                        <div style="font-size:0.74rem; color:#64748b;">${_fmtSize(f.size_bytes)} · ${hint}</div>
+                    </div>
+                    <select id="alloc-co-${f.id}" style="padding:7px 10px; background:var(--bg-light); color:#fff; border:1px solid var(--border); border-radius:8px; font-size:0.82rem;">${opts}</select>
+                    <button onclick="allocateFile('${f.id}')" style="padding:7px 14px; background:rgba(74,222,128,0.14); color:#4ade80; border:1px solid rgba(74,222,128,0.35); border-radius:8px; font-weight:600; cursor:pointer; font-size:0.82rem;">File it</button>
+                </div>`;
+            }).join('');
+        }
+        async function allocateFile(id) {
+            const u = (()=>{try{return JSON.parse(localStorage.getItem('currentUser')||'{}')}catch(_){return{}}})();
+            const sel = document.getElementById('alloc-co-' + id);
+            const company = sel ? sel.value : '';
+            if (!company) return;
+            try {
+                const r = await fetch(`${API}/api/files/allocate`, { method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({ username:u.username, id, company_name:company }) });
+                if (!r.ok) { const d = await r.json(); throw new Error(d.detail||'Could not file it.'); }
+                try { showChatToast && showChatToast(`Filed to ${company}.`); } catch(_) {}
+                loadUploads();
+            } catch(e) { alert(e.message); }
         }
         function renderUploads() {
             const grid = document.getElementById('uploads-grid'); if (!grid) return;

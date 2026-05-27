@@ -1042,8 +1042,15 @@ def get_user_by_username(username: str):
         pput(conn)
 
 
+_COMPANY_FILES_READY = False
+
 def _ensure_company_files():
-    """Sprint 55 — 'Upload anything': a company-scoped file library."""
+    """Sprint 55 — 'Upload anything': a company-scoped file library. Sprint 86 — also
+    holds workspace-level UNALLOCATED files (shared in from other apps): company_name
+    NULL + allocated=false + org_id scope, until the user sorts them into a company."""
+    global _COMPANY_FILES_READY
+    if _COMPANY_FILES_READY:
+        return
     try:
         conn = get_conn(); cur = conn.cursor()
         cur.execute("""
@@ -1059,9 +1066,95 @@ def _ensure_company_files():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_company_files_co ON company_files(company_name, created_at DESC)")
+        # Unallocated-inbox columns (additive; existing rows default to allocated=true).
+        try: cur.execute("ALTER TABLE company_files ALTER COLUMN company_name DROP NOT NULL")
+        except Exception: pass
+        cur.execute("ALTER TABLE company_files ADD COLUMN IF NOT EXISTS allocated BOOLEAN DEFAULT TRUE")
+        cur.execute("ALTER TABLE company_files ADD COLUMN IF NOT EXISTS org_id UUID")
+        cur.execute("ALTER TABLE company_files ADD COLUMN IF NOT EXISTS suggested_company TEXT")
+        cur.execute("ALTER TABLE company_files ADD COLUMN IF NOT EXISTS suggest_status TEXT")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_company_files_unalloc ON company_files(org_id, allocated)")
         conn.commit(); cur.close(); conn.close()
+        _COMPANY_FILES_READY = True
     except Exception as e:
         print(f"[_ensure_company_files] {e}")
+
+
+def save_unallocated_file(org_id, file_url, original_name=None, file_type=None,
+                          size_bytes=None, uploaded_by=None, suggest_status="none"):
+    """Store a shared-in file in the workspace inbox (no company yet)."""
+    _ensure_company_files()
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""INSERT INTO company_files
+                         (company_name, file_url, original_name, file_type, size_bytes,
+                          uploaded_by, org_id, allocated, suggest_status)
+                       VALUES (NULL,%s,%s,%s,%s,%s,%s,FALSE,%s)
+                       RETURNING id, file_url, original_name, file_type, size_bytes, created_at""",
+                    (file_url, original_name, file_type, size_bytes, uploaded_by, str(org_id), suggest_status))
+        row = cur.fetchone(); conn.commit(); return row
+    except Exception as e:
+        try: conn.rollback()
+        except Exception: pass
+        print(f"[save_unallocated_file] {e}"); return None
+    finally:
+        cur.close(); pput(conn)
+
+
+def list_unallocated_files(org_id):
+    """Workspace inbox — unallocated files for an org (shown across all its companies)."""
+    _ensure_company_files()
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""SELECT id, file_url, original_name, file_type, size_bytes, uploaded_by,
+                              created_at, suggested_company, suggest_status
+                       FROM company_files
+                       WHERE org_id=%s AND allocated=FALSE AND archived_at IS NULL
+                       ORDER BY created_at DESC""", (str(org_id),))
+        return cur.fetchall()
+    finally:
+        cur.close()
+        try: conn.rollback()
+        except Exception: pass
+        pput(conn)
+
+
+def allocate_file(file_id, org_id, company_name):
+    """Assign an inbox file to a company (must belong to the same org)."""
+    _ensure_company_files()
+    conn = pget(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT 1 FROM companies WHERE org_id=%s AND name=%s AND archived_at IS NULL",
+                    (str(org_id), company_name))
+        if not cur.fetchone():
+            return {"ok": False, "error": "That company isn't in this workspace."}
+        cur.execute("""UPDATE company_files SET company_name=%s, allocated=TRUE
+                       WHERE id=%s AND org_id=%s AND allocated=FALSE""",
+                    (company_name, str(file_id), str(org_id)))
+        ok = cur.rowcount > 0; conn.commit()
+        return {"ok": ok} if ok else {"ok": False, "error": "File not found in the inbox."}
+    except Exception as e:
+        try: conn.rollback()
+        except Exception: pass
+        print(f"[allocate_file] {e}"); return {"ok": False, "error": str(e)}
+    finally:
+        cur.close(); pput(conn)
+
+
+def set_file_suggestion(file_id, suggested_company, status="done"):
+    """Record the AI's best-guess company for an inbox file (background pass)."""
+    _ensure_company_files()
+    conn = pget(); cur = conn.cursor()
+    try:
+        cur.execute("UPDATE company_files SET suggested_company=%s, suggest_status=%s WHERE id=%s",
+                    (suggested_company, status, str(file_id)))
+        conn.commit(); return True
+    except Exception as e:
+        try: conn.rollback()
+        except Exception: pass
+        print(f"[set_file_suggestion] {e}"); return False
+    finally:
+        cur.close(); pput(conn)
 
 
 def save_company_file(company_name, file_url, original_name=None, file_type=None,

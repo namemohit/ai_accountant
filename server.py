@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "162"
+APP_VERSION = "163"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -6808,6 +6808,93 @@ async def api_files_rename(payload: dict):
     ok = db.rename_company_file(payload.get("id"), payload.get("company_name"),
                                 payload.get("name"))
     return {"status": "success" if ok else "error"}
+
+
+# ── Unallocated inbox: files shared in from other apps land here (no company yet),
+# scoped to the workspace (org), and the user sorts them into a company later. ──
+@app.post("/api/files/upload-unallocated")
+async def api_files_upload_unallocated(file: UploadFile = File(...), company_name: str = Form(None),
+                                       username: str = Form(None)):
+    import uuid as _uuid
+    # Resolve the workspace (org) from the active company, so the inbox shows across
+    # all that workspace's companies. Fall back to the caller's owned org.
+    org_id = None
+    try:
+        uid = None
+        if username:
+            u = db.get_user_by_username(username); uid = u.get("users_id") if u else None
+        if company_name:
+            org_id = db.org_id_for_company(company_name, uid)
+        if not org_id and uid:
+            mems = db.user_memberships_basic(uid) or []
+            m = next((x for x in mems if x["role"] in ("owner", "manager")), None) or (mems[0] if mems else None)
+            org_id = m["org_id"] if m else None
+    except Exception as e:
+        print(f"[upload-unallocated] org resolve: {e}")
+    if not org_id:
+        raise HTTPException(status_code=400, detail="Could not resolve your workspace for the inbox.")
+    ext = os.path.splitext(file.filename or "")[1]
+    data = await file.read()
+    ct = file.content_type
+    path = f"unallocated/{_uuid.uuid4().hex}{ext}"
+    url = _supabase_upload(path, data, ct)
+    if not url:
+        os.makedirs("static/uploads", exist_ok=True)
+        stored = f"{_uuid.uuid4().hex}{ext}"
+        with open(f"static/uploads/{stored}", "wb") as f:
+            f.write(data)
+        url = f"/static/uploads/{stored}"
+    row = db.save_unallocated_file(org_id, url, original_name=file.filename,
+                                   file_type=ct, size_bytes=len(data), uploaded_by=username)
+    if not row:
+        raise HTTPException(status_code=500, detail="Could not save the shared file.")
+    return {"status": "success", "file": {"id": str(row["id"]), "file_url": url,
+            "original_name": file.filename, "file_type": ct, "size_bytes": len(data)}}
+
+
+@app.get("/api/files/unallocated")
+async def api_files_unallocated(username: str = None, company_name: str = None, org_id: str = None):
+    """Workspace inbox — shown in every company's Files view of that workspace."""
+    if not org_id:
+        try:
+            uid = None
+            if username:
+                u = db.get_user_by_username(username); uid = u.get("users_id") if u else None
+            if company_name:
+                org_id = db.org_id_for_company(company_name, uid)
+            if not org_id and uid:
+                mems = db.user_memberships_basic(uid) or []
+                m = next((x for x in mems if x["role"] in ("owner", "manager")), None) or (mems[0] if mems else None)
+                org_id = m["org_id"] if m else None
+        except Exception as e:
+            print(f"[files/unallocated] org resolve: {e}")
+    if not org_id:
+        return {"status": "success", "files": []}
+    rows = db.list_unallocated_files(org_id)
+    return {"status": "success", "files": [{
+        "id": str(r["id"]), "file_url": r["file_url"], "original_name": r["original_name"],
+        "file_type": r["file_type"], "size_bytes": r["size_bytes"],
+        "suggested_company": r.get("suggested_company"), "suggest_status": r.get("suggest_status"),
+        "created_at": str(r["created_at"])} for r in rows]}
+
+
+@app.post("/api/files/allocate")
+async def api_files_allocate(payload: dict):
+    """Assign an inbox file to one of the workspace's companies."""
+    username = payload.get("username"); company = payload.get("company_name")
+    file_id = payload.get("id") or payload.get("file_id")
+    if not file_id or not company:
+        raise HTTPException(status_code=400, detail="File and company are required.")
+    uid = None
+    u = db.get_user_by_username(username) if username else None
+    uid = u.get("users_id") if u else None
+    org_id = db.org_id_for_company(company, uid)
+    if not org_id:
+        raise HTTPException(status_code=400, detail="Could not resolve that company's workspace.")
+    res = db.allocate_file(file_id, org_id, company)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Could not file it."))
+    return {"status": "success"}
 
 
 @app.post("/api/wallet/credit")
