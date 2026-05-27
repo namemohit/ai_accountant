@@ -1082,15 +1082,11 @@
                         <select id="bank-filter-bank-ledger" onchange="loadBankTransactions()" title="Filter to one bank / cash ledger" style="padding: 6px 10px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
                             <option value="">All banks</option>
                         </select>
-                        <select id="bank-filter-tally-status" onchange="loadBankTransactions()" title="Tally Status — rows that need attention vs already done" style="padding: 6px 10px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
-                            <option value="needs_attention">🔥 Needs attention</option>
-                            <option value="done">✅ Done</option>
-                            <option value="">All</option>
-                            <option disabled>──────────</option>
+                        <select id="bank-filter-tally-status" onchange="loadBankTransactions()" title="Filter by Tally Status" style="padding: 6px 10px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
+                            <option value="">All statuses</option>
                             <option value="ai_ready">🟡 AI Ready</option>
                             <option value="needs_review">⚠️ Needs Review</option>
                             <option value="linked">🔗 Linked</option>
-                            <option value="in_tally">📚 In Tally</option>
                             <option value="posted">📤 Posted</option>
                         </select>
                         <input type="date" id="bank-filter-from" onchange="loadBankTransactions()" style="padding: 6px 8px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
@@ -12351,8 +12347,13 @@
                     const sel = document.getElementById('bank-filter-bank-ledger');
                     if (sel) sel.value = f.bank_ledger;
                 }
-                // Sprint 12 — prefer new key; old 'status' key is ignored (default 'needs_attention' kicks in)
-                if (f.tally_status !== undefined) document.getElementById('bank-filter-tally-status').value = f.tally_status;
+                // Restore saved status filter, but fall back to "All" if it's a
+                // retired value (needs_attention / done / in_tally) no longer in the list.
+                if (f.tally_status !== undefined) {
+                    const _valid = ['', 'ai_ready', 'needs_review', 'linked', 'posted'];
+                    document.getElementById('bank-filter-tally-status').value =
+                        _valid.includes(f.tally_status) ? f.tally_status : '';
+                }
                 if (f.from_date !== undefined) document.getElementById('bank-filter-from').value = f.from_date;
                 if (f.to_date !== undefined) document.getElementById('bank-filter-to').value = f.to_date;
                 if (f.q !== undefined) document.getElementById('bank-filter-q').value = f.q;
@@ -12368,8 +12369,7 @@
             // Sprint 14 — reset bank ledger filter to "All banks"
             const blSel = document.getElementById('bank-filter-bank-ledger');
             if (blSel) blSel.value = '';
-            // Sprint 12 — Clear filters returns to the default triage view, not "All"
-            document.getElementById('bank-filter-tally-status').value = 'needs_attention';
+            document.getElementById('bank-filter-tally-status').value = '';  // All statuses
             document.getElementById('bank-filter-from').value = '';
             document.getElementById('bank-filter-to').value = '';
             document.getElementById('bank-filter-q').value = '';
@@ -12437,9 +12437,9 @@
             const sort = document.getElementById('bank-sort').value;
             const view = document.querySelector('input[name="bank-view"]:checked')?.value || 'per_source';
 
-            // Sprint 12 — show triage hint only when default "needs_attention" filter is active
+            // Triage hint banner retired with the needs_attention bucket — keep hidden.
             const hint = document.getElementById('bank-triage-hint');
-            if (hint) hint.style.display = (tallyStatus === 'needs_attention') ? 'flex' : 'none';
+            if (hint) hint.style.display = 'none';
 
             const params = new URLSearchParams();
             params.set('company_name', co.company_name);
@@ -12835,7 +12835,30 @@
                     body: JSON.stringify({ party: value, company_name: co.company_name, company_id: co.company_id })
                 });
                 if (!res.ok) throw new Error('save failed');
+                const j = await res.json();
                 if (value && learned) { learned.textContent = '✓ learned — AI will reuse this'; learned.style.color = '#10b981'; }
+                // Refresh the sibling cells (Tally Status + Reconciled By + match %)
+                // from the server's updated row so they reflect the manual edit.
+                const d = (j && j.data) || null;
+                const tr = input.closest('tr');
+                if (d && tr) {
+                    const tds = tr.querySelectorAll(':scope > td');
+                    if (tds.length >= 9) {
+                        const linked = d.linked_id ? ' <span style="color:#a855f7; font-size:0.7rem;" title="Linked across sources">🔗</span>' : '';
+                        tds[7].innerHTML = _tallyStatusCell(d) + linked;
+                        tds[8].innerHTML = _reconciledByBadge(d.ai_touched, d.human_touched, d.confidence);
+                    }
+                    if (mb) {
+                        const _pc = (d.confidence !== null && d.confidence !== undefined) ? Math.round(d.confidence * 100) : null;
+                        if (_pc !== null && value) {
+                            mb.style.display = '';
+                            mb.style.color = _pc >= 70 ? '#10b981' : (_pc >= 60 ? '#f59e0b' : '#ef4444');
+                            mb.textContent = (_pc >= 60 ? '🎯 match ' : '⚠️ low match ') + _pc + '%';
+                        } else {
+                            mb.style.display = 'none';
+                        }
+                    }
+                }
             } catch (e) {
                 if (value && learned) { learned.textContent = '⚠️ save failed — retry'; learned.style.color = '#ef4444'; }
                 console.error(e);

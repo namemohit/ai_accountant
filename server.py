@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "176"
+APP_VERSION = "177"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -3144,7 +3144,10 @@ async def bank_rerun_reconcile(payload: dict):
                 "status":      status,
                 "confidence":  sug.get("confidence", 0),
                 "rationale":   sug.get("rationale"),
-                "ai_touched":  True,
+                # AI "reconciled" the row only if it actually produced a usable
+                # suggestion. A blank-party / unmatched line means the AI gave up —
+                # don't mark it ai_touched (otherwise "Reconciled By" wrongly shows AI).
+                "ai_touched":  status in ("matched", "ai_filled"),
             }
             # user_id=None → AI-driven update; human_touched stays FALSE so the row
             # remains a re-run candidate until a human curates it.
@@ -3234,9 +3237,19 @@ async def patch_bank_transaction(tx_id: str, payload: dict, background_tasks: Ba
             payload.setdefault("confidence", 1.0)
             payload.setdefault("status", "ai_filled")
             payload.setdefault("rationale", "Manual override by user")
-        # A manual party edit makes the row human-curated → it's preserved by re-runs.
         if party_edited:
-            payload["human_touched"] = True
+            if party_val:
+                # Manual party set → human-curated (preserved by re-runs).
+                payload["human_touched"] = True
+            else:
+                # Clear → reset to a clean Needs-Review state that nobody reconciled,
+                # and make it re-runnable again (human_touched=False).
+                payload["party"] = ""
+                payload["status"] = "unmatched"
+                payload["confidence"] = 0
+                payload["rationale"] = None
+                payload["human_touched"] = False
+                payload["ai_touched"] = False
         # P0 FIX: scope the edit to the caller's company (tenant isolation).
         _cid = payload.get("company_id")
         if not _cid and payload.get("company_name"):
