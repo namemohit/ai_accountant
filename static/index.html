@@ -1236,7 +1236,16 @@
                 <button class="hns-btn" onclick="nwCopyId()" title="Copy your Workspace ID">📋</button>
                 <span class="hns-sep"></span>
                 <input id="home-net-target" class="hns-input" placeholder="Connect to ID…" autocomplete="off">
+                <select id="home-net-rel" class="hns-input hns-rel">
+                    <option value="" selected disabled>Choose relationship…</option>
+                    <option value="ca">They are my CA / accounting firm</option>
+                    <option value="accountant">They are my Accountant</option>
+                    <option value="auditor">They are my Auditor</option>
+                    <option value="staff">They are my Staff / Junior</option>
+                    <option value="other">Other — they decide the access</option>
+                </select>
                 <button class="hns-btn hns-go" onclick="homeNetConnect()">Connect</button>
+                <span id="home-net-msg" class="hns-msg" style="display:none;"></span>
                 <span class="hns-sep"></span>
                 <button class="hns-btn hns-req" onclick="enterAgent('network'); setTimeout(()=>showView('network-requests'),60);">
                     📨 Requests <span id="nw-home-badge" class="hns-badge" style="display:none;"></span>
@@ -1348,6 +1357,7 @@
                 </label>
                 <label style="font-size:0.78rem; color:#94a3b8; display:block; margin-top:12px;">How are they related to you?
                     <select id="nw-rel-type" style="width:100%; margin-top:4px; padding:9px 11px; background:var(--bg-light); color:#fff; border:1px solid var(--border); border-radius:8px;">
+                        <option value="" selected disabled>Choose relationship…</option>
                         <option value="ca">They are my CA / accounting firm — manage my books</option>
                         <option value="accountant">They are my Accountant — enter & edit vouchers</option>
                         <option value="auditor">They are my Auditor — view only</option>
@@ -4244,21 +4254,32 @@
             try { navigator.clipboard.writeText(id); } catch(_) {}
             try { showChatToast && showChatToast('Workspace ID copied'); } catch(_) {}
         }
-        async function nwSendRequest() {
+        // Shared request sender → { ok, target_name } | { ok:false, error }.
+        async function _nwSendRequest(targetId, relType) {
             const u = _nwUser();
-            const tgt = (document.getElementById('nw-target-id')||{}).value || '';
-            const rel = (document.getElementById('nw-rel-type')||{}).value || 'other';
-            const msg = document.getElementById('nw-req-msg');
-            if (!tgt.trim()) { if (msg){ msg.style.color='#f87171'; msg.textContent='Enter the Workspace ID you want to connect to.'; } return; }
-            if (msg) { msg.style.color='#94a3b8'; msg.textContent='Sending…'; }
             try {
                 const r = await fetch(`${API}/api/network/request`, { method:'POST', headers:{'Content-Type':'application/json'},
-                    body: JSON.stringify({ username:u.username, target_connect_id:tgt.trim(), relationship_type:rel }) });
+                    body: JSON.stringify({ username:u.username, target_connect_id:targetId, relationship_type:relType }) });
                 const d = await r.json();
-                if (!r.ok) throw new Error(d.detail || 'Could not send request.');
-                if (msg) { msg.style.color='#4ade80'; msg.textContent=`Request sent to ${d.target_name||'that workspace'}. They’ll see it under Requests.`; }
+                if (!r.ok) return { ok:false, error: d.detail || 'Could not send request.' };
+                return { ok:true, target_name: d.target_name };
+            } catch(e) { return { ok:false, error: e.message || 'Network error.' }; }
+        }
+        async function nwSendRequest() {
+            const tgt = (document.getElementById('nw-target-id')||{}).value || '';
+            const rel = (document.getElementById('nw-rel-type')||{}).value || '';
+            const msg = document.getElementById('nw-req-msg');
+            const show = (txt, color) => { if (msg) { msg.style.color=color; msg.textContent=txt; } };
+            if (!tgt.trim()) { show('Enter the Workspace ID you want to connect to.', '#f87171'); return; }
+            if (!rel) { show('Please pick how you’re related.', '#f87171'); return; }
+            show('Sending…', '#94a3b8');
+            const res = await _nwSendRequest(tgt.trim(), rel);
+            if (res.ok) {
+                show(`Request sent to ${res.target_name||'that workspace'}. They’ll see it under Requests.`, '#4ade80');
                 const ti = document.getElementById('nw-target-id'); if (ti) ti.value='';
-            } catch(e) { if (msg) { msg.style.color='#f87171'; msg.textContent=e.message; } }
+                const rs = document.getElementById('nw-rel-type'); if (rs) rs.value='';
+                const h = document.getElementById('nw-rel-hint'); if (h) h.textContent='';
+            } else { show(res.error, '#f87171'); }
         }
 
         async function loadNetworkRequests() {
@@ -4368,18 +4389,25 @@
             } catch(_) {}
             nwRefreshBadge();
         }
-        // Connect from the Home strip → open Network's Connect screen with the ID prefilled.
-        function homeNetConnect() {
-            const v = (document.getElementById('home-net-target')||{}).value || '';
-            enterAgent('network');
-            setTimeout(() => {
-                showView('network-home');
-                setTimeout(() => {
-                    const ti = document.getElementById('nw-target-id');
-                    if (ti) { ti.value = v.trim(); ti.focus(); }
-                    const ht = document.getElementById('home-net-target'); if (ht) ht.value = '';
-                }, 80);
-            }, 40);
+        // Connect straight from the Home strip — relationship is mandatory; sends the request
+        // without leaving Home.
+        async function homeNetConnect() {
+            const tgt = (document.getElementById('home-net-target')||{}).value || '';
+            const rel = (document.getElementById('home-net-rel')||{}).value || '';
+            const msg = document.getElementById('home-net-msg');
+            const show = (txt, color) => { if (msg) { msg.style.display=''; msg.style.color=color; msg.textContent=txt; } };
+            if (!tgt.trim()) { show('Enter a Workspace ID.', '#f87171'); return; }
+            if (!rel) { show('Please pick how you’re related.', '#f87171'); return; }
+            show('Sending…', '#94a3b8');
+            const res = await _nwSendRequest(tgt.trim(), rel);
+            if (res.ok) {
+                show(`Request sent to ${res.target_name || 'that workspace'}. They’ll see it under Requests.`, '#4ade80');
+                const ti = document.getElementById('home-net-target'); if (ti) ti.value='';
+                const rs = document.getElementById('home-net-rel'); if (rs) rs.value='';
+                nwRefreshBadge();
+            } else {
+                show(res.error || 'Could not send request.', '#f87171');
+            }
         }
         // Pending-incoming count → Home widget + (future) badges.
         async function nwRefreshBadge() {
