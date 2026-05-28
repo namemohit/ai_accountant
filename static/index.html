@@ -160,14 +160,14 @@
         }
         function _fillCompanySelect(sel, names, active, meta, archived) {
             if (!sel) return;
-            // A super_admin's company switcher must always show ALL workspaces, never
-            // the membership list. Whoever tries to fill the company select(s) for a
-            // super_admin delegates to the all-workspaces populator and bails — this
-            // removes the load-time race where the membership list clobbered it.
+            // A super_admin's company switcher must always show ALL workspaces. Kick off
+            // the (async) all-workspaces upgrade, but DON'T bail — fall through to render
+            // the current list synchronously so the dropdown is never blank while the
+            // /api/admin/companies fetch is in flight (it can take a few seconds). The
+            // async populator overwrites this with the full list when it resolves.
             if (window.__isSuperAdmin && (sel.id === 'active-company-select' || sel.id === 'active-company-select-mobile')
                 && typeof _refreshCompanySelectorForSuperAdmin === 'function') {
                 _refreshCompanySelectorForSuperAdmin('__ALL__');
-                return;
             }
             meta = meta || {}; archived = archived || [];
             sel.innerHTML = '';
@@ -15377,6 +15377,14 @@
                 try { localStorage.setItem('currentUser', JSON.stringify(u)); } catch (e) {}
                 if (typeof switchCompany === 'function') switchCompany(companies[0]);
             }
+            // This populate is async, so the top-bar dropdown (tb-company) and the mobile
+            // select may have been synced earlier while this select was still empty.
+            // Mirror the full list to them now so the VISIBLE switcher isn't blank.
+            try {
+                const m = document.getElementById('active-company-select-mobile');
+                if (m) { m.innerHTML = sel.innerHTML; m.value = sel.value; }
+            } catch (_) {}
+            if (typeof _renderTopbar === 'function') _renderTopbar();
         }
 
         // ═══════════════════════════════════════════════════════
