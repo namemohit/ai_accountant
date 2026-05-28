@@ -187,6 +187,16 @@
         async function refreshCompanies() {
             let u; try { u = JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return; }
             if (!u || !u.username) return;
+            // super_admin in "all workspaces" mode: the switcher must list EVERY workspace
+            // (from /api/admin/companies), not just this super_admin's own memberships.
+            // Defer to the super-admin populator so this membership-only refresh doesn't
+            // shrink the list back down to the super_admin's own companies.
+            const _isSA = window.__isSuperAdmin || u.role === 'super_admin';
+            if (_isSA && (localStorage.getItem('viewAsAdmin') || '__ALL__') === '__ALL__') {
+                if (typeof _refreshCompanySelectorForSuperAdmin === 'function')
+                    _refreshCompanySelectorForSuperAdmin('__ALL__');
+                return;
+            }
             try {
                 const r = await fetch(`${API}/api/user/companies?username=${encodeURIComponent(u.username)}`);
                 const d = await r.json();
@@ -15289,7 +15299,7 @@
                 if (sel) {
                     // Restore previous selection if any
                     const saved = localStorage.getItem('viewAsAdmin') || '__ALL__';
-                    sel.innerHTML = '<option value="__ALL__">All admins (any company)</option>'
+                    sel.innerHTML = '<option value="__ALL__">All workspaces</option>'
                         + users.map(u =>
                             `<option value="${u.username}">${u.username}${u.name && u.name !== u.username ? ' — ' + u.name : ''} (${u.companies_count})</option>`
                         ).join('');
