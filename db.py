@@ -5673,6 +5673,35 @@ def update_bank_transaction(tx_id, updates, user_id=None, company_id=None):
     return row
 
 
+def get_bank_transaction(tx_id, company_id=None):
+    """Fetch one bank_transactions row (company-scoped when company_id given)."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        if company_id:
+            cur.execute("SELECT * FROM bank_transactions WHERE id = %s AND company_id = %s",
+                        (tx_id, company_id))
+        else:
+            cur.execute("SELECT * FROM bank_transactions WHERE id = %s", (tx_id,))
+        return cur.fetchone()
+    finally:
+        cur.close(); conn.close()
+
+
+def get_voucher_id_by_number(company_name, voucher_number):
+    """Resolve a tally_vouchers id by its voucher_number for a company (used to find
+    the voucher a posted bank line created, so an edit can re-sync it)."""
+    if not voucher_number:
+        return None
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT id FROM tally_vouchers WHERE company_name = %s AND voucher_number = %s LIMIT 1",
+                    (company_name, voucher_number))
+        r = cur.fetchone()
+        return r[0] if r else None
+    finally:
+        cur.close(); conn.close()
+
+
 def get_rerunnable_bank_lines(company_id=None, company_name=None, upload_id=None):
     """Unreconciled, not-yet-human-edited bank-statement lines — the targets for an
     AI re-run. Excludes matched/posted lines and anything a human already touched

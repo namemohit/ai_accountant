@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "187"
+APP_VERSION = "188"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -3229,52 +3229,102 @@ async def list_bank_transactions_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _resync_posted_bank_voucher(row, company_name):
+    """A posted bank line was edited → rebuild its double-entry voucher with the new
+    party/head/bank and update the linked voucher (flags needs_resync). Returns True
+    if a voucher was updated."""
+    party = (row.get("party") or "").strip()
+    head  = (row.get("head") or "").strip()
+    bank  = (row.get("bank_ledger") or "Bank Account").strip()
+    amount = abs(float(row.get("amount") or 0))
+    vtype = row.get("voucher_type") or ("Receipt" if float(row.get("amount") or 0) > 0 else "Payment")
+    ref = (row.get("reference") or "").strip()
+    vnum = ref or f"BANK-{str(row.get('id'))[:8]}"
+    vid = db.get_voucher_id_by_number(company_name, vnum)
+    if not vid:
+        return False
+    if vtype == "Receipt":
+        legs = [{"ledger_name": bank, "amount": amount, "is_debit": True},
+                {"ledger_name": head or party or "Sales Account", "amount": -amount, "is_debit": False}]
+    else:
+        legs = [{"ledger_name": head or "Suspense A/c", "amount": amount, "is_debit": True},
+                {"ledger_name": bank, "amount": -amount, "is_debit": False}]
+    res = db.update_tally_voucher(vid, {"party_name": party or head, "ledger_entries": legs},
+                                  edited_by="bank_reco_edit")
+    return bool(res and res.get("ok"))
+
+
 @app.patch("/api/bank-transactions/{tx_id}")
 async def patch_bank_transaction(tx_id: str, payload: dict, background_tasks: BackgroundTasks = None):
     try:
+        # P0 FIX: scope the edit to the caller's company (tenant isolation).
+        _cid = payload.get("company_id")
+        if not _cid and payload.get("company_name"):
+            _cid = _resolve_company_id_by_name(payload.get("company_name"))
+        cname = payload.get("company_name")
+        edited_fields = [k for k in ("party", "head", "bank_ledger") if k in payload]
         party_edited = "party" in payload
         party_val = (payload.get("party") or "").strip() if party_edited else None
-        # If user is manually setting party/head, bump confidence to 1.0 and status to ai_filled
-        if any(k in payload for k in ("party", "head", "bank_ledger")):
+
+        # Read current status so an edit never downgrades a Posted/Linked/Matched line
+        # (those have already produced a voucher / cross-link).
+        cur_row = db.get_bank_transaction(tx_id, _cid)
+        if not cur_row:
+            raise HTTPException(status_code=404, detail="bank_transaction not found (or not in your company)")
+        cur_status = cur_row.get("status")
+        protected = cur_status in ("posted", "matched", "linked")
+
+        if edited_fields:
             payload.setdefault("confidence", 1.0)
-            payload.setdefault("status", "ai_filled")
             payload.setdefault("rationale", "Manual override by user")
+            if not protected:
+                payload.setdefault("status", "ai_filled")  # promote an unmatched line
         if party_edited:
             if party_val:
-                # Manual party set → human-curated (preserved by re-runs).
                 payload["human_touched"] = True
+            elif protected:
+                # Clearing a posted/linked line: blank the party + unlearn, but keep
+                # status (don't orphan the voucher) — user fixes the voucher separately.
+                payload["party"] = ""
+                payload["rationale"] = None
+                payload.pop("status", None)
             else:
-                # Clear → reset to a clean Needs-Review state that nobody reconciled,
-                # and make it re-runnable again (human_touched=False).
+                # Clear an open line → clean re-runnable Needs-Review.
                 payload["party"] = ""
                 payload["status"] = "unmatched"
                 payload["confidence"] = 0
                 payload["rationale"] = None
                 payload["human_touched"] = False
                 payload["ai_touched"] = False
-        # P0 FIX: scope the edit to the caller's company (tenant isolation).
-        _cid = payload.get("company_id")
-        if not _cid and payload.get("company_name"):
-            _cid = _resolve_company_id_by_name(payload.get("company_name"))
+
         row = db.update_bank_transaction(tx_id, payload, company_id=_cid)
         if not row:
             raise HTTPException(status_code=404, detail="bank_transaction not found (or not in your company)")
-        # Learn (or unlearn) the bank-narration → party association so re-runs reuse
-        # it. Runs in the background to keep the inline save snappy.
+
+        # Learn (or unlearn) the bank-narration → party association so re-runs reuse it.
         learning = None
         if party_edited:
-            cname = payload.get("company_name") or row.get("company_name")
+            _cn = cname or row.get("company_name")
             narr = row.get("description") or ""
             if party_val:
                 learning = "learning"
                 if background_tasks is not None:
-                    background_tasks.add_task(db.learn_bank_party, cname, narr, party_val,
+                    background_tasks.add_task(db.learn_bank_party, _cn, narr, party_val,
                                              get_embedding, _cid, str(tx_id))
                 else:
-                    db.learn_bank_party(cname, narr, party_val, get_embedding, _cid, str(tx_id))
+                    db.learn_bank_party(_cn, narr, party_val, get_embedding, _cid, str(tx_id))
             else:
                 learning = "unlearned"
-                db.unlearn_bank_party(cname, str(tx_id))
+                db.unlearn_bank_party(_cn, str(tx_id))
+
+        # Keep the linked voucher in sync when a POSTED line's party/head/bank changed.
+        voucher_synced = False
+        if cur_status == "posted" and edited_fields:
+            try:
+                voucher_synced = _resync_posted_bank_voucher(row, cname or row.get("company_name"))
+            except Exception as _ve:
+                print(f"[patch_bank] voucher resync error: {_ve}", flush=True)
+
         # JSON-friendly
         for k in ("date", "value_date", "created_at", "updated_at"):
             if row.get(k) is not None: row[k] = str(row[k])
@@ -3282,7 +3332,7 @@ async def patch_bank_transaction(tx_id: str, payload: dict, background_tasks: Ba
             if row.get(k) is not None: row[k] = float(row[k])
         for k in ("id", "source_record_id", "source_file_id", "linked_id", "company_id"):
             if row.get(k) is not None: row[k] = str(row[k])
-        return {"status": "success", "data": row, "learning": learning}
+        return {"status": "success", "data": row, "learning": learning, "voucher_synced": voucher_synced}
     except HTTPException:
         raise
     except Exception as e:

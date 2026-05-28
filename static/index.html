@@ -12726,7 +12726,10 @@
             tbody.innerHTML = rows.map(r => {
                 const amt = parseFloat(r.amount || 0);
                 const amtColor = amt >= 0 ? '#10b981' : '#ef4444';
-                const editable = (r.status === 'ai_filled' || r.status === 'unmatched');
+                // Every line is editable — including Posted/Linked — so a wrong party/head
+                // can always be fixed (the AI relearns, and a posted line's voucher is
+                // re-synced). The server preserves 'posted' status on edit.
+                const editable = true;
                 // Party column: custom searchable dropdown with inline "Add party".
                 // pgroup picks the right master group when adding a new party — a
                 // credit (money in) ⇒ customer (Sundry Debtors); a debit ⇒ vendor.
