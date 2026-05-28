@@ -3558,7 +3558,12 @@ async def submit_bank_to_vouchers(payload: dict, background_tasks: BackgroundTas
                 save_res = db.save_tally_vouchers(company_name, [voucher])
                 if save_res.get("upserted"):
                     submitted += 1
-                    db.update_bank_transaction(r["id"], {"status": "posted", "human_touched": True},
+                    # Only flip status → posted. Do NOT force human_touched: bulk
+                    # submit is approving the AI's work, not individually reconciling
+                    # each line. Preserve who actually reconciled it (AI-suggested
+                    # lines keep ai_touched=True/human_touched=False → "🤖 AI";
+                    # lines a human edited inline already carry human_touched=True).
+                    db.update_bank_transaction(r["id"], {"status": "posted"},
                                                company_id=company_id)
                     learned_lines.append({"id": r["id"], "description": desc, "party": party})
             except Exception as ve:
