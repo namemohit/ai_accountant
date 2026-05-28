@@ -5753,10 +5753,18 @@
             } catch (_) {}
             return items;
         }
-        function openWorkspaceSheet() {
-            _renderWorkspaceSheet();
+        async function openWorkspaceSheet() {
+            _renderWorkspaceSheet();                       // instant paint from current state
             document.getElementById('ws-overlay').classList.add('open');
             document.getElementById('ws-sheet').classList.add('open');
+            // super_admin: the sheet must list EVERY workspace, not just this admin's
+            // own memberships. Refresh the all-workspaces source select on open, then
+            // re-render — so it's authoritative regardless of background timing.
+            if (window.__isSuperAdmin && typeof _refreshCompanySelectorForSuperAdmin === 'function'
+                && (localStorage.getItem('viewAsAdmin') || '__ALL__') === '__ALL__') {
+                try { await _refreshCompanySelectorForSuperAdmin('__ALL__'); } catch (_) {}
+                _renderWorkspaceSheet();                   // re-paint with the full list
+            }
         }
         function closeWorkspaceSheet() {
             document.getElementById('ws-overlay').classList.remove('open');
