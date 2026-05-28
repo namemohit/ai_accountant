@@ -12757,7 +12757,10 @@
                            <input type="text" value="${_escAttr(r.party || '')}" data-id="${r.id}" data-field="party" data-pgroup="${pgroup}" class="party-combo-input" placeholder="Search or add party…" autocomplete="off" onfocus="showPartyMenu(this)" oninput="showPartyMenu(this)" onkeydown="partyComboKey(event,this)" onblur="hidePartyMenu(this)">
                            <div class="party-combo-menu" style="display:none;"></div>
                          </div>
-                         ${matchBadge}
+                         <div style="display:flex; align-items:center; gap:6px; margin-top:3px;">
+                           ${matchBadge}
+                           <button class="party-rerun" title="Re-run AI for this line" onclick="rerunPartyLine(this)">↻</button>
+                         </div>
                          <div class="party-learned" style="${isCurated ? '' : 'display:none;'}">✓ learned — AI will reuse this</div>
                        </div>`
                     : `<span style="color:#cbd5e1;">${r.party || '—'}</span>`;
@@ -12875,6 +12878,75 @@
             showPartyMenu(input);
         }
 
+        // Refresh a row's sibling cells (Tally Status, Reconciled By, match %) + the
+        // cached row + the stats strip from a server-returned bank_transactions row.
+        // Shared by inline-save and per-line AI re-run.
+        function _applyBankRowUpdate(wrap, d) {
+            if (!wrap || !d) return;
+            const id = wrap.getAttribute('data-id');
+            const tr = wrap.closest('tr');
+            if (tr) {
+                const tds = tr.querySelectorAll(':scope > td');
+                if (tds.length >= 8) {
+                    const linked = d.linked_id ? ' <span style="color:#a855f7; font-size:0.7rem;" title="Linked across sources">🔗</span>' : '';
+                    tds[6].innerHTML = _tallyStatusCell(d) + linked;   // Tally Status
+                    tds[7].innerHTML = _reconciledByBadge(d.ai_touched, d.human_touched, d.confidence);  // Reconciled By
+                }
+            }
+            const cached = (window._bankRows || []).find(x => String(x.id) === String(id));
+            if (cached) {
+                cached.status = d.status; cached.party = d.party;
+                cached.confidence = d.confidence; cached.ai_touched = d.ai_touched;
+                cached.human_touched = d.human_touched; cached.linked_id = d.linked_id;
+            }
+            if (typeof refreshBankStats === 'function') refreshBankStats();
+            const mb = wrap.querySelector('.party-match');
+            if (mb) {
+                const _pc = (d.confidence !== null && d.confidence !== undefined) ? Math.round(d.confidence * 100) : null;
+                const hasParty = !!(d.party && String(d.party).trim());
+                if (_pc !== null && hasParty) {
+                    mb.style.display = '';
+                    mb.style.color = _pc >= 70 ? '#10b981' : (_pc >= 60 ? '#f59e0b' : '#ef4444');
+                    mb.textContent = (_pc >= 60 ? '🎯 match ' : '⚠️ low match ') + _pc + '%';
+                } else {
+                    mb.style.display = 'none';
+                }
+            }
+        }
+
+        // Per-row ↻ : re-run the AI matcher on just this line and update it in place.
+        async function rerunPartyLine(btn) {
+            const wrap = btn.closest('.party-cellwrap');
+            if (!wrap) return;
+            const id = wrap.getAttribute('data-id');
+            const co = _getActiveCompanyForBank();
+            if (!co.company_name) { alert('Select a company first.'); return; }
+            const orig = btn.innerHTML;
+            btn.disabled = true; btn.classList.add('spin'); btn.innerHTML = '⏳';
+            try {
+                const res = await fetch(`${API}/api/bank/rerun-line`, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ company_name: co.company_name, company_id: co.company_id, tx_id: id })
+                });
+                const j = await res.json();
+                if (!res.ok) throw new Error(j.detail || 're-run failed');
+                const d = j.data || {};
+                const party = (d.party || '').trim();
+                // Re-run produces an AI suggestion (human_touched=False) → show the
+                // editable combo with the value (matches the AI-line view), hide chip.
+                const input = wrap.querySelector('.party-combo-input');
+                if (input) input.value = party;
+                const display = wrap.querySelector('.party-display'); if (display) display.style.display = 'none';
+                const combo = wrap.querySelector('.party-combo'); if (combo) combo.style.display = 'block';
+                const learned = wrap.querySelector('.party-learned'); if (learned) learned.style.display = 'none';
+                _applyBankRowUpdate(wrap, d);
+            } catch (e) {
+                alert('Re-run failed: ' + e.message);
+            } finally {
+                btn.disabled = false; btn.classList.remove('spin'); btn.innerHTML = orig;
+            }
+        }
+
         // Save the party for a line: collapses to the display chip, marks the row
         // human-curated, and the server learns the narration→party mapping (reused
         // on the next Re-run). Optimistic UI, then PATCH.
@@ -12906,36 +12978,7 @@
                 if (!res.ok) throw new Error('save failed');
                 const j = await res.json();
                 if (value && learned) { learned.textContent = '✓ learned — AI will reuse this'; learned.style.color = '#10b981'; }
-                // Refresh the sibling cells (Tally Status + Reconciled By + match %)
-                // from the server's updated row so they reflect the manual edit.
-                const d = (j && j.data) || null;
-                const tr = input.closest('tr');
-                if (d && tr) {
-                    const tds = tr.querySelectorAll(':scope > td');
-                    if (tds.length >= 8) {
-                        const linked = d.linked_id ? ' <span style="color:#a855f7; font-size:0.7rem;" title="Linked across sources">🔗</span>' : '';
-                        tds[6].innerHTML = _tallyStatusCell(d) + linked;  // Tally Status
-                        tds[7].innerHTML = _reconciledByBadge(d.ai_touched, d.human_touched, d.confidence);  // Reconciled By
-                    }
-                    // Keep the cached row in sync + recompute the stats strip live.
-                    const cached = (window._bankRows || []).find(x => String(x.id) === String(id));
-                    if (cached) {
-                        cached.status = d.status; cached.party = d.party;
-                        cached.confidence = d.confidence; cached.ai_touched = d.ai_touched;
-                        cached.human_touched = d.human_touched; cached.linked_id = d.linked_id;
-                    }
-                    if (typeof refreshBankStats === 'function') refreshBankStats();
-                    if (mb) {
-                        const _pc = (d.confidence !== null && d.confidence !== undefined) ? Math.round(d.confidence * 100) : null;
-                        if (_pc !== null && value) {
-                            mb.style.display = '';
-                            mb.style.color = _pc >= 70 ? '#10b981' : (_pc >= 60 ? '#f59e0b' : '#ef4444');
-                            mb.textContent = (_pc >= 60 ? '🎯 match ' : '⚠️ low match ') + _pc + '%';
-                        } else {
-                            mb.style.display = 'none';
-                        }
-                    }
-                }
+                if (j && j.data) _applyBankRowUpdate(wrap, j.data);
             } catch (e) {
                 if (value && learned) { learned.textContent = '⚠️ save failed — retry'; learned.style.color = '#ef4444'; }
                 console.error(e);

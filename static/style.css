@@ -2037,5 +2037,12 @@ input[type="text"].ya:focus, select.ya:focus {
 }
 .party-clear:hover { color: #ef4444; background: rgba(239,68,68,0.12); }
 .party-learned { margin-top: 3px; font-size: 0.66rem; color: #10b981; }
+.party-rerun {
+  background: transparent; color: #94a3b8; border: 1px solid var(--border);
+  border-radius: 4px; cursor: pointer; font-size: 0.72rem; line-height: 1;
+  padding: 1px 5px;
+}
+.party-rerun:hover { color: #38bdf8; border-color: #38bdf8; }
+.party-rerun.spin { opacity: 0.6; }
 
 

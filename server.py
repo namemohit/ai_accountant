@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "191"
+APP_VERSION = "192"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -3660,6 +3660,74 @@ async def submit_bank_to_vouchers(payload: dict, background_tasks: BackgroundTas
             "message": f"Submitted {submitted} entr{'y' if submitted == 1 else 'ies'} to the Voucher section."
                        + (f" Skipped {skipped}." if skipped else ""),
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/bank/rerun-line")
+async def bank_rerun_line(payload: dict):
+    """Re-run the AI matcher on ONE bank line (the per-row ↻ refresh) and update it in
+    place. Works on any status; a Posted line keeps its status and its linked voucher
+    is re-synced. Always overwrites with the fresh AI pick (reconciled-by → AI). No new
+    learning (a re-run is a suggestion). Body: {company_name, company_id?, tx_id}."""
+    try:
+        company_name = (payload.get("company_name") or "").strip()
+        tx_id = payload.get("tx_id")
+        if not company_name or not tx_id:
+            raise HTTPException(status_code=400, detail="company_name + tx_id required")
+        company_id = payload.get("company_id") or _resolve_company_id_by_name(company_name)
+        row = db.get_bank_transaction(tx_id, company_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="bank_transaction not found (or not in your company)")
+        p = row.get("source_payload") or {}
+        if isinstance(p, str):
+            try: p = json.loads(p)
+            except Exception: p = {}
+        tx = {
+            "date": (str(row["date"]) if row.get("date") else p.get("date")),
+            "description": p.get("description") or row.get("description") or "",
+            "reference": p.get("reference") or row.get("reference") or "",
+            "amount": float(row.get("amount") if row.get("amount") is not None else (p.get("amount") or 0)),
+            "party_name": p.get("party_name") or "",
+            "transaction_type": p.get("transaction_type") or row.get("instrument_type") or "Other",
+        }
+        from utils.reconciler import ai_reconcile_statement
+        import asyncio as _aio
+        loop = _aio.get_event_loop()
+        reconciled = await loop.run_in_executor(
+            None, lambda: ai_reconcile_statement([tx], company_name, company_id=company_id, file_hint=""))
+        sug = reconciled[0] if reconciled else {}
+        mapped = ("matched"   if sug.get("status") == "auto_matched" else
+                  "ai_filled" if sug.get("status") == "auto_filled"  else
+                  "unmatched")
+        cur_status = row.get("status")
+        upd = {
+            "party":       sug.get("suggested_party") or "",
+            "head":        sug.get("suggested_expense_head") or "",
+            "bank_ledger": sug.get("suggested_bank_ledger") or "",
+            "confidence":  sug.get("confidence", 0),
+            "rationale":   sug.get("rationale"),
+            "ai_touched":  mapped in ("matched", "ai_filled"),
+            "human_touched": False,
+            # Don't un-post a posted line — keep it posted and re-sync its voucher below.
+            "status":      "posted" if cur_status == "posted" else mapped,
+        }
+        updated = db.update_bank_transaction(tx_id, upd, company_id=company_id)
+        if cur_status == "posted":
+            try:
+                _resync_posted_bank_voucher(updated, company_name)
+            except Exception as _ve:
+                print(f"[rerun-line] voucher resync error: {_ve}", flush=True)
+        for k in ("date", "value_date", "created_at", "updated_at"):
+            if updated.get(k) is not None: updated[k] = str(updated[k])
+        for k in ("amount", "confidence"):
+            if updated.get(k) is not None: updated[k] = float(updated[k])
+        for k in ("id", "source_record_id", "source_file_id", "linked_id", "company_id"):
+            if updated.get(k) is not None: updated[k] = str(updated[k])
+        return _json_safe({"status": "success", "data": updated})
     except HTTPException:
         raise
     except Exception as e:
