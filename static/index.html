@@ -93,7 +93,12 @@
                     try {
                         const user = JSON.parse(currentUserStr);
                         const isSuperAdmin = (user.role === 'super_admin');
-                        
+                        // Set these BEFORE company population: _fillCompanySelect defers to the
+                        // all-workspaces populator for super_admin, and that populator's
+                        // /api/admin/companies fetch needs __currentUsername for its X-User auth.
+                        window.__isSuperAdmin = isSuperAdmin;
+                        window.__currentUsername = user.username || '';
+
                         const badgeName = document.getElementById('active-user-name');
                         if(badgeName) badgeName.innerText = user.username || user.name || 'User';
                         // Populate BOTH the desktop sidebar selector and the mobile drawer one.
@@ -155,6 +160,15 @@
         }
         function _fillCompanySelect(sel, names, active, meta, archived) {
             if (!sel) return;
+            // A super_admin's company switcher must always show ALL workspaces, never
+            // the membership list. Whoever tries to fill the company select(s) for a
+            // super_admin delegates to the all-workspaces populator and bails — this
+            // removes the load-time race where the membership list clobbered it.
+            if (window.__isSuperAdmin && (sel.id === 'active-company-select' || sel.id === 'active-company-select-mobile')
+                && typeof _refreshCompanySelectorForSuperAdmin === 'function') {
+                _refreshCompanySelectorForSuperAdmin('__ALL__');
+                return;
+            }
             meta = meta || {}; archived = archived || [];
             sel.innerHTML = '';
             (names || []).forEach(c => {
@@ -192,7 +206,7 @@
             // Defer to the super-admin populator so this membership-only refresh doesn't
             // shrink the list back down to the super_admin's own companies.
             const _isSA = window.__isSuperAdmin || u.role === 'super_admin';
-            if (_isSA && (localStorage.getItem('viewAsAdmin') || '__ALL__') === '__ALL__') {
+            if (_isSA) {
                 if (typeof _refreshCompanySelectorForSuperAdmin === 'function')
                     _refreshCompanySelectorForSuperAdmin('__ALL__');
                 return;
@@ -5760,8 +5774,7 @@
             // super_admin: the sheet must list EVERY workspace, not just this admin's
             // own memberships. Refresh the all-workspaces source select on open, then
             // re-render — so it's authoritative regardless of background timing.
-            if (window.__isSuperAdmin && typeof _refreshCompanySelectorForSuperAdmin === 'function'
-                && (localStorage.getItem('viewAsAdmin') || '__ALL__') === '__ALL__') {
+            if (window.__isSuperAdmin && typeof _refreshCompanySelectorForSuperAdmin === 'function') {
                 try { await _refreshCompanySelectorForSuperAdmin('__ALL__'); } catch (_) {}
                 _renderWorkspaceSheet();                   // re-paint with the full list
             }
@@ -15329,20 +15342,19 @@
         async function _refreshCompanySelectorForSuperAdmin(adminUsername) {
             const sel = document.getElementById('active-company-select');
             if (!sel) return;
+            // A super_admin always has access to EVERY workspace in the switcher.
+            // The "View as admin" selection only scopes the CHAT list (loadChatSessions
+            // reads viewAsAdmin separately) — it must NOT narrow workspace access, or a
+            // super_admin who picked an admin gets stuck seeing only that admin's
+            // companies (and can't get out of it on mobile).
             let companies = [];
-            if (adminUsername && adminUsername !== '__ALL__' && window.__allAdminsCache) {
-                const u = window.__allAdminsCache.find(x => x.username === adminUsername);
-                companies = (u && u.companies) || [];
-            } else {
-                // "All admins" — load every company in the system
-                try {
-                    const res = await fetch(`${API}/api/admin/companies`);
-                    if (res.ok) {
-                        const j = await res.json();
-                        companies = (j.companies || []).map(c => c.name);
-                    }
-                } catch (e) {}
-            }
+            try {
+                const res = await fetch(`${API}/api/admin/companies`);
+                if (res.ok) {
+                    const j = await res.json();
+                    companies = (j.companies || []).map(c => c.name);
+                }
+            } catch (e) {}
             // Render dropdown
             const u = JSON.parse(localStorage.getItem('currentUser') || '{}');
             const cur = u.company_name || (companies[0] || 'Acme Corp');
