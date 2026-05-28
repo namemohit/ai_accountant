@@ -571,7 +571,7 @@
             <div class="nav-item" data-view="network-list" onclick="showView('network-list')"><span>👥</span> My Network</div>
             <div class="nav-item" data-view="network-requests" onclick="showView('network-requests')"><span>📨</span> Requests</div>
 
-            <div class="nav-item active" data-view="chat" onclick="showView('chat')"><span>💬</span> Chat</div>
+            <div class="nav-item active" data-view="chat" onclick="openGlobalChat()"><span>💬</span> Chat</div>
 
             <div class="nav-item" data-view="vouchers" onclick="showView('vouchers')"><span>📑</span> Vouchers</div>
 
@@ -1350,7 +1350,6 @@
                 <div class="feat-tile" onclick="_aiaccMaster('coa')"><div class="feat-ic">📒</div><div class="feat-name">Ledgers</div></div>
                 <div class="feat-tile" onclick="_aiaccMaster('items')"><div class="feat-ic">📦</div><div class="feat-name">Item Master</div></div>
                 <div class="feat-tile" onclick="_aiaccMaster('parties')"><div class="feat-ic">👥</div><div class="feat-name">Party Master</div></div>
-                <div class="feat-tile" onclick="showView('chat')"><div class="feat-ic">💬</div><div class="feat-name">Chat</div></div>
                 <!-- Sprint 73 — super_admin-only features (checkAuth hides these for non-SA). -->
                 <div class="feat-tile" data-role-gated="super_admin" onclick="showView('gstr-reco')"><div class="feat-ic">📊</div><div class="feat-name">GSTR Reco</div></div>
                 <div class="feat-tile" data-role-gated="super_admin" onclick="showView('gstr')"><div class="feat-ic">🧾</div><div class="feat-name">GST Filing</div></div>
@@ -3073,9 +3072,10 @@
         // ── Sprint 48b — Agentic store: TWO-LEVEL nav (Store home + agent menus) ──
         // Platform views are agent-agnostic and visible everywhere. Agent views
         // (chat, vouchers, …) show ONLY when their agent is the active one.
-        window.__PLATFORM_VIEWS = new Set(['home','store','uploads','yantrai-chat','training','training-progress','whatsapp','users','settings','analytics']);
-        // Fallback agent (used if the installed-agents fetch fails) = today's full set.
-        const _AGENT1_VIEWS = ['aiacc-home','chat','vouchers','schema','bank','gstr-reco','recon',
+        // 'chat' is a platform-level app (top-level), not a per-agent skill.
+        window.__PLATFORM_VIEWS = new Set(['home','chat','store','uploads','yantrai-chat','training','training-progress','whatsapp','users','settings','analytics']);
+        // Fallback agent (used if the installed-agents fetch fails) — chat excluded (it's global).
+        const _AGENT1_VIEWS = ['aiacc-home','vouchers','schema','bank','gstr-reco','recon',
                                'gstr','tds','itr','audit','reports','tasks'];
         const _FALLBACK_AGENT = { slug:'ai-accountant', name:'Tally Agent', icon:'🧮',
             manifest:{ nav_groups:[{ items:_AGENT1_VIEWS.map(v => ({view:v})) }] } };
@@ -3106,6 +3106,15 @@
                 views.forEach(v => { window.__viewToAgent[v] = a.slug; union.add(v); });
             });
             window.__INSTALLED_VIEWS = union;
+            // Chat is a global platform app, not an agent skill — strip it from agent
+            // scope so opening it doesn't enter the Tally agent. (Backend manifests may
+            // still list it; this frontend override keeps it platform-level.)
+            delete window.__viewToAgent['chat'];
+            window.__INSTALLED_VIEWS.delete('chat');
+            Object.values(window.__agentBySlug).forEach(a => {
+                if (a.views) a.views = a.views.filter(v => v !== 'chat');
+            });
+            window.__PLATFORM_VIEWS.add('chat');
         }
         // ── Sprint 72 — stale-while-revalidate cache for the launcher (instant reload) ──
         function _agentsCacheKey() {
@@ -3212,6 +3221,13 @@
             _renderNav();
             showView('home');
         }
+        // Open Chat as a global, top-level platform app (not inside any agent).
+        function openGlobalChat() {
+            window.__activeAgent = null;
+            try { localStorage.removeItem('activeAgent'); } catch(_) {}
+            if (typeof _renderNav === 'function') _renderNav();
+            showView('chat');
+        }
         // Sprint 49 — load a remote (embedded) agent into the iframe host with SSO context.
         let _remoteLoadedKey = null;
         async function loadRemoteAgent(slug) {
@@ -3240,7 +3256,7 @@
         // Sprint 73 — every AI Accountant view (except its 'aiacc-home' launcher) is reached
         // from a feature icon, so none of them appear as top-bar tabs. The SA-gated filing/recon
         // views are added here too (they were leaking into the top bar for super_admin).
-        const _AIACC_LAUNCHER = new Set(['chat', 'vouchers', 'bank', 'schema',
+        const _AIACC_LAUNCHER = new Set(['vouchers', 'bank', 'schema',
             'gstr-reco', 'recon', 'gstr', 'tds', 'itr', 'audit', 'reports', 'tasks']);
         function _renderNav() {
             const active = window.__activeAgent;
@@ -3322,7 +3338,7 @@
         // Sprint 61 — universal top bar: mirrors the (hidden) sidebar's nav + footer
         // controls. On Home: just the logo. Inside an app: ‹ Home + app name + that
         // app's screens as tabs. On a platform view: ‹ Home + the view's title.
-        const _PLATFORM_TITLES = { store:'🛍️ Store', uploads:'📎 Files', 'training-progress':'📚 Training',
+        const _PLATFORM_TITLES = { chat:'💬 Chat', store:'🛍️ Store', uploads:'📎 Files', 'training-progress':'📚 Training',
             'yantrai-chat':'📝 Create task', settings:'⚙️ Settings',
             training:'🧠 Connectors', whatsapp:'📱 WhatsApp Setup', users:'👥 User Manager',
             analytics:'📊 Data Analyst' };
@@ -3517,18 +3533,14 @@
                     (badge ? `<span class="at-badge" title="Opens in Tally Agent">${badge}</span>` : '') +
                     `<div class="at-icon">${icon}</div>` +
                     `<div class="at-name">${escapeHtml(name)}</div><div class="at-sub">${escapeHtml(sub)}</div></div>`;
-                // Order: Tally shortcuts · Tally Agent · other agents · platform apps · Create task (last).
+                // Order: Chat (global) · Tally Agent · other agents · platform apps · Create task (last).
                 const tiles = [];
                 const _agents = window.__installedAgents || [];
                 const _tally = _agents.find(a => a.slug === 'ai-accountant');
                 const _others = _agents.filter(a => a.slug !== 'ai-accountant');
-                // Quick-access Tally shortcuts (only when the Tally agent is installed).
-                if (window.__agentBySlug && window.__agentBySlug['ai-accountant']) {
-                    tiles.push(tile('🧾', 'Create voucher', 'New entry in Tally', "openVoucherChat()", null, 'Tally Agent shortcut'));
-                    tiles.push(tile('📷', 'Scan voucher', 'Snap a bill → voucher', "_aiaccScan()", null, 'Tally Agent shortcut'));
-                    tiles.push(tile('💬', 'Chat', 'Ask your Tally agent', "showView('chat')", null, 'Tally Agent shortcut'));
-                }
-                // Tally Agent immediately after the Chat shortcut.
+                // Chat is a global top-level app (not a Tally skill).
+                tiles.push(tile('💬', 'Chat', 'Chat with your AI assistant', "openGlobalChat()"));
+                // Tally Agent next.
                 if (_tally) tiles.push(tile(_tally.icon || '🧮', _tally.name || _tally.slug, _tally.tagline || 'Open app', `enterAgent('${escapeHtml(_tally.slug)}')`, _tally.slug));
                 // Remaining installed agents (right-click / long-press to manage).
                 _others.forEach(a => tiles.push(
