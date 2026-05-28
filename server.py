@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "188"
+APP_VERSION = "189"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -2586,6 +2586,20 @@ async def confirm_reconciliation(payload: dict):
         print(f"Error in reconciliation confirm: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+def _json_safe(obj):
+    """Recursively replace non-finite floats (NaN / Inf) with None so the value is
+    valid JSON. pandas-parsed bank data can contain NaN, which crashes FastAPI's
+    json.dumps ('Out of range float values are not JSON compliant: nan')."""
+    import math
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
 # In-memory progress tracker for bank-reconciliation jobs (keyed by job_id)
 bank_reco_progress = {}
 
@@ -2756,7 +2770,11 @@ Return ONLY the JSON array, no explanation."""
                                 c = float(str(row.get(col_credit, 0) or 0).replace(',', '') or 0) if col_credit else 0
                                 amt = c - d
                             except: amt = 0.0
-                        if abs(amt) < 0.01: continue
+                        # Skip blank/zero AND non-numeric (NaN/inf) amounts. A NaN
+                        # slips past the magnitude check (nan<0.01 is False) and then
+                        # can't be JSON-serialized in the response → upload 500s.
+                        if amt != amt or amt in (float('inf'), float('-inf')) or abs(amt) < 0.01:
+                            continue
 
                         desc = str(row.get(col_desc, '') if col_desc else '').strip()
                         party_guess = str(row.get(col_party, '') if col_party else '').strip()
@@ -2935,7 +2953,7 @@ Return ONLY the JSON array, no explanation."""
                 "cross_source_links": _link.get("linked_pairs", 0) if isinstance(_link, dict) else 0,
             }
 
-        return {
+        return _json_safe({
             "status": "success",
             "data": {
                 "reconciled": reconciled,
@@ -2944,7 +2962,7 @@ Return ONLY the JSON array, no explanation."""
                 "persisted": persisted_summary,
                 "file_name": file.filename,
             }
-        }
+        })
     except HTTPException:
         raise  # surface 402 out-of-tokens etc. as-is
     except Exception as e:
