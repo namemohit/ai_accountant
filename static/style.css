@@ -799,6 +799,31 @@ td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 0.85
 }
 
 .chat-msg-text { margin-bottom: 8px; }
+
+/* WhatsApp-style per-message time + day separators */
+.chat-msg-time {
+  font-size: 0.62rem;
+  text-align: right;
+  margin-top: 4px;
+  opacity: 0.6;
+  line-height: 1;
+}
+.chat-msg-bubble-user .chat-msg-time { color: rgba(255,255,255,0.85); }
+.chat-msg-bubble-ai .chat-msg-time { color: #94a3b8; }
+.chat-day-sep {
+  display: flex;
+  justify-content: center;
+  margin: 10px 0;
+}
+.chat-day-sep span {
+  background: var(--bg-light);
+  border: 1px solid var(--border);
+  color: #94a3b8;
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 3px 12px;
+  border-radius: 12px;
+}
 .chat-msg-text:last-child { margin-bottom: 0; }
 .chat-msg-text strong, .chat-msg-text b { color: var(--primary-light); }
 .chat-msg-text code { background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 4px; font-size: 0.8rem; }

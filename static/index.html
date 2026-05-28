@@ -9177,7 +9177,36 @@
             }
         }
 
-        function appendUserMessage(text, fileOrUrl, filename = '') {
+        // ── WhatsApp-style message time + day separators ──────────────────
+        function _fmtMsgTime(ts) {
+            const d = ts ? new Date(String(ts).replace(' ', 'T')) : new Date();
+            if (isNaN(d)) return '';
+            return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+        }
+        function _fmtDaySep(ts) {
+            const d = ts ? new Date(String(ts).replace(' ', 'T')) : new Date();
+            if (isNaN(d)) return '';
+            const k = x => x.toLocaleDateString('en-CA');   // local YYYY-MM-DD
+            const today = new Date(); const yest = new Date(); yest.setDate(today.getDate() - 1);
+            if (k(d) === k(today)) return 'Today';
+            if (k(d) === k(yest)) return 'Yesterday';
+            return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+        }
+        // Insert a centered date pill when the day changes (history + live).
+        function _chatDaySep(ts) {
+            const d = ts ? new Date(String(ts).replace(' ', 'T')) : new Date();
+            if (isNaN(d)) return;
+            const key = d.toLocaleDateString('en-CA');
+            if (window._chatLastMsgDay === key) return;
+            window._chatLastMsgDay = key;
+            const sep = document.createElement('div');
+            sep.className = 'chat-day-sep';
+            sep.innerHTML = `<span>${_fmtDaySep(ts)}</span>`;
+            document.getElementById('chat-messages').appendChild(sep);
+        }
+
+        function appendUserMessage(text, fileOrUrl, filename = '', ts) {
+            _chatDaySep(ts);
             const div = document.createElement('div');
             div.className = 'chat-msg chat-msg-user';
             
@@ -9220,7 +9249,7 @@
                 }
             }
             
-            div.innerHTML = `<div class="chat-msg-bubble chat-msg-bubble-user">${escapeHtml(text)}${fileHtml}</div>`;
+            div.innerHTML = `<div class="chat-msg-bubble chat-msg-bubble-user">${escapeHtml(text)}${fileHtml}<div class="chat-msg-time">${_fmtMsgTime(ts)}</div></div>`;
             document.getElementById('chat-messages').appendChild(div);
             scrollChat();
         }
@@ -9302,6 +9331,8 @@
         }
 
         function appendAIMessage(data) {
+            const _ts = data.ts || data.created_at;
+            _chatDaySep(_ts);
             const div = document.createElement('div');
             div.className = 'chat-msg chat-msg-ai';
             
@@ -9692,7 +9723,7 @@
                 `;
             }
 
-            div.innerHTML = `<div class="chat-msg-avatar">🤖</div><div class="chat-msg-bubble chat-msg-bubble-ai">${contentHtml}</div>`;
+            div.innerHTML = `<div class="chat-msg-avatar">🤖</div><div class="chat-msg-bubble chat-msg-bubble-ai">${contentHtml}<div class="chat-msg-time">${_fmtMsgTime(_ts)}</div></div>`;
             document.getElementById('chat-messages').appendChild(div);
             scrollChat();
 
@@ -10601,18 +10632,19 @@
             }
             if (seq !== _chatLoadSeq) return;       // a newer loadChat started → don't double-render
             box.innerHTML = '';                      // clear the "Loading…" once, then render fresh
+            window._chatLastMsgDay = null;           // reset day-separator tracking for this conversation
             let lastFileUrl = null;
             msgs.forEach(m => {
                 try {
                     if (m.role === 'user') {
                         if (m.ui_type === 'file' && m.ui_data) {
                             lastFileUrl = m.ui_data.file_url;
-                            appendUserMessage(m.content, m.ui_data.file_url, m.ui_data.filename);
+                            appendUserMessage(m.content, m.ui_data.file_url, m.ui_data.filename, m.created_at);
                         } else {
-                            appendUserMessage(m.content);
+                            appendUserMessage(m.content, undefined, '', m.created_at);
                         }
                     } else {
-                        const aiData = { id: m.id, text: m.content, ui_type: m.ui_type, ui_data: m.ui_data };
+                        const aiData = { id: m.id, text: m.content, ui_type: m.ui_type, ui_data: m.ui_data, ts: m.created_at };
                         if (lastFileUrl) aiData.file_url = lastFileUrl;
                         appendAIMessage(aiData);
                     }
@@ -10634,6 +10666,7 @@
             document.getElementById('chat-welcome').style.display = 'flex';
             document.getElementById('chat-messages').style.display = 'none';
             document.getElementById('chat-messages').innerHTML = '';
+            window._chatLastMsgDay = null;            // reset day-separator tracking
             document.getElementById('chat-suggestions').style.display = 'none';
             loadChatSessions();
             _chatMobileConvo();   // a new blank chat is a conversation (mobile master/detail)
