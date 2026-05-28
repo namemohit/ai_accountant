@@ -17,7 +17,7 @@ if os.getenv("GEMINI_API_KEY"):
 # nearest party (which produced "Test Vendor on every row" when only one party
 # was embedded). At/above PARTY_AUTOFILL_SIM the row is marked "AI Ready".
 # Start balanced; calibrate from the match % shown on each row.
-PARTY_MIN_SIM = float(os.getenv("RECON_PARTY_MIN_SIM", "0.60"))
+PARTY_MIN_SIM = float(os.getenv("RECON_PARTY_MIN_SIM", "0.75"))
 PARTY_AUTOFILL_SIM = float(os.getenv("RECON_PARTY_AUTOFILL_SIM", "0.70"))
 
 def get_reconciliation_embedding(text):
@@ -134,6 +134,21 @@ def ai_reconcile_statement(transactions, company_name, company_id=None, progress
           f"({embed_count} learned embeddings)", flush=True)
     if progress_cb: progress_cb({"phase": "starting", "total": total, "done": 0, "embed_count": embed_count})
 
+    # Deterministic party-name match: if a known party's name appears in the bank
+    # narration, that beats the embedding (which is unreliable for boilerplate
+    # "NEFT <party> INV/<yr>/<seq>" lines that all look ~72% alike). Build the
+    # known-party set once: ledger-master parties + parties the user has taught.
+    import re as _re_n
+    def _normp(s):
+        return _re_n.sub(r'[^A-Z0-9]', '', (s or '').upper())
+    _known_parties = set(party_ledgers)
+    try:
+        _known_parties |= set(_db.get_learned_party_names(company_name))
+    except Exception:
+        pass
+    party_norm = [(p, _normp(p)) for p in _known_parties]
+    party_norm = [(p, pn) for (p, pn) in party_norm if len(pn) >= 4]
+
     # Phase 1 + 2: deterministic + vector retrieval (fast — no Gemini)
     needs_ai = []  # transactions that need Gemini reasoning
 
@@ -220,11 +235,24 @@ def ai_reconcile_statement(transactions, company_name, company_id=None, progress
                 d = h["data"] or {}
                 candidate_narrations.append({"narration": d.get("narration"), "party": d.get("party")})
 
-        # Party suggestion is gated by a similarity floor — don't blindly propose
-        # the nearest party when it's unrelated (e.g. only one party embedded).
-        party_sim = max(0.0, min(1.0, 1.0 - candidate_parties[0]["distance"])) if candidate_parties else 0.0
+        # Deterministic party-name match BEATS the embedding: if a known party's
+        # name appears in the narration, use it (the embedding is unreliable for
+        # boilerplate "NEFT <party> INV/<yr>/<seq>" lines that all look ~72% alike,
+        # so it collapses onto one party). Else fall back to the embedding floor.
+        ndesc = _normp(tx_desc + ' ' + tx_ref)
+        name_hits = [(p, pn) for (p, pn) in party_norm if pn in ndesc]
+        name_party = max(name_hits, key=lambda x: len(x[1]))[0] if name_hits else None
+
+        if name_party:
+            party_sim = 0.97
+            suggested_party = name_party
+            _party_rationale = f"Party name '{name_party}' found in the narration"
+        else:
+            party_sim = max(0.0, min(1.0, 1.0 - candidate_parties[0]["distance"])) if candidate_parties else 0.0
+            suggested_party = candidate_parties[0]["name"] if (candidate_parties and party_sim >= PARTY_MIN_SIM) else ""
+            _party_rationale = ("Vector retrieval (pending AI review)" if party_sim >= PARTY_MIN_SIM
+                                else f"No confident party match (best {round(party_sim*100)}%) — needs review")
         party_ok = party_sim >= PARTY_MIN_SIM
-        suggested_party = candidate_parties[0]["name"] if (candidate_parties and party_ok) else ""
         suggested_head = candidate_heads[0]["name"] if candidate_heads else ("Sales Account" if is_credit else "Suspense A/c")
 
         item = {
@@ -235,8 +263,7 @@ def ai_reconcile_statement(transactions, company_name, company_id=None, progress
             # show as "match %"); 0 when no confident party was found.
             "confidence": round(party_sim, 3),
             "tally_voucher_id": None, "voucher_number": None,
-            "rationale": ("Vector retrieval (pending AI review)" if party_ok
-                          else f"No confident party match (best {round(party_sim*100)}%) — needs review"),
+            "rationale": _party_rationale,
             "candidate_parties": [p["name"] for p in candidate_parties[:5]],
             "candidate_heads": [h["name"] for h in candidate_heads[:8]],
             "candidate_narrations": candidate_narrations,
@@ -250,7 +277,8 @@ def ai_reconcile_statement(transactions, company_name, company_id=None, progress
         # (it may surface a party from the narration, or return "" = needs review).
         if party_ok and party_sim >= PARTY_AUTOFILL_SIM:
             item["status"] = "auto_filled"
-            item["rationale"] = f"High-confidence party match ({round(party_sim*100)}%)"
+            if not name_party:  # keep the "name found in narration" rationale for name-matches
+                item["rationale"] = f"High-confidence party match ({round(party_sim*100)}%)"
         else:
             needs_ai.append((len(results), item))  # store position + item
 

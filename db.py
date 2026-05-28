@@ -3674,6 +3674,23 @@ def get_relevant_corrections(query_embedding, company_name="Acme Corp", limit=5)
     return [r['data'] for r in rows]
 
 
+def get_learned_party_names(company_name):
+    """Distinct party names the company has taught (tally_master_party). Used by the
+    reconciler for deterministic name-in-narration matching."""
+    if not company_name:
+        return []
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""SELECT DISTINCT data->>'party' FROM knowledge_base
+                       WHERE type='tally_master_party' AND data->>'company_name' = %s
+                         AND COALESCE(data->>'party','') <> ''""", (company_name,))
+        return [r[0] for r in cur.fetchall() if r[0]]
+    except Exception as e:
+        print(f"[get_learned_party_names] {e}"); return []
+    finally:
+        cur.close(); conn.close()
+
+
 def count_company_tally_embeddings(company_name):
     """How many learned tally_master_* embeddings exist for THIS company — used to
     show an accurate, workspace-scoped count in the reconciliation progress UI
