@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "195"
+APP_VERSION = "196"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -7098,7 +7098,16 @@ async def api_user_companies_list(username: str):
         except Exception: companies = None
     if not companies:
         companies = [u.get("company_name") or "Acme Corp"]
-    return {"status": "success", "companies": companies, "company_name": u.get("company_name")}
+    # Per-company switcher badges: owned ("added by you") / shared / archived.
+    meta, archived = {}, []
+    try:
+        if u.get("users_id"):
+            cls = db.classify_companies_for_user(u["users_id"])
+            meta = cls.get("meta", {}); archived = cls.get("archived", [])
+    except Exception as e:
+        print(f"[user/companies classify] {e}")
+    return {"status": "success", "companies": companies, "company_name": u.get("company_name"),
+            "company_meta": meta, "archived": archived}
 
 
 # =============================================================================

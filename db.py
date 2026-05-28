@@ -8667,6 +8667,45 @@ def get_companies_for_user(user_id):
     return rows
 
 
+def classify_companies_for_user(user_id):
+    """Tag every company the user can access for the switcher badges:
+      'owned'    — they own the workspace or are the company's client owner ("added by you")
+      'shared'   — access was granted to them by someone else ("shared with you")
+      'archived' — soft-deleted (removed) company they could otherwise see
+    Returns {'meta': {name: 'owned'|'shared'}, 'archived': [name, ...]}. A name that is
+    active somewhere is never reported as archived; 'owned' wins over 'shared' on ties."""
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT c.name,
+                   c.archived_at IS NOT NULL AS is_archived,
+                   (m.role = 'owner' OR c.client_owner_user_id = %s) AS is_owned
+            FROM companies c
+            JOIN memberships m ON m.org_id = c.org_id
+            JOIN organizations o ON o.id = c.org_id
+            WHERE m.user_id = %s AND o.archived_at IS NULL
+              AND (
+                m.scope_company_ids IS NULL
+                OR (jsonb_typeof(m.scope_company_ids) = 'array' AND m.scope_company_ids::text = '[]')
+                OR (m.scope_company_ids @> to_jsonb(c.id::text))
+              )
+        """, (str(user_id), str(user_id)))
+        meta = {}; archived = set()
+        for r in cur.fetchall():
+            name = r["name"]
+            if r["is_archived"]:
+                archived.add(name)
+                continue
+            if meta.get(name) != "owned":
+                meta[name] = "owned" if r["is_owned"] else "shared"
+        return {"meta": meta, "archived": [n for n in archived if n not in meta]}
+    finally:
+        cur.close()
+        try: conn.rollback()
+        except Exception: pass
+        pput(conn)
+
+
 def create_organization(name, org_type, owner_user_id, gstin=None, plan='free'):
     """Create a new organization (firm or company)."""
     conn = get_conn()

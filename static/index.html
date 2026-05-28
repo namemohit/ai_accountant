@@ -99,22 +99,11 @@
                         // Populate BOTH the desktop sidebar selector and the mobile drawer one.
                         const companiesList = user.companies || [user.company_name || 'Acme Corp'];
                         const activeCo = user.company_name || 'Acme Corp';
+                        // Badges (company_meta/archived) are persisted by refreshCompanies; on a
+                        // first-ever load they're absent, so options render untagged until refresh.
                         ['active-company-select', 'active-company-select-mobile'].forEach(id => {
-                            const sel = document.getElementById(id);
-                            if (!sel) return;
-                            sel.innerHTML = '';
-                            companiesList.forEach(c => {
-                                const opt = document.createElement('option');
-                                opt.value = c; opt.innerText = c;
-                                if (c === activeCo) opt.selected = true;
-                                sel.appendChild(opt);
-                            });
-                            const addOpt = document.createElement('option');
-                            addOpt.value = "__ADD_NEW__"; addOpt.innerText = "+ Add New Company";
-                            sel.appendChild(addOpt);
-                            const mgOpt = document.createElement('option');
-                            mgOpt.value = "__MANAGE__"; mgOpt.innerText = "⚙️ Manage companies…";
-                            sel.appendChild(mgOpt);
+                            _fillCompanySelect(document.getElementById(id), companiesList, activeCo,
+                                               user.company_meta, user.archived_companies);
                         });
 
                         const navWhatsapp = document.getElementById('nav-whatsapp');
@@ -155,6 +144,43 @@
         }
         checkAuth();
 
+        // ── Company switcher option builder (shared by initial render + refresh) ──
+        // Native <option>s can only hold text, so each company's badge is a text suffix:
+        //   owned → "added by you", shared → "shared with you", archived → "archived".
+        function _coTagSuffix(tag) {
+            if (tag === 'owned')    return '   ·  added by you';
+            if (tag === 'shared')   return '   ·  shared with you';
+            if (tag === 'archived') return '   ·  archived';
+            return '';
+        }
+        function _fillCompanySelect(sel, names, active, meta, archived) {
+            if (!sel) return;
+            meta = meta || {}; archived = archived || [];
+            sel.innerHTML = '';
+            (names || []).forEach(c => {
+                const opt = document.createElement('option');
+                opt.value = c;
+                // Only badge when we know the tag (avoids mislabeling before the first refresh).
+                opt.text = c + (meta[c] ? _coTagSuffix(meta[c]) : '');
+                if (c === active) opt.selected = true;
+                sel.appendChild(opt);
+            });
+            // Removed (archived) companies stay visible but can't be switched into.
+            archived.forEach(c => {
+                const opt = document.createElement('option');
+                opt.value = '__ARCHIVED__';
+                opt.text = c + _coTagSuffix('archived');
+                opt.disabled = true;
+                sel.appendChild(opt);
+            });
+            const addOpt = document.createElement('option');
+            addOpt.value = '__ADD_NEW__'; addOpt.text = '+ Add New Company';
+            sel.appendChild(addOpt);
+            const mgOpt = document.createElement('option');
+            mgOpt.value = '__MANAGE__'; mgOpt.text = '⚙️ Manage companies…';
+            sel.appendChild(mgOpt);
+        }
+
         // Refresh the company switcher from the server so newly-shared companies (e.g. a
         // CA granted access via Network) appear without a re-login. Source = same legacy
         // list the login uses. Updates localStorage + both selects, preserving the active pick.
@@ -166,26 +192,20 @@
                 const d = await r.json();
                 if (!r.ok || !Array.isArray(d.companies)) return;
                 const fresh = d.companies;
-                if (JSON.stringify(fresh) === JSON.stringify(u.companies || [])) return;   // unchanged
-                u.companies = fresh;
+                const meta = d.company_meta || {};
+                const arch = Array.isArray(d.archived) ? d.archived : [];
+                const unchanged = JSON.stringify(fresh) === JSON.stringify(u.companies || [])
+                    && JSON.stringify(meta) === JSON.stringify(u.company_meta || {})
+                    && JSON.stringify(arch) === JSON.stringify(u.archived_companies || []);
+                if (unchanged) return;
+                u.companies = fresh; u.company_meta = meta; u.archived_companies = arch;
                 try { localStorage.setItem('currentUser', JSON.stringify(u)); } catch(_) {}
                 const active = u.company_name;
                 ['active-company-select', 'active-company-select-mobile'].forEach(id => {
                     const sel = document.getElementById(id); if (!sel) return;
-                    const keep = sel.value && sel.value !== '__ADD_NEW__' ? sel.value : active;
-                    sel.innerHTML = '';
-                    fresh.forEach(c => {
-                        const o = document.createElement('option');
-                        o.value = c; o.innerText = c;
-                        if (c === keep) o.selected = true;
-                        sel.appendChild(o);
-                    });
-                    const addOpt = document.createElement('option');
-                    addOpt.value = '__ADD_NEW__'; addOpt.innerText = '+ Add New Company';
-                    sel.appendChild(addOpt);
-                    const mgOpt = document.createElement('option');
-                    mgOpt.value = '__MANAGE__'; mgOpt.innerText = '⚙️ Manage companies…';
-                    sel.appendChild(mgOpt);
+                    const special = ['__ADD_NEW__', '__MANAGE__', '__ARCHIVED__'];
+                    const keep = sel.value && special.indexOf(sel.value) === -1 ? sel.value : active;
+                    _fillCompanySelect(sel, fresh, keep, meta, arch);
                 });
                 if (typeof _renderTopbar === 'function') _renderTopbar();
             } catch(_) {}
@@ -280,7 +300,7 @@
                         <button onclick="mcSave('${c.id}')" style="padding:6px 12px;background:rgba(56,189,248,0.12);color:#38bdf8;border:1px solid rgba(56,189,248,0.3);border-radius:7px;cursor:pointer;font-size:0.8rem;">Save</button>
                         ${isActive
                           ? '<button disabled title="Switch to another company first to remove this one" style="padding:6px 12px;background:rgba(255,255,255,0.04);color:#64748b;border:1px solid var(--border);border-radius:7px;font-size:0.8rem;cursor:not-allowed;">Remove</button>'
-                          : `<button onclick="mcArchive('${c.id}', ${JSON.stringify(c.name)})" style="padding:6px 12px;background:rgba(239,68,68,0.1);color:#f87171;border:1px solid rgba(239,68,68,0.25);border-radius:7px;cursor:pointer;font-size:0.8rem;">Remove</button>`}
+                          : `<button onclick="mcArchive('${c.id}', ${JSON.stringify(c.name).replace(/&/g,'&amp;').replace(/"/g,'&quot;')})" style="padding:6px 12px;background:rgba(239,68,68,0.1);color:#f87171;border:1px solid rgba(239,68,68,0.25);border-radius:7px;cursor:pointer;font-size:0.8rem;">Remove</button>`}
                     </div>
                 </div>`;
             }).join('');
@@ -341,6 +361,14 @@
         async function switchCompany(newCompany) {
             const user = JSON.parse(localStorage.getItem('currentUser'));
             if (!user) return;
+
+            if (newCompany === '__ARCHIVED__') {
+                // Archived companies are shown for context only — can't be made active.
+                ['active-company-select','active-company-select-mobile','tb-company'].forEach(id => {
+                    const s = document.getElementById(id); if (s) s.value = user.company_name || '';
+                });
+                return;
+            }
 
             if (newCompany === '__MANAGE__') {
                 // Don't switch — reset the selector to the active company and open the manager.
