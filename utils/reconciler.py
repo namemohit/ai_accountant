@@ -19,6 +19,11 @@ if os.getenv("GEMINI_API_KEY"):
 # Start balanced; calibrate from the match % shown on each row.
 PARTY_MIN_SIM = float(os.getenv("RECON_PARTY_MIN_SIM", "0.75"))
 PARTY_AUTOFILL_SIM = float(os.getenv("RECON_PARTY_AUTOFILL_SIM", "0.70"))
+# Once a party is known, its accounting head is filled DETERMINISTICALLY from the
+# party's own voucher history (most-frequent counter-head). Use that head only when
+# its frequency share clears HEAD_MIN_CONF; otherwise fall back to the embedding
+# candidate / Sales / Suspense default.
+HEAD_MIN_CONF = float(os.getenv("RECON_HEAD_MIN_CONF", "0.5"))
 
 def get_reconciliation_embedding(text):
     try:
@@ -149,6 +154,13 @@ def ai_reconcile_statement(transactions, company_name, company_id=None, progress
     party_norm = [(p, _normp(p)) for p in _known_parties]
     party_norm = [(p, pn) for (p, pn) in party_norm if len(pn) >= 4]
 
+    # Precompute every party's modal counter-head once (deterministic head fill).
+    try:
+        party_heads = _db.get_company_party_heads(company_name)
+    except Exception as e:
+        print(f"[AI RECON] party-head precompute failed: {e}", flush=True)
+        party_heads = {}
+
     # Phase 1 + 2: deterministic + vector retrieval (fast — no Gemini)
     needs_ai = []  # transactions that need Gemini reasoning
 
@@ -214,6 +226,7 @@ def ai_reconcile_statement(transactions, company_name, company_id=None, progress
         # Phase 2: vector retrieval
         query_text = f"Bank transaction: {tx_desc}. Reference: {tx_ref}. Amount: {tx_amount}."
         emb = get_reconciliation_embedding(query_text)
+        line_dir = "inflow" if is_credit else "outflow"
 
         candidate_parties = []
         candidate_heads = []
@@ -234,6 +247,22 @@ def ai_reconcile_statement(transactions, company_name, company_id=None, progress
             for h in narr_hits:
                 d = h["data"] or {}
                 candidate_narrations.append({"narration": d.get("narration"), "party": d.get("party")})
+            # Type-aware txn channel: merge its parties into candidate_parties (dedupe
+            # by name, keep best distance; nudge hits whose direction matches this line).
+            txn_hits = _db.semantic_search_tally(emb, company_name, ['tally_master_txn'], limit=5)
+            best = {cp["name"]: cp["distance"] for cp in candidate_parties if cp["name"]}
+            for h in txn_hits:
+                d = h["data"] or {}
+                nm = d.get("party")
+                if not nm:
+                    continue
+                dist = h["distance"] - (0.03 if d.get("direction") == line_dir else 0.0)
+                if nm not in best or dist < best[nm]:
+                    best[nm] = dist
+            if best:
+                candidate_parties = sorted(
+                    ({"name": n, "distance": dd} for n, dd in best.items()),
+                    key=lambda x: x["distance"])
 
         # Deterministic party-name match BEATS the embedding: if a known party's
         # name appears in the narration, use it (the embedding is unreliable for
@@ -253,7 +282,23 @@ def ai_reconcile_statement(transactions, company_name, company_id=None, progress
             _party_rationale = ("Vector retrieval (pending AI review)" if party_sim >= PARTY_MIN_SIM
                                 else f"No confident party match (best {round(party_sim*100)}%) — needs review")
         party_ok = party_sim >= PARTY_MIN_SIM
-        suggested_head = candidate_heads[0]["name"] if candidate_heads else ("Sales Account" if is_credit else "Suspense A/c")
+
+        # Head: once the party is known, prefer the DETERMINISTIC head from that
+        # party's voucher history (modal counter-head) when confident; else fall back
+        # to the embedding candidate, then Sales/Suspense. Head confidence is tracked
+        # separately from the row's party-match confidence.
+        head_conf = 0.0
+        head_candidates = []
+        head_info = None
+        if suggested_party:
+            ph = party_heads.get(suggested_party) or {}
+            head_info = ph.get(line_dir) or ph.get("any")
+        if head_info and head_info.get("head") and head_info.get("confidence", 0) >= HEAD_MIN_CONF:
+            suggested_head = head_info["head"]
+            head_conf = head_info["confidence"]
+            head_candidates = head_info.get("candidates", [])
+        else:
+            suggested_head = candidate_heads[0]["name"] if candidate_heads else ("Sales Account" if is_credit else "Suspense A/c")
 
         item = {
             "bank_transaction": tx, "status": "unmatched",
@@ -262,6 +307,8 @@ def ai_reconcile_statement(transactions, company_name, company_id=None, progress
             # confidence now reflects the PARTY-match similarity (what we gate on +
             # show as "match %"); 0 when no confident party was found.
             "confidence": round(party_sim, 3),
+            "head_confidence": round(head_conf, 3),
+            "head_candidates": head_candidates,
             "tally_voucher_id": None, "voucher_number": None,
             "rationale": _party_rationale,
             "candidate_parties": [p["name"] for p in candidate_parties[:5]],
@@ -355,6 +402,15 @@ Return the array only, no markdown fences, no commentary.
                             if gconf is not None and gconf >= PARTY_AUTOFILL_SIM:
                                 item["status"] = "auto_filled"
                             if entry.get("rationale"): item["rationale"] = entry["rationale"]
+                            # Gemini may have picked a different party — prefer that
+                            # party's deterministic historical head over Gemini's guess.
+                            _ldir = "inflow" if item.get("_is_credit") else "outflow"
+                            _ph = party_heads.get(gparty) or {}
+                            _hi = _ph.get(_ldir) or _ph.get("any")
+                            if _hi and _hi.get("head") and _hi.get("confidence", 0) >= HEAD_MIN_CONF:
+                                item["suggested_expense_head"] = _hi["head"]
+                                item["head_confidence"] = round(_hi["confidence"], 3)
+                                item["head_candidates"] = _hi.get("candidates", [])
                         else:
                             item["suggested_party"] = ""
                             item["status"] = "unmatched"

@@ -9382,7 +9382,7 @@ def embed_confirmed_voucher(company_name, voucher, embed_fn, company_id=None):
     if not embed_fn or not voucher:
         return {"skipped": True}
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
-    counts = {"parties": 0, "narrations": 0, "items": 0, "ledgers": 0, "skipped": 0}
+    counts = {"parties": 0, "narrations": 0, "txns": 0, "items": 0, "ledgers": 0, "skipped": 0}
     def _already(kb_type, kb_key):
         cur.execute("SELECT 1 FROM knowledge_base WHERE type=%s AND data->>'company_name'=%s AND data->>'kb_key'=%s LIMIT 1",
                     (kb_type, company_name, kb_key))
@@ -9409,9 +9409,46 @@ def embed_confirmed_voucher(company_name, voucher, embed_fn, company_id=None):
                              f"Party '{party}' seen on a confirmed voucher.",
                              {"party": party, "gstin": voucher.get("billing_party_gstin")}):
             counts["parties"] += 1
+
+        # Type-aware artefacts. A confirmed voucher gives us the head directly
+        # (counter_ledger), so the txn row is high-signal even though the confirm
+        # path doesn't write tally_vouchers.ledger_entries (that arrives on the next
+        # Tally sync — get_party_default_head only learns the head from history then).
+        canonical = canonicalize_voucher_type(voucher.get("voucher_type"))
+        direction = _VTYPE_DIRECTION.get(canonical, "none")
+        amt = voucher.get("total_amount") or voucher.get("amount") or 0
+        vdate = str(voucher.get("date") or "")
+        head = (voucher.get("counter_ledger") or voucher.get("category") or "").strip() or None
         narr = (voucher.get("narration") or voucher.get("notes") or "").strip()
-        if narr and _insert("tally_master_narration", f"narration::{narr[:80]}",
-                            f"Narration: {narr}", {"narration": narr, "party": party}):
+        vid = str(voucher.get("id") or voucher.get("invoice_number")
+                  or (narr[:40] if narr else party) or "confirmed")
+        p = party or "n/a"
+        amt_s = _fmt_amt(amt)
+        ttxt = {
+            "sales": f"Sales to '{p}' {amt_s} on {vdate}.",
+            "purchase": f"Purchase from '{p}' {amt_s} on {vdate}.",
+            "payment": f"Payment to '{p}' {amt_s} on {vdate}.",
+            "receipt": f"Receipt from '{p}' {amt_s} on {vdate}.",
+            "debit_note": f"Debit note to '{p}' {amt_s} on {vdate}.",
+            "credit_note": f"Credit note from '{p}' {amt_s} on {vdate}.",
+        }.get(canonical, f"Voucher {voucher.get('voucher_type') or 'entry'} {amt_s} on {vdate} for '{p}'.")
+        if head:
+            ttxt += f" Head: {head}."
+        if narr:
+            ttxt += f" Narration: {narr}"
+
+        if _insert("tally_master_txn", f"txn::{canonical}::{vid}", ttxt, {
+            "canonical_vtype": canonical, "raw_voucher_type": voucher.get("voucher_type"),
+            "direction": direction, "party": party or None, "derived_head": head,
+            "amount": float(amt or 0), "voucher_id": vid, "date": vdate,
+            "narration": narr, "source": "confirmed_voucher",
+        }):
+            counts["txns"] += 1
+        if narr and len(narr) > 10 and _insert(
+                "tally_master_narration", f"narration::v2::{vid}", ttxt, {
+                    "voucher_id": vid, "date": vdate, "voucher_type": voucher.get("voucher_type"),
+                    "canonical_vtype": canonical, "party": party or None,
+                    "amount": float(amt or 0), "source": "confirmed_voucher"}):
             counts["narrations"] += 1
         for it in (voucher.get("items") or []):
             if not isinstance(it, dict):
@@ -9526,6 +9563,205 @@ def unlearn_bank_party(company_name, line_id):
         cur.close(); conn.close()
 
 
+# ── Voucher-type-aware training helpers ──────────────────────────────────────
+# Map a raw Tally voucher_type (incl. custom voucher classes like "Bank Payment",
+# "Sales GST", "Cr Note") to a canonical category. Ordered substring rules, first
+# match wins; case-insensitive; always returns a value, never raises.
+# Cash-movement types (payment/receipt/contra) are matched BEFORE document types
+# (sales/purchase) on purpose: for bank reco the cash signal matters most, so a
+# class named e.g. "Sales Payment" should bucket as a payment.
+def canonicalize_voucher_type(raw):
+    s = (raw or "").strip().lower()
+    if not s:
+        return "other"
+    if "debit note" in s or "dr note" in s:
+        return "debit_note"
+    if "credit note" in s or "cr note" in s:
+        return "credit_note"
+    if "contra" in s:
+        return "contra"
+    if "payment" in s:
+        return "payment"
+    if "receipt" in s:
+        return "receipt"
+    if "purchase" in s or "purc" in s:
+        return "purchase"
+    if "sales" in s or "sale" in s or "invoice" in s:
+        return "sales"
+    if "journal" in s or "jrnl" in s:
+        return "journal"
+    return "other"
+
+
+# Direction implied by a canonical voucher type (money in / out / internal).
+_VTYPE_DIRECTION = {
+    "payment": "outflow", "purchase": "outflow", "debit_note": "outflow",
+    "receipt": "inflow", "sales": "inflow", "credit_note": "inflow",
+    "contra": "internal", "journal": "none", "other": "none",
+}
+
+
+def _is_bank_or_cash(parent_group, name):
+    """True if a ledger is a bank/cash account (so it can't be the 'head').
+    Uses the parent_group when known, else falls back to the ledger NAME — needed
+    when tally_ledgers isn't populated for the company (no parent_group lookup)."""
+    pg = (parent_group or "").lower()
+    n = (name or "").strip().lower()
+    if ("bank" in pg) or ("cash" in pg):
+        return True
+    if "bank" in n:                       # "ICICI Bank", "HDFC Bank A/c"
+        return True
+    if n == "cash" or n.startswith("cash ") or n.startswith("cash-"):
+        return True
+    return False
+
+
+def _is_tax_or_roundoff(name):
+    """GST/TDS/round-off legs — never the accounting head we want to learn."""
+    n = (name or "").lower()
+    return any(k in n for k in ("gst", "tax", "tds", "tcs", "cess",
+                                "round off", "round-off", "rounding"))
+
+
+def _leg_name(e):
+    return (e.get("ledger_name") or e.get("ledger") or "").strip()
+
+
+def _leg_is_debit(e):
+    """Resolve a leg's debit/credit using the SAME tri-state logic as the bank
+    import path (db.py ~4060): explicit is_debit wins, else infer from the sign
+    of `amount` (Tally convention: Cr=+, Dr=−). Returns True/False/None."""
+    isd = e.get("is_debit")
+    if isd is True or isd is False:
+        return isd
+    try:
+        amt = float(e.get("amount") or 0)
+    except (TypeError, ValueError):
+        return None
+    if amt > 0:
+        return False   # Tally positive ⇒ credit
+    if amt < 0:
+        return True    # Tally negative ⇒ debit
+    return None
+
+
+def _extract_legs(ledger_entries, ledgers_by_name, party_name=None):
+    """Split a voucher's legs into (bank_legs, party_legs, head_legs, derived_head).
+    - bank_legs:  bank / cash accounts
+    - party_legs: the voucher's party (PARTYLEDGERNAME) + Sundry Debtor/Creditor controls
+    - head_legs:  real expense / revenue / asset accounts (the bookable head)
+    - derived_head: the largest-|amount| head leg name (or None)
+    `ledgers_by_name` maps ledger name -> {"parent_group": ...} (may be empty if the
+    company hasn't synced ledger masters — name heuristics then carry the load).
+    `party_name` (the voucher's ledger_name) is excluded from head candidates so a
+    trade party never gets mistaken for the accounting head.
+    """
+    pn = (party_name or "").strip().lower()
+    bank_legs, party_legs, head_legs = [], [], []
+    for e in (ledger_entries or []):
+        nm = _leg_name(e)
+        if not nm:
+            continue
+        pg = (ledgers_by_name.get(nm, {}).get("parent_group") or "").lower()
+        try:
+            amt = abs(float(e.get("amount") or 0))
+        except (TypeError, ValueError):
+            amt = 0.0
+        if _is_bank_or_cash(pg, nm):
+            bank_legs.append((nm, amt))
+        elif (pn and nm.strip().lower() == pn) or ("sundry" in pg) or ("debtor" in pg) or ("creditor" in pg):
+            party_legs.append((nm, amt))
+        elif _is_tax_or_roundoff(nm):
+            continue   # tax / round-off — tracked by neither party nor head
+        else:
+            head_legs.append((nm, amt))
+    derived_head = max(head_legs, key=lambda x: x[1])[0] if head_legs else None
+    return bank_legs, party_legs, head_legs, derived_head
+
+
+def _load_ledgers_by_name(cur, company_id, company_name):
+    """{ledger_name: {'parent_group': ...}} for one company (legacy NULL company_id safe)."""
+    cur.execute("""
+        SELECT name, parent_group FROM tally_ledgers
+        WHERE company_id = %s OR (company_id IS NULL AND company_name = %s)
+    """, (company_id, company_name))
+    return {r["name"]: {"parent_group": r["parent_group"]} for r in cur.fetchall()}
+
+
+def _fmt_amt(a):
+    try:
+        return f"₹{float(a or 0):,.0f}"
+    except (TypeError, ValueError):
+        return "₹0"
+
+
+def build_voucher_training(v, ledgers_by_name):
+    """Given a tally_vouchers row (dict with id/date/voucher_type/voucher_number/
+    ledger_name/amount/narration/ledger_entries[list]) build the per-type training
+    artefacts. Returns a dict with:
+      canonical, raw_voucher_type, direction, party, derived_head, amount,
+      voucher_id, voucher_number, date, narration, bank_legs[names],
+      txn_text  (always — the structured tally_master_txn embed text),
+      narration_text (type-aware narration embed text, or None if narration too short).
+    """
+    raw = v.get("voucher_type") or ""
+    canonical = canonicalize_voucher_type(raw)
+    direction = _VTYPE_DIRECTION.get(canonical, "none")
+    entries = v.get("ledger_entries") or []
+    party_ln = (v.get("ledger_name") or "").strip()
+    bank_legs, party_legs, head_legs, derived_head = _extract_legs(entries, ledgers_by_name, party_ln)
+
+    # Party: PARTYLEDGERNAME (ledger_name) preferred, else first Sundry party leg.
+    party = party_ln or (party_legs[0][0] if party_legs else None)
+
+    amount = v.get("amount")
+    date = str(v.get("date") or "")
+    narration = (v.get("narration") or "").strip()
+    amt_s = _fmt_amt(amount)
+    bank_names = [b[0] for b in bank_legs]
+
+    p = party or "n/a"
+    if canonical == "payment":
+        txt = f"Payment to '{p}' {amt_s} on {date}."
+    elif canonical == "receipt":
+        txt = f"Receipt from '{p}' {amt_s} on {date}."
+    elif canonical == "contra":
+        between = " and ".join(bank_names[:2]) if bank_names else "accounts"
+        txt = f"Contra transfer {amt_s} on {date} between {between}."
+    elif canonical == "sales":
+        txt = f"Sales to '{p}' {amt_s} on {date}."
+    elif canonical == "purchase":
+        txt = f"Purchase from '{p}' {amt_s} on {date}."
+    elif canonical == "journal":
+        dr = ", ".join(n for n, _a in head_legs[:3]) or "—"
+        txt = f"Journal {amt_s} on {date}: {dr}."
+    elif canonical == "debit_note":
+        txt = f"Debit note to '{p}' {amt_s} on {date}."
+    elif canonical == "credit_note":
+        txt = f"Credit note from '{p}' {amt_s} on {date}."
+    else:
+        txt = f"Voucher {raw or 'entry'} {amt_s} on {date} for '{p}'."
+    if derived_head and canonical not in ("contra",):
+        txt += f" Head: {derived_head}."
+    if narration:
+        txt += f" Narration: {narration}"
+
+    narration_text = None
+    if len(narration) > 10:
+        # Type-aware narration channel — leads with the action so the vector
+        # captures payment-vs-receipt-vs-sales intent, not just the raw text.
+        narration_text = txt
+
+    return {
+        "canonical": canonical, "raw_voucher_type": raw, "direction": direction,
+        "party": party, "derived_head": derived_head,
+        "amount": float(amount or 0), "voucher_id": str(v.get("id")),
+        "voucher_number": v.get("voucher_number"), "date": date,
+        "narration": narration, "bank_legs": bank_names,
+        "txn_text": txt, "narration_text": narration_text,
+    }
+
+
 def embed_tally_master(company_id, company_name, embed_fn, batch_log=None):
     """Embed Tally master data (ledgers, parties, vouchers, stock items) into knowledge_base
     so RAG / semantic search can recall them later.
@@ -9570,7 +9806,8 @@ def embed_tally_master(company_id, company_name, embed_fn, batch_log=None):
         )
         return True
 
-    counts = {"ledgers": 0, "parties": 0, "narrations": 0, "stock_items": 0, "skipped": 0}
+    counts = {"ledgers": 0, "parties": 0, "narrations": 0, "txns": 0, "stock_items": 0, "skipped": 0}
+    ledgers_by_name = _load_ledgers_by_name(cur, company_id, company_name)
 
     # 1. Ledgers
     cur.execute("""
@@ -9603,59 +9840,76 @@ def embed_tally_master(company_id, company_name, embed_fn, batch_log=None):
             counts["ledgers"] += 1
             if batch_log: batch_log(f"  embedded ledger: {r['name']}")
 
-    # 2. Unique parties (from voucher.ledger_name — that's where PARTYLEDGERNAME lands)
+    # 2. Unique parties — per-type transaction counts (richer than a flat total).
     cur.execute("""
-        SELECT ledger_name AS party, COUNT(*) AS n,
-               array_agg(DISTINCT voucher_type) AS vtypes
+        SELECT ledger_name AS party, voucher_type, COUNT(*) AS n
         FROM tally_vouchers
         WHERE (company_id = %s OR (company_id IS NULL AND company_name = %s))
           AND ledger_name IS NOT NULL AND ledger_name != ''
-        GROUP BY ledger_name
+        GROUP BY ledger_name, voucher_type
     """, (company_id, company_name))
+    party_agg = {}   # party -> {canonical_vtype: count}
     for r in cur.fetchall():
-        key = f"party::{r['party']}"
+        bt = party_agg.setdefault(r["party"], {})
+        c = canonicalize_voucher_type(r["voucher_type"])
+        bt[c] = bt.get(c, 0) + r["n"]
+    for party, by_type in party_agg.items():
+        key = f"party::{party}"
         if _already("tally_master_party", key):
             counts["skipped"] += 1
             continue
-        vtypes = ", ".join([v for v in (r["vtypes"] or []) if v]) or "various"
-        text = (
-            f"Party '{r['party']}' has {r['n']} historical transactions in {vtypes}."
+        total = sum(by_type.values())
+        parts = ", ".join(
+            f"{n} {t}{'s' if n != 1 else ''}"
+            for t, n in sorted(by_type.items(), key=lambda x: -x[1])
         )
+        text = f"Party '{party}' has {total} historical transactions: {parts}."
         if _insert("tally_master_party", key, text, {
-            "party": r["party"],
-            "transaction_count": r["n"],
-            "voucher_types": [v for v in (r["vtypes"] or []) if v],
+            "party": party,
+            "transaction_count": total,
+            "by_type": by_type,
+            "voucher_types": list(by_type.keys()),
         }):
             counts["parties"] += 1
 
-    # 3. Voucher narrations (only meaningful ones — >10 chars)
+    # 3. Per-voucher training — a structured per-type txn channel (always) plus a
+    #    type-aware narration channel (meaningful narrations only). One pass.
     cur.execute("""
-        SELECT id, date, voucher_type, voucher_number, ledger_name AS party,
-               amount, narration
+        SELECT id, date, voucher_type, voucher_number, ledger_name,
+               amount, narration, ledger_entries::text AS ledger_entries
         FROM tally_vouchers
         WHERE (company_id = %s OR (company_id IS NULL AND company_name = %s))
-          AND narration IS NOT NULL AND LENGTH(narration) > 10
-        LIMIT 1000
     """, (company_id, company_name))
     for r in cur.fetchall():
-        key = f"narration::{r['id']}"
-        if _already("tally_master_narration", key):
+        v = dict(r)
+        try:
+            v["ledger_entries"] = json.loads(r["ledger_entries"]) if r["ledger_entries"] else []
+        except Exception:
+            v["ledger_entries"] = []
+        t = build_voucher_training(v, ledgers_by_name)
+        # 3a. structured txn row (every voucher)
+        tkey = f"txn::{t['canonical']}::{t['voucher_id']}"
+        if _already("tally_master_txn", tkey):
             counts["skipped"] += 1
-            continue
-        text = (
-            f"Voucher {r['date']} {r['voucher_type'] or ''} #{r['voucher_number'] or ''} "
-            f"for {r['party'] or 'n/a'} amount ₹{r['amount']}. "
-            f"Narration: {r['narration']}"
-        )
-        if _insert("tally_master_narration", key, text, {
-            "voucher_id": str(r["id"]),
-            "date": str(r["date"]),
-            "voucher_type": r["voucher_type"],
-            "voucher_number": r["voucher_number"],
-            "party": r["party"],
-            "amount": float(r["amount"] or 0),
+        elif _insert("tally_master_txn", tkey, t["txn_text"], {
+            "canonical_vtype": t["canonical"], "raw_voucher_type": t["raw_voucher_type"],
+            "direction": t["direction"], "party": t["party"], "derived_head": t["derived_head"],
+            "amount": t["amount"], "voucher_id": t["voucher_id"],
+            "voucher_number": t["voucher_number"], "date": t["date"], "narration": t["narration"],
         }):
-            counts["narrations"] += 1
+            counts["txns"] += 1
+        # 3b. type-aware narration row (only meaningful narrations, >10 chars)
+        if t["narration_text"]:
+            nkey = f"narration::v2::{t['voucher_id']}"
+            if _already("tally_master_narration", nkey):
+                counts["skipped"] += 1
+            elif _insert("tally_master_narration", nkey, t["narration_text"], {
+                "voucher_id": t["voucher_id"], "date": t["date"],
+                "voucher_type": t["raw_voucher_type"], "canonical_vtype": t["canonical"],
+                "voucher_number": t["voucher_number"], "party": t["party"],
+                "amount": t["amount"],
+            }):
+                counts["narrations"] += 1
 
     # 4. Stock items
     cur.execute("""
@@ -9685,6 +9939,216 @@ def embed_tally_master(company_id, company_name, embed_fn, batch_log=None):
     conn.commit()
     cur.close()
     conn.close()
+    return counts
+
+
+def _modal_head_info(ctr):
+    """Counter(head->count) -> {head, confidence, n, candidates:[{head,share}]}."""
+    total = sum(ctr.values())
+    if total == 0:
+        return {"head": None, "confidence": 0.0, "n": 0, "candidates": []}
+    ranked = ctr.most_common()
+    head, cnt = ranked[0]
+    candidates = [{"head": h, "share": round(c / total, 3)} for h, c in ranked[:3]]
+    return {"head": head, "confidence": round(cnt / total, 3), "n": total, "candidates": candidates}
+
+
+def get_party_default_head(company_name, party, direction="any", company_id=None):
+    """Most-frequent counter-head ledger for a party, derived deterministically from
+    their own voucher history's ledger_entries (no embeddings). `direction` filters to
+    'inflow' (receipt/sales/credit_note) or 'outflow' (payment/purchase/debit_note);
+    'any' counts all. Returns {head, confidence (frequency share), n, candidates}.
+    No usable history -> {head: None, ...}. Company-scoped."""
+    if not party:
+        return {"head": None, "confidence": 0.0, "n": 0, "candidates": []}
+    if company_id is None:
+        company_id = resolve_company_id(company_name)
+    from collections import Counter
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        ledgers_by_name = _load_ledgers_by_name(cur, company_id, company_name)
+        cur.execute("""
+            SELECT voucher_type, ledger_entries::text AS ledger_entries
+            FROM tally_vouchers
+            WHERE (company_id = %s OR (company_id IS NULL AND company_name = %s))
+              AND ledger_name = %s
+        """, (company_id, company_name, party))
+        ctr = Counter()
+        for r in cur.fetchall():
+            d = _VTYPE_DIRECTION.get(canonicalize_voucher_type(r["voucher_type"]), "none")
+            if direction not in ("any", None) and d != direction:
+                continue
+            try:
+                entries = json.loads(r["ledger_entries"]) if r["ledger_entries"] else []
+            except Exception:
+                entries = []
+            _b, _p, _h, head = _extract_legs(entries, ledgers_by_name, party)
+            if head:
+                ctr[head] += 1
+        return _modal_head_info(ctr)
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_company_party_heads(company_name, company_id=None):
+    """One-pass precompute of every party's modal counter-head, split by direction, so
+    the reconciler can fill the head once a party is known without N queries. Returns
+    {party: {'inflow': info, 'outflow': info, 'any': info}} (info as _modal_head_info)."""
+    if company_id is None:
+        company_id = resolve_company_id(company_name)
+    from collections import Counter
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        ledgers_by_name = _load_ledgers_by_name(cur, company_id, company_name)
+        cur.execute("""
+            SELECT ledger_name, voucher_type, ledger_entries::text AS ledger_entries
+            FROM tally_vouchers
+            WHERE (company_id = %s OR (company_id IS NULL AND company_name = %s))
+              AND ledger_name IS NOT NULL AND ledger_name != ''
+        """, (company_id, company_name))
+        tally = {}   # party -> direction -> Counter(head)
+        for r in cur.fetchall():
+            party = r["ledger_name"]
+            d = _VTYPE_DIRECTION.get(canonicalize_voucher_type(r["voucher_type"]), "none")
+            try:
+                entries = json.loads(r["ledger_entries"]) if r["ledger_entries"] else []
+            except Exception:
+                entries = []
+            _b, _p, _h, head = _extract_legs(entries, ledgers_by_name, party)
+            if not head:
+                continue
+            byd = tally.setdefault(party, {})
+            byd.setdefault(d, Counter())[head] += 1
+            byd.setdefault("any", Counter())[head] += 1
+        return {party: {d: _modal_head_info(ctr) for d, ctr in dirs.items()}
+                for party, dirs in tally.items()}
+    finally:
+        cur.close()
+        conn.close()
+
+
+def _refresh_party_rows(company_id, company_name, embed_fn):
+    """UPDATE existing tally_master_party rows in place with the per-type text.
+    embed_tally_master skips parties that already exist (idempotency), so a backfill
+    needs this to refresh their text/embedding. Only touches rows that already exist
+    (UPDATE, never delete). Returns count updated."""
+    if not embed_fn:
+        return 0
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    updated = 0
+    try:
+        cur.execute("""
+            SELECT ledger_name AS party, voucher_type, COUNT(*) AS n
+            FROM tally_vouchers
+            WHERE (company_id = %s OR (company_id IS NULL AND company_name = %s))
+              AND ledger_name IS NOT NULL AND ledger_name != ''
+            GROUP BY ledger_name, voucher_type
+        """, (company_id, company_name))
+        party_agg = {}
+        for r in cur.fetchall():
+            bt = party_agg.setdefault(r["party"], {})
+            c = canonicalize_voucher_type(r["voucher_type"])
+            bt[c] = bt.get(c, 0) + r["n"]
+        for party, by_type in party_agg.items():
+            key = f"party::{party}"
+            cur.execute("""
+                SELECT 1 FROM knowledge_base
+                WHERE type='tally_master_party' AND data->>'company_name'=%s AND data->>'kb_key'=%s
+                LIMIT 1
+            """, (company_name, key))
+            if not cur.fetchone():
+                continue   # missing rows were already inserted by embed_tally_master
+            total = sum(by_type.values())
+            parts = ", ".join(
+                f"{n} {t}{'s' if n != 1 else ''}"
+                for t, n in sorted(by_type.items(), key=lambda x: -x[1])
+            )
+            text = f"Party '{party}' has {total} historical transactions: {parts}."
+            try:
+                emb = embed_fn(text)
+            except Exception as e:
+                print(f"[reembed party] {e}")
+                continue
+            if not emb:
+                continue
+            emb_str = "[" + ",".join(map(str, emb)) + "]"
+            payload = {
+                "party": party, "transaction_count": total, "by_type": by_type,
+                "voucher_types": list(by_type.keys()), "company_name": company_name,
+                "company_id": str(company_id) if company_id else None,
+                "kb_key": key, "content": text,
+            }
+            cur.execute("""
+                UPDATE knowledge_base SET data=%s::jsonb, embedding=%s
+                WHERE type='tally_master_party' AND data->>'company_name'=%s AND data->>'kb_key'=%s
+            """, (json.dumps(payload), emb_str, company_name, key))
+            updated += cur.rowcount
+        conn.commit()
+        return updated
+    finally:
+        cur.close()
+        conn.close()
+
+
+def purge_old_narration_rows(company_name, dry_run=True):
+    """DESTRUCTIVE — delete legacy generic narration rows (kb_key NOT 'narration::v2::*')
+    for ONE company. Default dry_run=True only counts. Callers must obtain explicit user
+    approval before passing dry_run=False (never-delete policy)."""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        where = ("type='tally_master_narration' AND data->>'company_name'=%s "
+                 "AND COALESCE(data->>'kb_key','') NOT LIKE 'narration::v2::%%'")
+        cur.execute(f"SELECT COUNT(*) FROM knowledge_base WHERE {where}", (company_name,))
+        n = cur.fetchone()[0]
+        if dry_run:
+            return {"would_delete": n, "dry_run": True}
+        cur.execute(f"DELETE FROM knowledge_base WHERE {where}", (company_name,))
+        deleted = cur.rowcount
+        conn.commit()
+        return {"deleted": deleted, "dry_run": False}
+    finally:
+        cur.close()
+        conn.close()
+
+
+def resolve_company_id(company_name):
+    """Best-effort company_id for a company_name, read from its own Tally data
+    (handles the legacy mix where some rows carry company_id and some are NULL).
+    Returns the id so the `company_id=%s OR (company_id IS NULL AND company_name=%s)`
+    filters match ALL of a company's rows. None if no id is recorded anywhere."""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        for tbl in ("tally_vouchers", "tally_ledgers"):
+            cur.execute(f"SELECT company_id FROM {tbl} WHERE company_name=%s AND company_id IS NOT NULL LIMIT 1",
+                        (company_name,))
+            r = cur.fetchone()
+            if r and r[0]:
+                return r[0]
+        return None
+    finally:
+        cur.close()
+        conn.close()
+
+
+def reembed_company_tally(company_id, company_name, embed_fn, purge_old_narration=False):
+    """Backfill a company's Tally training with the voucher-type-aware scheme:
+    (a) additive embed (new tally_master_txn + narration::v2 + any missing masters),
+    (b) refresh existing tally_master_party rows in place (UPDATE),
+    (c) optionally purge legacy generic narration rows (DESTRUCTIVE — only when the
+        caller passes purge_old_narration=True after explicit user approval).
+    Re-runnable (idempotent). Returns merged counts."""
+    if company_id is None:
+        company_id = resolve_company_id(company_name)
+    counts = embed_tally_master(company_id, company_name, embed_fn)
+    counts["parties_refreshed"] = _refresh_party_rows(company_id, company_name, embed_fn)
+    if purge_old_narration:
+        counts["narration_purged"] = purge_old_narration_rows(company_name, dry_run=False)
     return counts
 
 

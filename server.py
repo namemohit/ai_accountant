@@ -5816,7 +5816,8 @@ async def get_training_progress(request: Request, company_name: str = "Acme Corp
 
 
 _TRAINING_TYPES = ("correction", "tally_master_ledger", "tally_master_party",
-                   "tally_master_item", "tally_master_narration", "bank_reconciliation")
+                   "tally_master_item", "tally_master_narration", "tally_master_txn",
+                   "bank_reconciliation")
 
 
 @app.get("/api/training/items")
@@ -5848,6 +5849,31 @@ async def post_training_retrieve(payload: dict):
         raise HTTPException(status_code=503, detail="Could not embed the query right now.")
     matches = db.retrieve_training_matches(company, emb, kb_type=kb_type, k=int(payload.get("k") or 8))
     return {"status": "success", "query": query, "matches": matches}
+
+
+@app.post("/api/training/reembed-tally")
+async def post_reembed_tally(request: Request, payload: dict):
+    """Backfill voucher-type-aware Tally training for ONE company: re-embeds its existing
+    synced vouchers into the new tally_master_txn + type-aware narration channels and
+    refreshes party rows in place. super_admin only; runs in the background (watch
+    Training Progress for the updated counts). Non-destructive — does not purge old rows."""
+    row = getattr(request.state, "user_row", None) or {}
+    if row.get("role") != "super_admin":
+        raise HTTPException(status_code=403, detail="super_admin only")
+    company = (payload.get("company_name") or "").strip()
+    if not company:
+        raise HTTPException(status_code=400, detail="company_name required")
+
+    def _bg(cname=company):
+        try:
+            res = db.reembed_company_tally(None, cname, get_embedding)
+            print(f"[REEMBED] {cname}: {res}")
+        except Exception as e:
+            print(f"[REEMBED] error {cname}: {e}")
+    import threading as _thr
+    _thr.Thread(target=_bg, daemon=True).start()
+    return {"status": "started", "company_name": company,
+            "note": "Re-embedding in the background; check Training Progress for updated counts."}
 
 
 @app.post("/training/optimize")
