@@ -2863,6 +2863,8 @@ def _ensure_chat_user_column():
         # Sprint 84 — public shareable per-chat link (read-only).
         cursor.execute("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS share_token TEXT")
         cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_sessions_share ON chat_sessions(share_token)")
+        # Speed up the sidebar session-list query (per-session message counts).
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id)")
         conn.commit()
         cursor.close()
         conn.close()
@@ -2890,19 +2892,17 @@ def create_chat_session(title="New Chat", company_name=None, user_username=None,
         pput(conn)
 
 
-def get_chat_sessions(company_name=None, user_username=None):
+def get_chat_sessions(company_name=None, user_username=None, limit=100):
     """List chat sessions scoped to (company, user). Both filters apply when given.
-    If user_username is None → super_admin / all (use cautiously)."""
+    If user_username is None → super_admin / all (use cautiously).
+    `limit` caps the number of most-recent sessions returned (sidebar is a recents list)."""
     _ensure_chat_user_column()
     conn = pget()
     try:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        query = """
-            SELECT s.*, COALESCE(m.msg_count, 0) as message_count
-            FROM chat_sessions s
-            LEFT JOIN (SELECT session_id, COUNT(*) as msg_count FROM chat_messages GROUP BY session_id) m
-            ON s.id = m.session_id
-        """
+        # Filter+order+limit the sessions first, then a per-session message count
+        # backed by idx_chat_messages_session — avoids aggregating the whole
+        # chat_messages table on every call.
         # Sprint 82 — keep Create-task sessions out of the Tally recent-chats list.
         where = ["COALESCE(s.kind,'chat') <> 'yantrai_task'"]
         params = []
@@ -2915,8 +2915,13 @@ def get_chat_sessions(company_name=None, user_username=None):
             # — they remain visible to super_admin who passes user_username=None.
             where.append("s.user_username = %s")
             params.append(user_username)
+        query = """
+            SELECT s.*, (SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.id) AS message_count
+            FROM chat_sessions s
+        """
         query += " WHERE " + " AND ".join(where)
-        query += " ORDER BY s.updated_at DESC"
+        query += " ORDER BY s.updated_at DESC LIMIT %s"
+        params.append(int(limit))
         cursor.execute(query, tuple(params))
         rows = cursor.fetchall()
         cursor.close()
@@ -2955,16 +2960,17 @@ def list_task_sessions(company_name=None, user_username=None):
         cur.close(); pput(conn)
 
 
-def get_chat_sessions_multi(company_names, user_username=None):
-    """Get chat sessions for multiple companies at once, scoped to a user."""
+def get_chat_sessions_multi(company_names, user_username=None, limit=100):
+    """Get chat sessions for multiple companies at once, scoped to a user.
+    `limit` caps the number of most-recent sessions returned."""
     _ensure_chat_user_column()
     conn = get_conn()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
+    # Per-session count backed by idx_chat_messages_session over the limited set,
+    # instead of aggregating the whole chat_messages table.
     base = """
-        SELECT s.*, COALESCE(m.msg_count, 0) as message_count
+        SELECT s.*, (SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.id) AS message_count
         FROM chat_sessions s
-        LEFT JOIN (SELECT session_id, COUNT(*) as msg_count FROM chat_messages GROUP BY session_id) m
-        ON s.id = m.session_id
     """
     where = []
     params = []
@@ -2977,7 +2983,8 @@ def get_chat_sessions_multi(company_names, user_username=None):
         params.append(user_username)
     if where:
         base += " WHERE " + " AND ".join(where)
-    base += " ORDER BY s.updated_at DESC"
+    base += " ORDER BY s.updated_at DESC LIMIT %s"
+    params.append(int(limit))
     cursor.execute(base, tuple(params))
     rows = cursor.fetchall()
     cursor.close()

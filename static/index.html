@@ -10592,33 +10592,13 @@
             sendMessage();
         }
 
-        async function loadChatSessions() {
-            const currentUser = JSON.parse(localStorage.getItem('currentUser'));
-            const isSuperAdmin = currentUser && currentUser.role === 'super_admin';
-            const uname = currentUser?.username || '';
-            // Sprint 25 — super_admin with "View as admin" picks an impersonation
-            // target. Chat list then scopes to (viewAsAdmin, active company).
-            const viewAs = (isSuperAdmin && localStorage.getItem('viewAsAdmin')) || '__ALL__';
-            let url;
-            if (isSuperAdmin && viewAs && viewAs !== '__ALL__') {
-                // Scoped view: that admin's chats in the current company
-                url = `${API}/chat/sessions?username=${encodeURIComponent(viewAs)}`;
-                if (currentUser.company_name) {
-                    url += `&company_name=${encodeURIComponent(currentUser.company_name)}`;
-                }
-            } else if (isSuperAdmin) {
-                // "All admins" platform-wide view
-                url = `${API}/chat/sessions?username=${encodeURIComponent(uname)}&all=true`;
-            } else if (currentUser && currentUser.company_name) {
-                // Regular users see only their active company AND their own chats
-                url = `${API}/chat/sessions?username=${encodeURIComponent(uname)}&company_name=${encodeURIComponent(currentUser.company_name)}`;
-            } else {
-                url = `${API}/chat/sessions?username=${encodeURIComponent(uname)}`;
-            }
-            const res = await fetch(url);
-            const data = await res.json();
+        // Render the chat-session sidebar from a data array. Pure render — no fetch.
+        // Shared by the instant cache paint and the background-refresh paint.
+        function _renderChatSessions(data, isSuperAdmin) {
             const list = document.getElementById('chat-session-list');
+            if (!list) return;
             list.innerHTML = '';
+            if (!Array.isArray(data)) data = [];
             // De-duplicate truly empty sessions (no messages) — keep only the most recent one
             let seenEmpty = false;
             const filtered = data.filter(s => {
@@ -10644,6 +10624,59 @@
                 item.onclick = () => { loadChat(s.id); if (typeof closeMobileChatSidebar === 'function') closeMobileChatSidebar(); };
                 list.appendChild(item);
             });
+        }
+
+        // Stale-while-revalidate cache for the chat sidebar list.
+        window.__chatSessionsCache = window.__chatSessionsCache || {};
+        let _chatSessionsSeq = 0;
+        async function loadChatSessions() {
+            const currentUser = JSON.parse(localStorage.getItem('currentUser'));
+            const isSuperAdmin = currentUser && currentUser.role === 'super_admin';
+            const uname = currentUser?.username || '';
+            // Sprint 25 — super_admin with "View as admin" picks an impersonation
+            // target. Chat list then scopes to (viewAsAdmin, active company).
+            const viewAs = (isSuperAdmin && localStorage.getItem('viewAsAdmin')) || '__ALL__';
+            let url;
+            if (isSuperAdmin && viewAs && viewAs !== '__ALL__') {
+                // Scoped view: that admin's chats in the current company
+                url = `${API}/chat/sessions?username=${encodeURIComponent(viewAs)}`;
+                if (currentUser.company_name) {
+                    url += `&company_name=${encodeURIComponent(currentUser.company_name)}`;
+                }
+            } else if (isSuperAdmin) {
+                // "All admins" platform-wide view
+                url = `${API}/chat/sessions?username=${encodeURIComponent(uname)}&all=true`;
+            } else if (currentUser && currentUser.company_name) {
+                // Regular users see only their active company AND their own chats
+                url = `${API}/chat/sessions?username=${encodeURIComponent(uname)}&company_name=${encodeURIComponent(currentUser.company_name)}`;
+            } else {
+                url = `${API}/chat/sessions?username=${encodeURIComponent(uname)}`;
+            }
+
+            // 1) Instant paint from cache (memory, falling back to localStorage) so the
+            //    sidebar never sits blank while the network call is in flight.
+            const lsKey = 'chatSessions:' + url;
+            let cached = window.__chatSessionsCache[url];
+            if (!cached) {
+                try { const raw = localStorage.getItem(lsKey); if (raw) cached = JSON.parse(raw); } catch (_) {}
+                if (cached) window.__chatSessionsCache[url] = cached;
+            }
+            if (cached) _renderChatSessions(cached, isSuperAdmin);
+
+            // 2) Background revalidate; only the latest invocation's response renders.
+            const seq = ++_chatSessionsSeq;
+            try {
+                const res = await fetch(url);
+                const data = await res.json();
+                if (seq !== _chatSessionsSeq) return;   // superseded by a newer load
+                window.__chatSessionsCache[url] = data;
+                try { localStorage.setItem(lsKey, JSON.stringify(data)); } catch (_) {}
+                _renderChatSessions(data, isSuperAdmin);
+            } catch (e) {
+                // Network failed — keep whatever the cache painted. Only show the
+                // empty/error state if there was nothing cached to display.
+                if (seq === _chatSessionsSeq && !cached) _renderChatSessions([], isSuperAdmin);
+            }
         }
 
         let _chatLoadSeq = 0;

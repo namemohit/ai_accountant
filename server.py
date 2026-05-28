@@ -2190,15 +2190,21 @@ async def gstr3b_export(company_name: str, month: int, year: int):
 
 @app.get("/chat/sessions")
 async def list_chat_sessions(company_name: str = None, all: str = None,
-                              companies: str = None, username: str = None):
+                              companies: str = None, username: str = None,
+                              limit: int = 100):
     """List chat sessions scoped to (company, user). super_admin can pass all=true.
-    Regular users MUST send their username — without it, no sessions are returned."""
+    Regular users MUST send their username — without it, no sessions are returned.
+    `limit` caps the most-recent sessions returned (sidebar recents list)."""
+    try:
+        limit = max(1, min(int(limit), 500))
+    except Exception:
+        limit = 100
     if all == "true":
         # Only super_admin (verified by username lookup having super_admin role)
         if username:
             user = db.get_user_by_username(username)
             if user and user.get("role") == "super_admin":
-                return db.get_chat_sessions(None, None)
+                return db.get_chat_sessions(None, None, limit=limit)
         # else fall through to scoped query (don't leak)
     if not username:
         # No auth — return empty rather than leaking
@@ -2206,10 +2212,10 @@ async def list_chat_sessions(company_name: str = None, all: str = None,
     if companies:
         try:
             company_list = json.loads(companies)
-            return db.get_chat_sessions_multi(company_list, user_username=username)
+            return db.get_chat_sessions_multi(company_list, user_username=username, limit=limit)
         except Exception:
             pass
-    return db.get_chat_sessions(company_name, user_username=username)
+    return db.get_chat_sessions(company_name, user_username=username, limit=limit)
 
 
 @app.get("/chat/messages/{session_id}")
