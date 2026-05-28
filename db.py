@@ -3674,6 +3674,26 @@ def get_relevant_corrections(query_embedding, company_name="Acme Corp", limit=5)
     return [r['data'] for r in rows]
 
 
+def count_company_tally_embeddings(company_name):
+    """How many learned tally_master_* embeddings exist for THIS company — used to
+    show an accurate, workspace-scoped count in the reconciliation progress UI
+    (replaces a hardcoded placeholder). Returns int."""
+    if not company_name:
+        return 0
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""SELECT COUNT(*) FROM knowledge_base
+                       WHERE data->>'company_name' = %s
+                         AND type LIKE 'tally_master_%%' AND embedding IS NOT NULL""",
+                    (company_name,))
+        r = cur.fetchone()
+        return int(r[0]) if r else 0
+    except Exception as e:
+        print(f"[count_company_tally_embeddings] {e}"); return 0
+    finally:
+        cur.close(); conn.close()
+
+
 def semantic_search_tally(query_embedding, company_name, kb_types, limit=5):
     """Search the new tally_master_* embeddings by cosine distance.
 

@@ -11969,7 +11969,9 @@
                             case 'phase2':
                                 pct = 35 + Math.round((p.done / p.total) * 35);
                                 label = `🧠 Vector search (${p.done}/${p.total})`;
-                                detail = 'Searching 1,241 Tally embeddings for similar past transactions';
+                                detail = (p.embed_count != null)
+                                    ? `Searching ${Number(p.embed_count).toLocaleString('en-IN')} transactions learned in this workspace`
+                                    : 'Searching transactions learned in this workspace';
                                 break;
                             case 'gemini_start':
                             case 'gemini_progress':

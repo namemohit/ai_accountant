@@ -124,8 +124,15 @@ def ai_reconcile_statement(transactions, company_name, company_id=None, progress
 
     results = []
     total = len(transactions)
-    print(f"[AI RECON] Starting reconciliation of {total} transactions for {company_name}", flush=True)
-    if progress_cb: progress_cb({"phase": "starting", "total": total, "done": 0})
+    # Real, workspace-scoped count of learned embeddings the vector search will look
+    # at — surfaced in the progress UI so it's clear matching uses THIS company's data.
+    try:
+        embed_count = _db.count_company_tally_embeddings(company_name)
+    except Exception:
+        embed_count = 0
+    print(f"[AI RECON] Starting reconciliation of {total} transactions for {company_name} "
+          f"({embed_count} learned embeddings)", flush=True)
+    if progress_cb: progress_cb({"phase": "starting", "total": total, "done": 0, "embed_count": embed_count})
 
     # Phase 1 + 2: deterministic + vector retrieval (fast — no Gemini)
     needs_ai = []  # transactions that need Gemini reasoning
@@ -186,7 +193,7 @@ def ai_reconcile_statement(transactions, company_name, company_id=None, progress
                 "candidate_revenue": revenue_ledgers, "candidate_expense": expense_ledgers,
                 "all_party_ledgers": party_ledgers,
             })
-            if progress_cb: progress_cb({"phase": "phase1", "done": i+1, "total": total})
+            if progress_cb: progress_cb({"phase": "phase1", "done": i+1, "total": total, "embed_count": embed_count})
             continue
 
         # Phase 2: vector retrieval
@@ -248,7 +255,7 @@ def ai_reconcile_statement(transactions, company_name, company_id=None, progress
             needs_ai.append((len(results), item))  # store position + item
 
         results.append(item)
-        if progress_cb: progress_cb({"phase": "phase2", "done": i+1, "total": total})
+        if progress_cb: progress_cb({"phase": "phase2", "done": i+1, "total": total, "embed_count": embed_count})
 
     print(f"[AI RECON] Phase 1+2 done. {len([r for r in results if r['status']=='auto_matched'])} matched, {len([r for r in results if r['status']=='auto_filled'])} high-confidence, {len(needs_ai)} need Gemini", flush=True)
 
