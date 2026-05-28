@@ -1243,6 +1243,27 @@ async def lead_sources():
     return {"status": "success", "sources": lead_registry.list_sources()}
 
 
+def _ai_chat_title(text):
+    """Generate a concise AI title for a chat from how it begins. Returns None on any
+    failure so the caller can fall back to the old filename/message-truncation title."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        model = genai.GenerativeModel('gemini-flash-latest')
+        resp = model.generate_content(
+            "Write a concise 3-6 word title (Title Case, no quotes, no trailing punctuation) "
+            "for a chat that begins with the following. Reply with ONLY the title.\n\n" + text[:800])
+        t = (resp.text or "").strip()
+        if not t:
+            return None
+        t = t.splitlines()[0].strip().strip('"').strip("'").strip()
+        return t[:60] or None
+    except Exception as e:
+        print(f"[_ai_chat_title] {e}", flush=True)
+        return None
+
+
 @app.post("/chat")
 async def chat_with_tally(
     message: str = Form(None),
@@ -1736,14 +1757,17 @@ If on second thought this is actually just a regular accounting question (NOT a 
             session_info = db.get_chat_sessions(company_name)
             current_session = next((s for s in session_info if s["id"] == session_id), None)
             if current_session and (not current_session.get("title") or current_session["title"] in ("New Chat", "New Chat (Empty)")):
-                if file and file.filename:
-                    auto_title = f"📄 {file.filename[:45]}"
-                elif user_msg:
-                    auto_title = user_msg[:50].strip()
-                    if len(user_msg) > 50:
-                        auto_title += "…"
-                else:
-                    auto_title = None
+                # AI-generated title from how the chat begins — the user's message, or
+                # (for a file-only upload) the AI's understanding of the document, so we
+                # get a meaningful name instead of a raw filename/ID.
+                basis = (user_msg or "").strip() or (ai_response.get("text") or "")
+                auto_title = _ai_chat_title(basis)
+                if not auto_title:
+                    # Fallback: never regress titling if the AI call is unavailable.
+                    if file and file.filename:
+                        auto_title = f"📄 {file.filename[:45]}"
+                    elif user_msg:
+                        auto_title = user_msg[:50].strip() + ("…" if len(user_msg) > 50 else "")
                 if auto_title:
                     db.update_chat_title(session_id, auto_title)
         except Exception as title_err:
