@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "196"
+APP_VERSION = "197"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -2200,11 +2200,13 @@ async def list_chat_sessions(company_name: str = None, all: str = None,
     except Exception:
         limit = 100
     if all == "true":
-        # Only super_admin (verified by username lookup having super_admin role)
+        # super_admin "all" = every USER's chats, but still scoped to the active
+        # workspace when company_name is given (so switching workspace re-scopes).
+        # company_name=None is a defensive fallback that returns all (other callers).
         if username:
             user = db.get_user_by_username(username)
             if user and user.get("role") == "super_admin":
-                return db.get_chat_sessions(None, None, limit=limit)
+                return db.get_chat_sessions(company_name, None, limit=limit)
         # else fall through to scoped query (don't leak)
     if not username:
         # No auth — return empty rather than leaking

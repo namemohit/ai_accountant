@@ -10618,9 +10618,9 @@
                 const item = document.createElement('div');
                 item.className = `chat-session-item ${s.id === currentSessionId ? 'active' : ''}`;
                 const title = (s.title && s.title.length > 40) ? s.title.slice(0, 37) + '…' : (s.title || 'New Chat');
-                // Show company tag only for super_admin (platform-wide view); regular users see scoped chats so no tag needed
-                const companyTag = isSuperAdmin && s.company_name ? `<span style="font-size:0.65rem;background:rgba(218,119,86,0.2);color:var(--primary);padding:1px 5px;border-radius:4px;white-space:nowrap;flex-shrink:0;">${s.company_name}</span>` : '';
-                item.innerHTML = `<span style="flex-shrink:0;">💬</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">${title}</span>${companyTag}<span class="chat-share-ic" title="Copy shareable link" onclick="event.stopPropagation(); shareChat('${s.id}', event)" style="flex-shrink:0;cursor:pointer;opacity:0.55;padding:2px 4px;">🔗</span>`;
+                // The list is now always scoped to one workspace, so the per-row company
+                // chip is redundant — omit it.
+                item.innerHTML = `<span style="flex-shrink:0;">💬</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">${title}</span><span class="chat-share-ic" title="Copy shareable link" onclick="event.stopPropagation(); shareChat('${s.id}', event)" style="flex-shrink:0;cursor:pointer;opacity:0.55;padding:2px 4px;">🔗</span>`;
                 item.onclick = () => { loadChat(s.id); if (typeof closeMobileChatSidebar === 'function') closeMobileChatSidebar(); };
                 list.appendChild(item);
             });
@@ -10644,8 +10644,12 @@
                     url += `&company_name=${encodeURIComponent(currentUser.company_name)}`;
                 }
             } else if (isSuperAdmin) {
-                // "All admins" platform-wide view
+                // "All admins" → all users' chats in the ACTIVE workspace (not platform-wide).
+                // company_name keeps the list scoped so switching workspace re-scopes it.
                 url = `${API}/chat/sessions?username=${encodeURIComponent(uname)}&all=true`;
+                if (currentUser.company_name) {
+                    url += `&company_name=${encodeURIComponent(currentUser.company_name)}`;
+                }
             } else if (currentUser && currentUser.company_name) {
                 // Regular users see only their active company AND their own chats
                 url = `${API}/chat/sessions?username=${encodeURIComponent(uname)}&company_name=${encodeURIComponent(currentUser.company_name)}`;
