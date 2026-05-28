@@ -3441,7 +3441,10 @@
             const bar = document.getElementById('m-skill-bar'); if (!bar) return;
             const cur = window.__currentView || '';
             let txt = '';
-            if (meta) txt = `${meta.icon || '🤖'} ${escapeHtml(meta.name || window.__activeAgent)}${curTitle ? ' › ' + curTitle : ''}`;
+            // Chat has its own "☰ Chat" toggle as the header — suppress the redundant
+            // top skill bar for it on mobile.
+            if (cur === 'chat') txt = '';
+            else if (meta) txt = `${meta.icon || '🤖'} ${escapeHtml(meta.name || window.__activeAgent)}${curTitle ? ' › ' + curTitle : ''}`;
             else if (cur && cur !== 'home') txt = _PLATFORM_TITLES[cur] || curTitle || '';
             bar.innerHTML = txt;
             bar.dataset.show = txt ? '1' : '';
