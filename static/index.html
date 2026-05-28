@@ -12451,10 +12451,16 @@
                 if (!sel) return;
                 const cur = sel.value;
                 const ups = j.data || [];
-                const fmtD = (s) => { try { return new Date(s).toLocaleDateString('en-IN', {day:'2-digit', month:'short', year:'numeric'}); } catch(_) { return s || ''; } };
+                const fmtDT = (s) => {
+                    if (!s) return '';
+                    const d = new Date(String(s).replace(' ', 'T'));   // "YYYY-MM-DD HH:MM:SS" → Date
+                    if (isNaN(d)) return String(s);
+                    return d.toLocaleString('en-IN', {day:'2-digit', month:'short', year:'numeric',
+                                                      hour:'2-digit', minute:'2-digit', second:'2-digit'});
+                };
                 const opts = ['<option value="">All statements</option>'].concat(ups.map((u, i) => {
                     const nm = (u.original_name || 'statement').replace(/"/g,'&quot;');
-                    const meta = [fmtD(u.uploaded_at), (u.line_count != null ? u.line_count + ' lines' : '')].filter(Boolean).join(' · ');
+                    const meta = [fmtDT(u.uploaded_at), (u.line_count != null ? u.line_count + ' lines' : '')].filter(Boolean).join(' · ');
                     const tag = i === 0 ? '  (latest)' : '';
                     return `<option value="${u.id}">${nm} · ${meta}${tag}</option>`;
                 }));
