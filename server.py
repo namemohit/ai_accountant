@@ -1287,19 +1287,27 @@ async def chat_with_tally(
         is_bank_statement = False
         ai_detected_type = None
         if file:
-            os.makedirs("static/uploads", exist_ok=True)
             import re
             safe_filename = re.sub(r'[^a-zA-Z0-9_.-]', '_', file.filename)
             unique_filename = f"{uuid.uuid4()}_{safe_filename}"
-            persistent_path = f"static/uploads/{unique_filename}"
-            file_url = f"/static/uploads/{unique_filename}"
 
             temp_path = f"chat_temp_{uuid.uuid4()}_{safe_filename}"
             file_content = await file.read()
             with open(temp_path, "wb") as buffer:
                 buffer.write(file_content)
-            with open(persistent_path, "wb") as buffer:
-                buffer.write(file_content)
+            # Durable storage (Supabase) so the file (and its chat thumbnail) survives
+            # Cloud Run restarts and is visible across environments. Local disk is
+            # ephemeral on Cloud Run → was the cause of broken chat thumbnails. Fall
+            # back to local disk only when Storage is unavailable (dev without creds).
+            _slug = re.sub(r'[^a-z0-9]+', '-', (company_name or 'co').lower()).strip('-') or 'co'
+            _ext = os.path.splitext(safe_filename)[1]
+            file_url = _supabase_upload(f"{_slug}/chat/{uuid.uuid4().hex}{_ext}",
+                                        file_content, file.content_type)
+            if not file_url:
+                os.makedirs("static/uploads", exist_ok=True)
+                with open(f"static/uploads/{unique_filename}", "wb") as buffer:
+                    buffer.write(file_content)
+                file_url = f"/static/uploads/{unique_filename}"
 
             # Register the upload in the company Files library so chat-uploaded
             # bills/statements also show up under Files (not just in the chat).
