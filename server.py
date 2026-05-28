@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "186"
+APP_VERSION = "187"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -3200,6 +3200,7 @@ async def list_bank_transactions_endpoint(
     limit: int = 500, offset: int = 0,
     tally_status: str = None,
     bank_ledger: str = None,
+    source_file_id: str = None,
 ):
     try:
         result = db.list_bank_transactions(
@@ -3209,6 +3210,7 @@ async def list_bank_transactions_endpoint(
             q=q, view=view, sort=sort, limit=limit, offset=offset,
             tally_status=tally_status,
             bank_ledger=bank_ledger,
+            source_file_id=source_file_id,
         )
         # JSON-friendly conversion
         for r in result["rows"]:
@@ -3635,9 +3637,11 @@ async def bank_sync_runs_endpoint(company_id: str, company_name: str = ""):
 
 
 @app.get("/api/bank-statement-uploads")
-async def list_statement_uploads_endpoint(company_id: str):
+async def list_statement_uploads_endpoint(company_id: str = None, company_name: str = None):
     try:
-        rows = db.list_statement_uploads(company_id)
+        if not company_id and company_name:
+            company_id = _resolve_company_id_by_name(company_name)
+        rows = db.list_statement_uploads(company_id, company_name)
         for r in rows:
             for k in ("period_from", "period_to", "uploaded_at"):
                 if r.get(k) is not None: r[k] = str(r[k])

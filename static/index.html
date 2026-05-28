@@ -1075,6 +1075,9 @@
                         <select id="bank-filter-bank-ledger" onchange="loadBankTransactions()" title="Filter to one bank / cash ledger" style="padding: 6px 10px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
                             <option value="">All banks</option>
                         </select>
+                        <select id="bank-filter-statement" onchange="loadBankTransactions()" title="Filter to one uploaded bank statement" style="padding: 6px 10px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
+                            <option value="">All statements</option>
+                        </select>
                         <select id="bank-filter-tally-status" onchange="loadBankTransactions()" title="Filter by Tally Status" style="padding: 6px 10px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
                             <option value="">All statuses</option>
                             <option value="ai_ready">🟡 AI Ready</option>
@@ -12029,6 +12032,7 @@
                         `   ⚠️ Needs review: ${m.unmatched}`;
                     alert(summary);
                     // Refresh main bank table + sync log so they show the new rows
+                    if (typeof loadBankStatementFilter === 'function') loadBankStatementFilter(true);  // new statement appears in the filter
                     if (typeof loadBankTransactions === 'function') loadBankTransactions();
                     if (typeof loadBankSyncRunsCountOnly === 'function') loadBankSyncRunsCountOnly();
                 }
@@ -12322,6 +12326,7 @@
                 source: document.getElementById('bank-filter-source').value,
                 // Sprint 14 — persist bank ledger filter
                 bank_ledger: document.getElementById('bank-filter-bank-ledger')?.value || '',
+                statement: document.getElementById('bank-filter-statement')?.value || '',
                 // Sprint 12 — persist new tally_status key (replaces old 'status')
                 tally_status: document.getElementById('bank-filter-tally-status').value,
                 from_date: document.getElementById('bank-filter-from').value,
@@ -12343,6 +12348,12 @@
                 if (f.bank_ledger !== undefined) {
                     const sel = document.getElementById('bank-filter-bank-ledger');
                     if (sel) sel.value = f.bank_ledger;
+                }
+                // Restore statement filter; loadBankStatementFilter re-applies it once
+                // the dropdown is populated, and drops it if that upload no longer exists.
+                if (f.statement !== undefined) {
+                    const ssel = document.getElementById('bank-filter-statement');
+                    if (ssel) ssel.value = f.statement;
                 }
                 // Restore saved status filter, but fall back to "All" if it's a
                 // retired value (needs_attention / done / in_tally) no longer in the list.
@@ -12366,6 +12377,8 @@
             // Sprint 14 — reset bank ledger filter to "All banks"
             const blSel = document.getElementById('bank-filter-bank-ledger');
             if (blSel) blSel.value = '';
+            const stSel = document.getElementById('bank-filter-statement');
+            if (stSel) stSel.value = '';  // All statements
             document.getElementById('bank-filter-tally-status').value = '';  // All statuses
             document.getElementById('bank-filter-from').value = '';
             document.getElementById('bank-filter-to').value = '';
@@ -12418,6 +12431,38 @@
             } catch (e) { console.warn('loadBankLedgerOptions failed', e); }
         }
 
+        // Populate the "Statement" filter from the company's uploaded statements
+        // (newest first). force=true re-fetches after a new upload.
+        async function loadBankStatementFilter(force) {
+            const co = _getActiveCompanyForBank();
+            if (!co.company_name) return;
+            const key = co.company_id || co.company_name;
+            if (!force && window._bankStmtLoadedFor === key) return;
+            try {
+                const params = new URLSearchParams();
+                if (co.company_id)   params.set('company_id', co.company_id);
+                if (co.company_name) params.set('company_name', co.company_name);
+                const res = await fetch(`${API}/api/bank-statement-uploads?` + params.toString());
+                if (!res.ok) return;
+                const j = await res.json();
+                const sel = document.getElementById('bank-filter-statement');
+                if (!sel) return;
+                const cur = sel.value;
+                const ups = j.data || [];
+                const fmtD = (s) => { try { return new Date(s).toLocaleDateString('en-IN', {day:'2-digit', month:'short', year:'numeric'}); } catch(_) { return s || ''; } };
+                const opts = ['<option value="">All statements</option>'].concat(ups.map((u, i) => {
+                    const nm = (u.original_name || 'statement').replace(/"/g,'&quot;');
+                    const meta = [fmtD(u.uploaded_at), (u.line_count != null ? u.line_count + ' lines' : '')].filter(Boolean).join(' · ');
+                    const tag = i === 0 ? '  (latest)' : '';
+                    return `<option value="${u.id}">${nm} · ${meta}${tag}</option>`;
+                }));
+                sel.innerHTML = opts.join('');
+                // Restore selection only if that upload still exists.
+                if (cur && ups.some(u => String(u.id) === String(cur))) sel.value = cur;
+                window._bankStmtLoadedFor = key;
+            } catch (e) { console.warn('loadBankStatementFilter failed', e); }
+        }
+
         async function loadBankTransactions() {
             const co = _getActiveCompanyForBank();
             if (!co.company_name) {
@@ -12425,8 +12470,10 @@
                 return;
             }
             loadBankLedgerOptions();  // fire-and-forget; cached after first call
+            loadBankStatementFilter();  // populate the Statement dropdown (cached)
             _saveBankFilters();
             const bankLedger = document.getElementById('bank-filter-bank-ledger')?.value || '';
+            const statementId = document.getElementById('bank-filter-statement')?.value || '';
             const tallyStatus = document.getElementById('bank-filter-tally-status').value;
             const fromDate = document.getElementById('bank-filter-from').value;
             const toDate = document.getElementById('bank-filter-to').value;
@@ -12442,6 +12489,7 @@
             params.set('company_name', co.company_name);
             if (co.company_id) params.set('company_id', co.company_id);
             if (bankLedger) params.set('bank_ledger', bankLedger);
+            if (statementId) params.set('source_file_id', statementId);
             if (tallyStatus) params.set('tally_status', tallyStatus);
             if (fromDate) params.set('from_date', fromDate);
             if (toDate) params.set('to_date', toDate);

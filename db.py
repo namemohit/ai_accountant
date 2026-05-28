@@ -4269,7 +4269,7 @@ def link_bank_transactions(company_id):
 def list_bank_transactions(company_id=None, company_name=None, source=None, status=None,
                             from_date=None, to_date=None, q=None, view="per_source",
                             sort="date_desc", limit=500, offset=0, tally_status=None,
-                            bank_ledger=None):
+                            bank_ledger=None, source_file_id=None):
     """Return a filtered list of bank_transactions for the active company."""
     where = []
     params = []
@@ -4312,6 +4312,9 @@ def list_bank_transactions(company_id=None, company_name=None, source=None, stat
     # Sprint 14 — filter by bank / cash ledger
     if bank_ledger:
         where.append("bt.bank_ledger = %s"); params.append(bank_ledger)
+    # Filter to a single uploaded statement (source_file_id → bank_statement_uploads).
+    if source_file_id:
+        where.append("bt.source_file_id = %s"); params.append(source_file_id)
     if from_date:
         where.append("bt.date >= %s"); params.append(from_date)
     if to_date:
@@ -5865,13 +5868,24 @@ def bank_health_check(company_id, company_name):
     return out
 
 
-def list_statement_uploads(company_id):
+def list_statement_uploads(company_id, company_name=None):
+    """Uploaded statements newest-first. Matches by company_id when known, but falls
+    back to company_name so companies with a NULL company_id (e.g. unregistered/demo)
+    still see their uploads."""
     conn = get_conn()
     cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("""
-        SELECT * FROM bank_statement_uploads
-        WHERE company_id = %s ORDER BY uploaded_at DESC
-    """, (company_id,))
+    if company_id and company_name:
+        cur.execute("""SELECT * FROM bank_statement_uploads
+                       WHERE company_id = %s OR (company_id IS NULL AND company_name = %s)
+                       ORDER BY uploaded_at DESC""", (company_id, company_name))
+    elif company_id:
+        cur.execute("""SELECT * FROM bank_statement_uploads
+                       WHERE company_id = %s ORDER BY uploaded_at DESC""", (company_id,))
+    elif company_name:
+        cur.execute("""SELECT * FROM bank_statement_uploads
+                       WHERE company_name = %s ORDER BY uploaded_at DESC""", (company_name,))
+    else:
+        cur.close(); conn.close(); return []
     rows = cur.fetchall()
     cur.close()
     conn.close()
