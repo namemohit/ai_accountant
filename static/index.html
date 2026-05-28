@@ -870,7 +870,7 @@
                     <div class="chat-session-list" id="chat-session-list"></div>
                 </div>
                 <div class="chat-main">
-                    <button id="chat-back-to-list" onclick="_chatMobileList()" title="Back to chats">‹ Chats</button>
+                    <button id="chat-back-to-list" onclick="toggleMobileChatSidebar()" title="Show chats">☰ Chat</button>
                     <div class="chat-welcome" id="chat-welcome">
                         <div class="chat-welcome-content">
                             <div class="chat-welcome-icon">✦</div>
@@ -3255,6 +3255,11 @@
             try { localStorage.removeItem('activeAgent'); } catch(_) {}
             if (typeof _renderNav === 'function') _renderNav();
             showView('chat');
+            // Mobile only: clicking the Chat app lands on a FRESH composer (not the list
+            // or a stale conversation). startNewChat() also closes the drawer + shows
+            // welcome. Desktop is left exactly as-is (two-pane, last state preserved).
+            if (typeof _isMobileView === 'function' && _isMobileView()
+                && typeof startNewChat === 'function') startNewChat();
         }
         // Sprint 49 — load a remote (embedded) agent into the iframe host with SSO context.
         let _remoteLoadedKey = null;
@@ -5631,10 +5636,11 @@
 
             if (view === 'history') { showView('vouchers'); return; }
             if (view === 'chat') {
-                loadChatSessions();
-                // Mobile master/detail: entering Chat lands on the LIST (a specific
-                // conversation deep-link/selection flips to convo via loadChat).
-                _chatMobileList();
+                loadChatSessions();   // fills the drawer list
+                // Mobile: entering Chat lands on the COMPOSER pane (the list is now a
+                // left drawer behind the "☰ Chat" toggle). A deep-link/selection opens
+                // the conversation via loadChat. Inert on desktop (two-pane stays).
+                _chatMobileConvo();
             }
             if (view === 'training') { fetchTrainingStats(); fetchTallySummary(); }
             if (view === 'training-progress') { if (typeof loadTrainingProgress === 'function') loadTrainingProgress(); }
