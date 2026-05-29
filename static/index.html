@@ -1928,13 +1928,16 @@
                                 <tr style="color: #94a3b8; border-bottom: 2px solid var(--border); background: #1e293b;">
                                     <th style="padding: 10px; width: 40px; text-align: center; background: #1e293b;"><input type="checkbox" id="select-all-history" onchange="toggleSelectAllHistory(this)" style="cursor: pointer;"></th>
                                     <th style="padding: 10px; background: #1e293b;">Date <span class="vcol-chev" style="cursor:pointer; color:#64748b; margin-left:4px; font-size:0.7rem; user-select:none;" data-col="date" onclick="openVoucherColFilter('date', this, event)">▾</span></th>
+                                    <th style="padding: 10px; background: #1e293b;" title="When this voucher was imported from Tally / uploaded to YantrAI">Added <span class="vcol-chev" style="cursor:pointer; color:#64748b; margin-left:4px; font-size:0.7rem; user-select:none;" data-col="created_at" onclick="openVoucherColFilter('created_at', this, event)">▾</span></th>
                                     <th style="padding: 10px; background: #1e293b;">Voucher # <span class="vcol-chev" style="cursor:pointer; color:#64748b; margin-left:4px; font-size:0.7rem; user-select:none;" data-col="voucher_number" onclick="openVoucherColFilter('voucher_number', this, event)">▾</span></th>
                                     <th style="padding: 10px; background: #1e293b;">Type <span class="vcol-chev" style="cursor:pointer; color:#64748b; margin-left:4px; font-size:0.7rem; user-select:none;" data-col="voucher_type" onclick="openVoucherColFilter('voucher_type', this, event)">▾</span></th>
                                     <th style="padding: 10px; background: #1e293b;">Party / Ledger <span class="vcol-chev" style="cursor:pointer; color:#64748b; margin-left:4px; font-size:0.7rem; user-select:none;" data-col="party_name" onclick="openVoucherColFilter('party_name', this, event)">▾</span></th>
                                     <th style="padding: 10px; text-align: right; background: #1e293b;">Debit (₹) <span class="vcol-chev" style="cursor:pointer; color:#64748b; margin-left:4px; font-size:0.7rem; user-select:none;" data-col="debit" onclick="openVoucherColFilter('debit', this, event)">▾</span></th>
                                     <th style="padding: 10px; text-align: right; background: #1e293b;">Credit (₹) <span class="vcol-chev" style="cursor:pointer; color:#64748b; margin-left:4px; font-size:0.7rem; user-select:none;" data-col="credit" onclick="openVoucherColFilter('credit', this, event)">▾</span></th>
-                                    <th style="padding: 10px; background: #1e293b;">Source <span class="vcol-chev" style="cursor:pointer; color:#64748b; margin-left:4px; font-size:0.7rem; user-select:none;" data-col="source" onclick="openVoucherColFilter('source', this, event)">▾</span></th>
-                                    <th style="padding: 10px; background: #1e293b;">Status <span class="vcol-chev" style="cursor:pointer; color:#64748b; margin-left:4px; font-size:0.7rem; user-select:none;" data-col="status" onclick="openVoucherColFilter('status', this, event)">▾</span></th>
+                                    <th style="padding: 10px; background: #1e293b;" title="Where this voucher originated">Origin <span class="vcol-chev" style="cursor:pointer; color:#64748b; margin-left:4px; font-size:0.7rem; user-select:none;" data-col="source" onclick="openVoucherColFilter('source', this, event)">▾</span></th>
+                                    <th style="padding: 10px; background: #1e293b;" title="Link to the source document (uploaded file or printable voucher)">Document</th>
+                                    <th style="padding: 10px; background: #1e293b;" title="Tally sync state">Status <span class="vcol-chev" style="cursor:pointer; color:#64748b; margin-left:4px; font-size:0.7rem; user-select:none;" data-col="status" onclick="openVoucherColFilter('status', this, event)">▾</span></th>
+                                    <th style="padding: 10px; background: #1e293b;" title="AI-detected data-quality flags">AI Flags</th>
                                 </tr>
                             </thead>
                             <tbody id="vouchers-tbody"></tbody>
@@ -5970,13 +5973,19 @@
                     sourceDocHtml = `<span style="color: #64748b;">-</span>`;
                 }
 
+                // Origin badge — Tally (imported via Windows Agent) vs YantrAI (uploaded / manual)
+                const isTallyOrigin = v.source === 'tally';
+                const originHtml = isTallyOrigin
+                    ? `<span style="background: rgba(56,189,248,0.12); color: #38bdf8; padding: 3px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 600;">Tally</span>`
+                    : `<span style="background: rgba(218,119,86,0.12); color: var(--primary); padding: 3px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 600;">YantrAI</span>`;
+
                 // Status badge
                 const needsResync = !!v.needs_resync;
                 const isSynced = v.source === 'tally' || v.status === 'synced';
                 let badgeBg = isSynced ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)';
                 let badgeColor = isSynced ? '#10b981' : '#f59e0b';
-                let badgeText = isSynced ? 'Synced 🟢' : 'Pending 🟡';
-                if (needsResync) { badgeBg = 'rgba(245, 158, 11, 0.15)'; badgeColor = '#f59e0b'; badgeText = 'Edited – needs resync 🟠'; }
+                let badgeText = isSynced ? 'In Tally 🟢' : 'YantrAI only 🟡';
+                if (needsResync) { badgeBg = 'rgba(249, 115, 22, 0.15)'; badgeColor = '#f97316'; badgeText = 'Edited – resync 🟠'; }
 
                 // Sprint 37 — edit available on every voucher (tally + invoice/PDF/manual)
                 const canEdit = true;
@@ -6020,6 +6029,7 @@
                 tr.innerHTML = `
                     <td style="padding: 10px; text-align: center;">${expandIcon}<input type="checkbox" class="history-row-checkbox" data-inv-id="${v.id}" data-source="${v.source || 'invoice'}" data-vnum="${(v.voucher_number||'').replace(/"/g,'&quot;')}" onchange="updateSelectedCount()" style="cursor: pointer;"></td>
                     <td style="padding: 10px; color: #94a3b8;">${fmtDate(v.date)}</td>
+                    <td style="padding: 10px; color: #64748b; font-size: 0.78rem; white-space: nowrap;">${fmtDateTime(v.created_at)}</td>
                     <td style="padding: 10px; color: white; font-family: monospace; font-size: 0.8rem;">
                         <div style="display: flex; align-items: center; flex-wrap: wrap;">${v.invoice_number || v.voucher_number || '-'}${dupBadge}</div>
                     </td>
@@ -6027,8 +6037,10 @@
                     <td style="padding: 10px; color: white;">${v.party_name || v.ledger_name || '-'}</td>
                     <td style="padding: 10px; text-align: right; color: ${isDebit ? '#f87171' : '#64748b'}; font-family: monospace;">${isDebit ? '₹' + amount.toLocaleString('en-IN') : ''}</td>
                     <td style="padding: 10px; text-align: right; color: ${!isDebit ? '#4ade80' : '#64748b'}; font-family: monospace;">${!isDebit ? '₹' + amount.toLocaleString('en-IN') : ''}</td>
+                    <td style="padding: 10px;">${originHtml}</td>
                     <td style="padding: 10px;">${sourceDocHtml}</td>
-                    <td style="padding: 10px; white-space: nowrap;"><span style="background: ${badgeBg}; color: ${badgeColor}; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">${badgeText}</span>${aiChips}${editBtn}${resyncBtn}</td>
+                    <td style="padding: 10px; white-space: nowrap;"><span style="background: ${badgeBg}; color: ${badgeColor}; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">${badgeText}</span>${editBtn}${resyncBtn}</td>
+                    <td style="padding: 10px; white-space: nowrap;">${aiChips || '<span style="color:#475569;">–</span>'}</td>
                 `;
                 if (hasDetail) {
                     tr.style.cursor = 'pointer';
@@ -6052,7 +6064,7 @@
                     detailTr.style.display = 'none';
                     detailTr.style.background = 'rgba(56, 189, 248, 0.02)';
 
-                    let detailHtml = '<td colspan="9" style="padding: 8px 16px 12px 40px;">';
+                    let detailHtml = '<td colspan="12" style="padding: 8px 16px 12px 40px;">';
                     if (v.narration) {
                         detailHtml += `<div style="color: #94a3b8; font-size: 0.8rem; margin-bottom: 6px;"><strong style="color: #cbd5e1;">Narration:</strong> ${v.narration}</div>`;
                     }
@@ -6115,7 +6127,7 @@
                         </div>`;
                     }).join('');
 
-                    subTr.innerHTML = `<td colspan="9" style="padding: 16px;">
+                    subTr.innerHTML = `<td colspan="12" style="padding: 16px;">
                         <div style="color: #f59e0b; font-weight: 600; font-size: 0.85rem; margin-bottom: 10px; display: flex; align-items: center; gap: 8px;"><i class="fas fa-info-circle"></i> Duplicate Manager — keep primary, remove extras</div>
                         <div style="display: flex; gap: 12px; flex-wrap: wrap;">
                             <div style="background: rgba(56, 189, 248, 0.05); padding: 12px; border-radius: 6px; border: 1px solid rgba(56, 189, 248, 0.2); min-width: 220px; flex: 1;">
@@ -6233,7 +6245,13 @@
         function _vRowParty(v)  { return v.party_name || ''; }
         function _vRowNumber(v) { return v.voucher_number || v.invoice_number || ''; }
         function _vRowSource(v) { return v.source || (v.tally_master_id ? 'tally' : ''); }
-        function _vRowStatus(v) { return v.reconciled ? 'Synced' : 'Pending'; }
+        // Origin label for the Origin column filter (matches the row badge).
+        function _vRowOrigin(v) { return _vRowSource(v) === 'tally' ? 'Tally' : 'YantrAI'; }
+        // Status label — mirrors the displayed badge logic (not just `reconciled`).
+        function _vRowStatus(v) {
+            if (v.needs_resync) return 'Edited – resync';
+            return (v.source === 'tally' || v.status === 'synced' || v.reconciled) ? 'In Tally' : 'YantrAI only';
+        }
         function _vRowDate(v)   { return (v.date || '').substring(0, 10); }   // YYYY-MM-DD
         // Debit/Credit columns: Purchase+Payment hit Debit; Sales+Receipt hit Credit.
         function _vRowDebit(v)  { return ['Purchase','Payment'].includes(_vRowType(v)) ? _vRowAmount(v) : 0; }
@@ -6267,10 +6285,11 @@
             const cf = f.columnFilters || {};
             const colVal = {
                 date:           () => _vRowDate(v).substring(0,7),   // YYYY-MM bucket
+                created_at:     () => String(v.created_at || '').substring(0,10),  // YYYY-MM-DD bucket
                 voucher_number: () => _vRowNumber(v),
                 voucher_type:   () => _vRowType(v),
                 party_name:     () => _vRowParty(v),
-                source:         () => _vRowSource(v),
+                source:         () => _vRowOrigin(v),
                 status:         () => _vRowStatus(v),
                 debit:          () => _vRowDebit(v),
                 credit:         () => _vRowCredit(v),
@@ -6299,6 +6318,7 @@
                 if (f.columnFilters[col]?.sort) { colSort = f.columnFilters[col].sort; colSortCol = col; break; }
             }
             const cmpDate   = (a,b) => _vRowDate(a).localeCompare(_vRowDate(b));
+            const cmpCreated = (a,b) => String(a.created_at||'').localeCompare(String(b.created_at||''));
             const cmpAmount = (a,b) => _vRowAmount(a) - _vRowAmount(b);
             const cmpNumber = (a,b) => _vRowNumber(a).localeCompare(_vRowNumber(b), undefined, {numeric:true});
             const cmpParty  = (a,b) => _vRowParty(a).localeCompare(_vRowParty(b));
@@ -6311,7 +6331,7 @@
             let cmp = null, reverse = false;
             if (colSort && colSortCol) {
                 const pick = {
-                    date: cmpDate, voucher_number: cmpNumber, voucher_type: cmpType,
+                    date: cmpDate, created_at: cmpCreated, voucher_number: cmpNumber, voucher_type: cmpType,
                     party_name: cmpParty, debit: cmpDebit, credit: cmpCredit,
                     source: cmpSource, status: cmpStatus
                 };
@@ -6349,10 +6369,11 @@
             f.columnFilters[colKey] = tmpCol; // restore
             const getter = {
                 date:           v => _vRowDate(v).substring(0,7) || '(blank)',
+                created_at:     v => String(v.created_at || '').substring(0,10) || '(blank)',
                 voucher_number: v => _vRowNumber(v) || '(blank)',
                 voucher_type:   v => _vRowType(v) || '(blank)',
                 party_name:     v => _vRowParty(v) || '(blank)',
-                source:         v => _vRowSource(v) || '(blank)',
+                source:         v => _vRowOrigin(v),
                 status:         v => _vRowStatus(v),
                 debit:          v => _vRowDebit(v).toFixed(2),
                 credit:         v => _vRowCredit(v).toFixed(2),
@@ -11921,6 +11942,19 @@
             return s;
         }
         window.fmtDate = fmtDate;
+
+        // Compact date + time for the Vouchers "Added" column. Postgres timestamps
+        // come back as "YYYY-MM-DD HH:MM:SS(.ffffff)" (UTC) — render in local time.
+        function fmtDateTime(raw) {
+            if (!raw) return '–';
+            const s = String(raw).trim();
+            let iso = s.includes('T') ? s : s.replace(' ', 'T');
+            if (!/[zZ]|[+\-]\d{2}:?\d{2}$/.test(iso)) iso += 'Z';
+            const d = new Date(iso);
+            if (isNaN(d.getTime())) return fmtDate(s);
+            return d.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: '2-digit', hour: '2-digit', minute: '2-digit' });
+        }
+        window.fmtDateTime = fmtDateTime;
 
         async function loadGstrDashboard() {
             const company = _gstrCompany();

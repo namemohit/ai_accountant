@@ -3381,7 +3381,7 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                taxable_value, cgst_amount, sgst_amount, igst_amount,
                tally_master_id, instrument_number, reconciled,
                COALESCE(needs_resync, FALSE) AS needs_resync, last_edited_at,
-               'tally' AS source, updated_at
+               'tally' AS source, updated_at, created_at
         FROM tally_vouchers
         WHERE {' AND '.join(tally_where)}
         ORDER BY date DESC
@@ -3405,6 +3405,7 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
         # Normalize date to string
         if r.get('date'):
             r['date'] = str(r['date'])
+        r['created_at'] = str(r['created_at']) if r.get('created_at') else None
         results.append(r)
 
     # --- Invoice-created vouchers (from invoices table) ---
@@ -3436,7 +3437,7 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                0 AS taxable_value, 0 AS cgst_amount, 0 AS sgst_amount, 0 AS igst_amount,
                NULL AS tally_master_id, '' AS instrument_number, FALSE AS reconciled,
                FALSE AS needs_resync, NULL AS last_edited_at,
-               'invoice' AS source, i.created_at AS updated_at,
+               'invoice' AS source, i.created_at AS updated_at, i.created_at AS created_at,
                i.file_url,
                CASE
                  WHEN ob.pushed_state THEN 'synced'
@@ -3460,6 +3461,7 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
     for r in inv_rows:
         if r.get('date'):
             r['date'] = str(r['date'])
+        r['created_at'] = str(r['created_at']) if r.get('created_at') else None
         r['ledger_entries'] = []
         r['cost_centres'] = []
         r['bill_refs'] = []
