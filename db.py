@@ -691,6 +691,26 @@ def init_db():
     )
     """)
 
+    # First-hand, verbatim Tally XML per record (vouchers/ledgers/groups/stock items).
+    # The structured tally_* tables are a curated/parsed view; this keeps the ORIGINAL
+    # so future training can re-parse fields we don't extract today. Plain text (Tally
+    # XML is small — a ~3k-voucher company is only a few MB). Upsert by dedupe_key.
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS tally_raw (
+        id UUID PRIMARY KEY,
+        company_name TEXT NOT NULL,
+        company_id UUID,
+        entity_type TEXT NOT NULL,      -- 'voucher' | 'ledger' | 'group' | 'stock_item'
+        dedupe_key TEXT NOT NULL,       -- Tally GUID, else voucher number / name
+        tally_guid TEXT,
+        alter_id BIGINT,                -- Tally change counter (version), when available
+        raw_xml TEXT,                   -- verbatim Tally XML element
+        captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (company_name, entity_type, dedupe_key)
+    )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tally_raw_company ON tally_raw(company_name, entity_type)")
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS tally_sync_log (
         id UUID PRIMARY KEY,
@@ -7638,6 +7658,58 @@ def save_tally_groups(company_name, groups):
         cursor.close()
         conn.close()
     return count
+
+
+def save_tally_raw(company_name, records, entity_type, company_id=None):
+    """Preserve the VERBATIM Tally XML per record into tally_raw (first-hand data for
+    future training). Each record may carry a 'raw_xml' field (the full Tally element);
+    records without it are skipped — so this is a harmless no-op for older agents that
+    don't send raw. Upsert by dedupe_key (GUID, else voucher number / name). Returns count."""
+    if not records:
+        return 0
+    rows = []
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        raw = r.get("raw_xml")
+        if not raw:
+            continue
+        guid = r.get("guid") or r.get("tally_master_id")
+        key = guid or r.get("number") or r.get("voucher_number") or r.get("name")
+        if not key:
+            continue
+        try:
+            alter = int(r.get("alterid") or r.get("alter_id") or 0) or None
+        except (TypeError, ValueError):
+            alter = None
+        rows.append((str(uuid.uuid4()), company_name,
+                     str(company_id) if company_id else None,
+                     entity_type, str(key), guid, alter, raw))
+    if not rows:
+        return 0
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.executemany("""
+            INSERT INTO tally_raw
+                (id, company_name, company_id, entity_type, dedupe_key, tally_guid, alter_id, raw_xml, captured_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
+            ON CONFLICT (company_name, entity_type, dedupe_key) DO UPDATE SET
+                raw_xml = EXCLUDED.raw_xml,
+                alter_id = EXCLUDED.alter_id,
+                tally_guid = EXCLUDED.tally_guid,
+                company_id = COALESCE(EXCLUDED.company_id, tally_raw.company_id),
+                captured_at = CURRENT_TIMESTAMP
+        """, rows)
+        conn.commit()
+        return len(rows)
+    except Exception as e:
+        print(f"[save_tally_raw] {e}")
+        conn.rollback()
+        return 0
+    finally:
+        cursor.close()
+        conn.close()
 
 
 def log_tally_sync(company_name, sync_type, records_in, records_upserted, status, error_message=None):

@@ -6101,6 +6101,17 @@ async def ingest_tally_data(payload: dict):
             group_count = await _loop.run_in_executor(None, db.save_tally_groups, tally_company, groups)
             stock_count = await _loop.run_in_executor(None, db.save_tally_stock_items, tally_company, stock_items)
             print(f"[SEED BASELINE] Upserted: {v_result.get('upserted',0)} vouchers, {ledger_count} ledgers, {group_count} groups, {stock_count} stock items.")
+            # Preserve verbatim Tally XML (first-hand data for future training). No-op for
+            # older agents that don't send raw_xml — fully backward-compatible.
+            try:
+                raw_v = await _loop.run_in_executor(None, db.save_tally_raw, tally_company, vouchers, 'voucher', company_id)
+                raw_l = await _loop.run_in_executor(None, db.save_tally_raw, tally_company, rich_ledgers, 'ledger', company_id)
+                raw_g = await _loop.run_in_executor(None, db.save_tally_raw, tally_company, groups, 'group', company_id)
+                raw_s = await _loop.run_in_executor(None, db.save_tally_raw, tally_company, stock_items, 'stock_item', company_id)
+                if (raw_v + raw_l + raw_g + raw_s) > 0:
+                    print(f"[SEED BASELINE] Stored raw XML: {raw_v} vouchers, {raw_l} ledgers, {raw_g} groups, {raw_s} stock items.")
+            except Exception as _raw_err:
+                print(f"[SEED BASELINE] raw-XML store warning: {_raw_err}")
             await _loop.run_in_executor(None, db.log_tally_sync, tally_company,
                               'incremental' if not _do_full else 'baseline',
                               len(vouchers)+len(rich_ledgers)+len(groups)+len(stock_items),

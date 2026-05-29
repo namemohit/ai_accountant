@@ -251,9 +251,9 @@ def fetch_rich_ledgers(tally_url):
             {"name": "IGST Output", "parent": "Duties & Taxes", "closing_balance": "-35000.00"}
         ]
     # Parse each ledger block with all available fields
-    ledger_blocks = re.findall(r'<LEDGER NAME="([^"]*)"[^>]*>(.*?)</LEDGER>', res, re.DOTALL)
     results = []
-    for name, block in ledger_blocks:
+    for _lm in re.finditer(r'<LEDGER NAME="([^"]*)"[^>]*>(.*?)</LEDGER>', res, re.DOTALL):
+        name, block = _lm.group(1), _lm.group(2)
         def extract(tag, blk=block):
             m = re.search(rf'<{tag}[^>]*>(.*?)</{tag}>', blk, re.DOTALL | re.IGNORECASE)
             return _clean(m.group(1)) if m else ""
@@ -274,7 +274,8 @@ def fetch_rich_ledgers(tally_url):
             "mobile": extract("LEDGERMOBILE"),
             "credit_period": extract("CREDITPERIOD"),
         }
-        # Only include non-empty extras
+        ledger["raw_xml"] = _lm.group(0)   # verbatim Tally ledger XML (first-hand data)
+        # Only include non-empty extras (raw_xml is always present)
         results.append({k: v for k, v in ledger.items() if v})
     return results if results else [{"name": "Cash", "parent": "Cash-in-Hand", "closing_balance": "50000.00"}]
 
@@ -290,9 +291,9 @@ def fetch_groups(tally_url):
             {"name": "Purchase Accounts", "parent": "Cost of Goods Sold"},
             {"name": "Duties & Taxes", "parent": "Current Liabilities"},
         ]
-    group_blocks = re.findall(r'<GROUP NAME="([^"]*)"[^>]*>(.*?)</GROUP>', res, re.DOTALL)
     groups = []
-    for name, block in group_blocks:
+    for _gm in re.finditer(r'<GROUP NAME="([^"]*)"[^>]*>(.*?)</GROUP>', res, re.DOTALL):
+        name, block = _gm.group(1), _gm.group(2)
         def gext(tag, blk=block):
             m = re.search(rf'<{tag}[^>]*>(.*?)</{tag}>', blk, re.DOTALL | re.IGNORECASE)
             return _clean(m.group(1)) if m else ""
@@ -305,6 +306,7 @@ def fetch_groups(tally_url):
             "is_revenue": is_rev,
             "is_deemedpositive": is_dp,
             "is_subledger": is_sub,
+            "raw_xml": _gm.group(0),   # verbatim Tally group XML (first-hand data)
         })
     return groups
 
@@ -349,9 +351,9 @@ def fetch_vouchers(tally_url, from_date="20000401", to_date=None, since_alter_id
             {"date": "20260505", "type": "Sales", "party": "Cash", "number": "INV-2026-002", "amount": 15000.00, "narration": "Counter sale"}
         ]
     # Parse voucher XML with regex for robustness (Tally XML is not always well-formed)
-    voucher_blocks = re.findall(r'<VOUCHER[^>]*>(.*?)</VOUCHER>', res, re.DOTALL)
     vouchers = []
-    for vblock in voucher_blocks:
+    for _vm in re.finditer(r'<VOUCHER[^>]*>(.*?)</VOUCHER>', res, re.DOTALL):
+        vblock = _vm.group(1)
         def vext(tag, blk=vblock):
             m = re.search(rf'<{tag}[^>]*>(.*?)</{tag}>', blk, re.DOTALL | re.IGNORECASE)
             return _clean(m.group(1)) if m else ""
@@ -473,6 +475,7 @@ def fetch_vouchers(tally_url, from_date="20000401", to_date=None, since_alter_id
             voucher["place_of_supply"] = place_of_supply
         if ledger_entries:
             voucher["ledger_entries"] = ledger_entries
+        voucher["raw_xml"] = _vm.group(0)   # verbatim Tally voucher XML (first-hand data)
         vouchers.append(voucher)
     return vouchers
 
@@ -484,9 +487,9 @@ def fetch_stock_items(tally_url):
     res = query_local_tally(tally_url, xml, timeout=45.0)
     if not res:
         return []
-    item_blocks = re.findall(r'<STOCKITEM NAME="([^"]*)"[^>]*>(.*?)</STOCKITEM>', res, re.DOTALL)
     items = []
-    for name, block in item_blocks:
+    for _sm in re.finditer(r'<STOCKITEM NAME="([^"]*)"[^>]*>(.*?)</STOCKITEM>', res, re.DOTALL):
+        name, block = _sm.group(1), _sm.group(2)
         def sext(tag, blk=block):
             m = re.search(rf'<{tag}[^>]*>(.*?)</{tag}>', blk, re.DOTALL | re.IGNORECASE)
             return _clean(m.group(1)) if m else ""
@@ -508,6 +511,7 @@ def fetch_stock_items(tally_url):
         }
         # Drop empty extras but always keep name
         item = {k: v for k, v in item.items() if v or k == "name"}
+        item["raw_xml"] = _sm.group(0)   # verbatim Tally stock-item XML (first-hand data)
         items.append(item)
     return items
 
@@ -714,7 +718,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.6.0"   # + incremental download: AlterId watermark on baseline pull
+AGENT_VERSION = "0.7.0"   # + capture verbatim Tally XML per record (raw_xml) for first-hand data
 
 
 def _post_json(url, body, timeout=15.0):
