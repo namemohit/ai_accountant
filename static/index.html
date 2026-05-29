@@ -9631,6 +9631,7 @@
                 const discIdx = headers.findIndex(h => h.toLowerCase().includes('discount'));
                 const cgstIdx = headers.findIndex(h => h.toLowerCase().includes('cgst'));
                 const sgstIdx = headers.findIndex(h => h.toLowerCase().includes('sgst'));
+                const igstIdx = headers.findIndex(h => h.toLowerCase().includes('igst'));
 
                 let cleanHeaders = headers.map(h => {
                     if (h.toLowerCase().includes('cgst')) return 'CGST';
@@ -9656,9 +9657,12 @@
                     // Pre-calculate taxes for rendering the true total including tax
                     const cgstPercent = cgstIdx !== -1 ? parseFloat(String(row[cgstIdx]).replace(/[^0-9.]/g, '')) || 0 : 0;
                     const sgstPercent = sgstIdx !== -1 ? parseFloat(String(row[sgstIdx]).replace(/[^0-9.]/g, '')) || 0 : 0;
+                    const igstPercent = igstIdx !== -1 ? parseFloat(String(row[igstIdx]).replace(/[^0-9.]/g, '')) || 0 : 0;
                     const cgstAmt = taxableVal * cgstPercent / 100;
                     const sgstAmt = taxableVal * sgstPercent / 100;
-                    const rowTotalWithTax = (taxableVal + cgstAmt + sgstAmt).toFixed(2);
+                    const igstAmt = taxableVal * igstPercent / 100;
+                    // Include IGST so inter-state line totals are correct (was dropping IGST).
+                    const rowTotalWithTax = (taxableVal + cgstAmt + sgstAmt + igstAmt).toFixed(2);
 
                     row.forEach((cell, cellIndex) => {
                         let displayVal = String(cell);
@@ -10531,6 +10535,9 @@
                 const cgstAmount = _num('data-cgst-amount');
                 const sgstAmount = _num('data-sgst-amount');
                 const igstAmount = _num('data-igst-amount');
+                // Gross = taxable + all GST. The summed line-totals (totalAmount) drop IGST
+                // for inter-state invoices, so prefer the breakdown-derived gross when present.
+                const grossTotal = taxableValue + cgstAmount + sgstAmount + igstAmount;
                 // Send complete payload to Tally and save to DB history
                 const payload = {
                     party_name: partyName,
@@ -10539,7 +10546,7 @@
                     billed_to_party_gstin: billedToPartyGSTIN,
                     invoice_number: invoiceNumber,
                     date: dateVal,
-                    total_amount: totalAmount,
+                    total_amount: grossTotal > 0 ? grossTotal : totalAmount,
                     taxable_value: taxableValue,
                     cgst_amount: cgstAmount,
                     sgst_amount: sgstAmount,

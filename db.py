@@ -99,6 +99,11 @@ def init_db():
         cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS billing_party_gstin TEXT")
         cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS billed_to_party_gstin TEXT")
         cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS voucher_type TEXT")  # Sprint 35
+        # GST breakdown — makes invoice totals self-verifying (total = taxable + cgst + sgst + igst)
+        cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS taxable_value REAL")
+        cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS cgst_amount REAL")
+        cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sgst_amount REAL")
+        cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS igst_amount REAL")
     except:
         pass
     
@@ -3287,10 +3292,25 @@ def get_shared_transcript(token):
 def save_invoice(data):
     conn = get_conn()
     cursor = conn.cursor()
-    
+
     company_name = data.get('company_name')
     invoice_number = data.get('invoice_number')
-    
+
+    # ── Total integrity guard ─────────────────────────────────────────────────
+    # The headline total must be the GROSS (taxable + all GST). A client that sums
+    # only line totals drops IGST for inter-state invoices (e.g. 249730 instead of
+    # 262217). When a breakdown is present and the supplied total is short, trust
+    # the computed gross. (₹1 tolerance absorbs rounding.)
+    def _f(k):
+        try: return float(data.get(k) or 0)
+        except (TypeError, ValueError): return 0.0
+    taxable = _f('taxable_value'); cgst = _f('cgst_amount')
+    sgst = _f('sgst_amount');      igst = _f('igst_amount')
+    gross = round(taxable + cgst + sgst + igst, 2)
+    total = _f('total_amount')
+    if gross > 0 and total + 1.0 < gross:
+        data = {**data, 'total_amount': gross, 'gst_amount': round(cgst + sgst + igst, 2)}
+
     # Check if invoice already exists
     cursor.execute("SELECT id FROM invoices WHERE invoice_number = %s AND company_name = %s", (invoice_number, company_name))
     existing = cursor.fetchone()
@@ -3304,22 +3324,25 @@ def save_invoice(data):
         UPDATE invoices
         SET date = %s, party_name = %s, total_amount = %s, discount_amount = %s, gst_amount = %s,
             category = %s, file_url = %s, billing_party_name = %s, billing_party_gstin = %s, billed_to_party_gstin = %s,
-            voucher_type = %s, created_at = CURRENT_TIMESTAMP
+            voucher_type = %s, taxable_value = %s, cgst_amount = %s, sgst_amount = %s, igst_amount = %s,
+            created_at = CURRENT_TIMESTAMP
         WHERE id = %s
         """, (data.get('date'), data.get('party_name'), data.get('total_amount'), data.get('discount_amount', 0), data.get('gst_amount', 0),
               data.get('category'), data.get('file_url'), data.get('billing_party_name'), data.get('billing_party_gstin'), data.get('billed_to_party_gstin'),
               data.get('voucher_type') or data.get('category'),
+              taxable, cgst, sgst, igst,
               inv_id))
     else:
         inv_id = str(uuid.uuid4())
         # Insert new invoice
         cursor.execute("""
-        INSERT INTO invoices (id, invoice_number, date, party_name, total_amount, discount_amount, gst_amount, category, company_name, file_url, billing_party_name, billing_party_gstin, billed_to_party_gstin, voucher_type)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO invoices (id, invoice_number, date, party_name, total_amount, discount_amount, gst_amount, category, company_name, file_url, billing_party_name, billing_party_gstin, billed_to_party_gstin, voucher_type, taxable_value, cgst_amount, sgst_amount, igst_amount)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (inv_id, invoice_number, data.get('date'), data.get('party_name'),
               data.get('total_amount'), data.get('discount_amount', 0), data.get('gst_amount', 0), data.get('category'), company_name, data.get('file_url'),
               data.get('billing_party_name'), data.get('billing_party_gstin'), data.get('billed_to_party_gstin'),
-              data.get('voucher_type') or data.get('category')))
+              data.get('voucher_type') or data.get('category'),
+              taxable, cgst, sgst, igst))
     
     # Save Items
     if 'items' in data:
@@ -3434,7 +3457,8 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                '[]' AS ledger_entries, '' AS reference_no,
                '' AS place_of_supply, 'INR' AS currency,
                '[]' AS cost_centres, '[]' AS bill_refs,
-               0 AS taxable_value, 0 AS cgst_amount, 0 AS sgst_amount, 0 AS igst_amount,
+               COALESCE(i.taxable_value,0) AS taxable_value, COALESCE(i.cgst_amount,0) AS cgst_amount,
+               COALESCE(i.sgst_amount,0) AS sgst_amount, COALESCE(i.igst_amount,0) AS igst_amount,
                NULL AS tally_master_id, '' AS instrument_number, FALSE AS reconciled,
                FALSE AS needs_resync, NULL AS last_edited_at,
                'invoice' AS source, i.created_at AS updated_at, i.created_at AS created_at,
