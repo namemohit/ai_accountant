@@ -9952,28 +9952,33 @@
             const discountIndex = headers.findIndex(h => h.toLowerCase().includes('discount'));
             const cgstIndex = headers.findIndex(h => h.toLowerCase().includes('cgst'));
             const sgstIndex = headers.findIndex(h => h.toLowerCase().includes('sgst'));
+            const igstIndex = headers.findIndex(h => h.toLowerCase().includes('igst'));
             const totalIndex = headers.findIndex(h => h.toLowerCase().includes('total') || h.toLowerCase().includes('amount') || h.toLowerCase().includes('total (₹)'));
-            
+
             let calculatedTotal = 0;
             let calculatedTax = 0;
-            
+
             table.querySelectorAll('tbody tr').forEach(tr => {
                 const tds = Array.from(tr.querySelectorAll('td')).slice(0, -1);
                 if (tds.length === 0) return;
-                
+
                 const qtyVal = parseFloat(tds[qtyIndex].textContent.trim().replace(/[^0-9.]/g, '')) || 0;
                 const rateVal = parseFloat(tds[rateIndex].textContent.trim().replace(/[^0-9.]/g, '')) || 0;
                 const discountVal = discountIndex !== -1 ? parseFloat(tds[discountIndex].textContent.trim().replace(/[^0-9.]/g, '')) || 0 : 0;
                 const taxableVal = qtyVal * rateVal * (1 - discountVal / 100);
-                
+
                 const cgstPercent = cgstIndex !== -1 ? window.parseTaxRate(tds[cgstIndex].textContent.trim()) : 0;
                 const sgstPercent = sgstIndex !== -1 ? window.parseTaxRate(tds[sgstIndex].textContent.trim()) : 0;
-                
+                // Inter-state invoices carry IGST instead of CGST/SGST — include it or the
+                // calculated total falls short by the IGST amount (false "discrepancy").
+                const igstPercent = igstIndex !== -1 ? window.parseTaxRate(tds[igstIndex].textContent.trim()) : 0;
+
                 const cgstAmt = taxableVal * cgstPercent / 100;
                 const sgstAmt = taxableVal * sgstPercent / 100;
-                
-                calculatedTax += (cgstAmt + sgstAmt);
-                calculatedTotal += (taxableVal + cgstAmt + sgstAmt);
+                const igstAmt = taxableVal * igstPercent / 100;
+
+                calculatedTax += (cgstAmt + sgstAmt + igstAmt);
+                calculatedTotal += (taxableVal + cgstAmt + sgstAmt + igstAmt);
             });
             
             calculatedTotal = parseFloat(calculatedTotal.toFixed(2));
@@ -10001,8 +10006,9 @@
                                 const tds = Array.from(tr.querySelectorAll('td')).slice(0, -1);
                                 const c = tds[cgstIndex] ? window.parseTaxRate(tds[cgstIndex].textContent.trim()) : 0;
                                 const s = sgstIndex !== -1 && tds[sgstIndex] ? window.parseTaxRate(tds[sgstIndex].textContent.trim()) : 0;
+                                const ig = igstIndex !== -1 && tds[igstIndex] ? window.parseTaxRate(tds[igstIndex].textContent.trim()) : 0;
                                 const hsn = tds[hsnIdx] ? (tds[hsnIdx].textContent.trim() || '') : '';
-                                return (c === 0 && s === 0) && hsn && hsn.replace(/[^0-9]/g,'').length >= 2;
+                                return (c === 0 && s === 0 && ig === 0) && hsn && hsn.replace(/[^0-9]/g,'').length >= 2;
                             });
                             if (hasZeroTax) {
                                 autoFillBtn = ` <button onclick="autoFillGSTFromHSN('${tableId}')" style="margin-left:10px; background:rgba(56,189,248,0.18); color:#38bdf8; border:1px solid rgba(56,189,248,0.4); padding:4px 10px; border-radius:4px; font-size:0.78rem; font-weight:600; cursor:pointer;">🤖 Auto-fill GST from HSN</button>`;
