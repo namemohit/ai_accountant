@@ -63,6 +63,7 @@ class InvoiceParser:
            - Discount (%) or Amount (if present, else 0)
            - CGST (%) (specific percentage if mentioned for this line item, else 0)
            - SGST (%) (specific percentage if mentioned for this line item, else 0)
+           - IGST (%) (inter-state rate if mentioned for this line item, else 0; a line is EITHER CGST+SGST OR IGST, never both)
            - HSN/SAC Code (if present on the invoice rows, else empty string)
            - Line Item Total Amount
         
@@ -107,6 +108,7 @@ class InvoiceParser:
                     "discount": number,
                     "cgst_rate": number,
                     "sgst_rate": number,
+                    "igst_rate": number,
                     "hsn_sac": "string",
                     "amount": number
                 }}

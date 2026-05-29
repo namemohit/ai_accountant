@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "207"
+APP_VERSION = "208"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -1271,7 +1271,8 @@ async def chat_with_tally(
     file: UploadFile = File(None),
     company_name: str = Form(None),
     txn_type: str = Form(None),
-    username: str = Form(None)
+    username: str = Form(None),
+    background_tasks: BackgroundTasks = None,
 ):
     _ensure_tokens(username, company_name)   # Sprint 47 — block if workspace out of tokens (raises 402)
     try:
@@ -1576,7 +1577,11 @@ If on second thought this is actually just a regular accounting question (NOT a 
                "counter_ledger": "The DEBIT-side head, and it must NEVER equal payment_mode. For Payment: the party/expense being settled (e.g. the Sundry Creditor 'Aadinath Proteins', or an expense like 'Wages'/'Rent') — NOT Cash/Bank. For Receipt: the party/income being received against (e.g. the Sundry Debtor, or 'Sales'/'Interest Income') — NOT Cash/Bank. For Sales: 'Sales Account'. For Purchase: 'Purchase Account'. If unsure, set it to the party name.",
                "payment_mode": "For Payment/Receipt ONLY: the Cash/Bank ledger the money moved through — 'Cash' or the exact Bank ledger name. This is the OTHER leg from counter_ledger; they must differ. Empty for Sales/Purchase/Journal/Contra.",
                "invoice_total": "Total amount as a numeric decimal/float (e.g. 990.00)",
-               "invoice_gst": "Total GST amount (CGST+SGST or IGST) as a numeric decimal/float; 0 for non-GST Payment/Receipt/Contra/Journal"
+               "taxable_value": "Subtotal = sum of line taxable amounts BEFORE tax, numeric; 0 if not a GST invoice",
+               "cgst_amount": "Total CGST amount, numeric (0 on inter-state/IGST invoices)",
+               "sgst_amount": "Total SGST amount, numeric (0 on inter-state/IGST invoices)",
+               "igst_amount": "Total IGST amount, numeric (0 on intra-state CGST/SGST invoices). A domestic GST invoice is EITHER CGST+SGST (intra-state: both GSTINs share the first 2 digits / state code) OR IGST (inter-state: different state codes) — NEVER both.",
+               "invoice_gst": "Total GST = cgst_amount + sgst_amount + igst_amount, numeric; 0 for non-GST Payment/Receipt/Contra/Journal"
              }},
              "party_master": {{
                "billing_party": {{
@@ -1602,16 +1607,17 @@ If on second thought this is actually just a regular accounting question (NOT a 
                  "phone": "Client Phone if listed, else empty"
                }}
              }},
-             "headers": ["Item Description", "Qty", "Rate (₹)", "Discount (%)", "CGST (%)", "SGST (%)", "HSN/SAC Code", "Total (₹)"],
+             "headers": ["Item Description", "Qty", "Rate (₹)", "Discount (%)", "CGST (%)", "SGST (%)", "IGST (%)", "HSN/SAC Code", "Total (₹)"],
              "rows": [
-               ["Optical Frames Type A", 300, "50.00", "0.00", "9.00", "9.00", "9003", "17700.00"]
+               ["Optical Frames Type A", 300, "50.00", "0.00", "9.00", "9.00", "0.00", "9003", "17700.00"]
              ],
              "warnings": ["Aadinath is in Sundry Creditors group — Sales voucher to a creditor is unusual.", "Inter-state IGST applied based on GSTIN state codes. Confirm if correct.", "Invoice # auto-generated as SAL-2026-145 because none was supplied."]
            }}
            NOTE on "warnings": include this array ONLY when you actually have concerns. Each item is a short, plain-English heads-up the user should see before they click Confirm & Sync. Omit the key entirely if everything looks clean.
-           Ensure "rows" is a list of flat lists (NOT objects) containing exactly the 8 values corresponding to the 8 headers above. All numbers in rows must be formatted as strings.
+           Ensure "rows" is a list of flat lists (NOT objects) containing exactly the 9 values corresponding to the 9 headers above. All numbers in rows must be formatted as strings.
+           CRITICAL — intra vs inter-state GST: a domestic GST invoice is EITHER intra-state (use CGST% + SGST%, set IGST% = 0) OR inter-state (use IGST%, set CGST% = 0 and SGST% = 0). NEVER fill both. Decide by comparing the first two digits (state code) of the two GSTINs: same code = CGST+SGST, different = IGST.
            IMPORTANT: The "Total (₹)" column MUST be the final total for that row INCLUDING all taxes (CGST/SGST/IGST) and minus any discounts! (e.g. qty * rate + taxes).
-           IMPORTANT: You MUST also extract additional charges like 'Freight', 'Packing & Forwarding', 'Transport', or 'Round Off' as separate individual items in the rows list. For example, if the invoice mentions 'Freight/Packing & Forwarding 100' with 2.5% CGST and SGST, you MUST add a row like ["Freight/Packing & Forwarding", "1", "100.00", "0.00", "2.5", "2.5", "9965", "105.00"].
+           IMPORTANT: You MUST also extract additional charges like 'Freight', 'Packing & Forwarding', 'Transport', or 'Round Off' as separate individual items in the rows list. For example, if the invoice mentions 'Freight/Packing & Forwarding 100' with 2.5% CGST and SGST, you MUST add a row like ["Freight/Packing & Forwarding", "1", "100.00", "0.00", "2.5", "2.5", "0.00", "9965", "105.00"].
            CRITICAL TAX RULE: Apply GST (CGST/SGST/IGST) to transport/freight/packing charges. If the tax rate is explicitly drawn for transport next to its row, use that rate. If no tax rate is explicitly drawn next to the transport row but it is included in the invoice's final GST totals or GST calculations (composite supply), you MUST inherit and apply the same principal tax rate of the main items (e.g. 2.5% CGST/SGST) to the transport row rather than setting it to 0%. Only set the tax rate to 0% if the invoice explicitly states the transport/freight is tax-exempt or not subject to GST.
         2. If ui_type is "cards":
            ui_data MUST be a list of card objects:
@@ -1665,40 +1671,31 @@ If on second thought this is actually just a regular accounting question (NOT a 
                 print(f"Reconciliation processing error: {re_err}")
                 ai_response["ui_data"] = []
 
-        # Autonomous Party Master processing
+        # Autonomous Party Master processing — these are pure DB writes that don't
+        # affect the reply, so run them OFF the response path (background) to shave
+        # latency off the chat turn. Falls back to inline if no background_tasks.
         try:
             ui_data = ai_response.get("ui_data")
             if isinstance(ui_data, dict) and "party_master" in ui_data:
                 pm = ui_data.get("party_master")
                 if pm:
-                    bp = pm.get("billing_party")
-                    if bp and bp.get("name"):
-                        db.save_or_update_party(
-                            company_name=company_name,
-                            name=bp.get("name"),
-                            gstin=bp.get("gstin"),
-                            address=bp.get("address"),
-                            bank_name=bp.get("bank_name"),
-                            account_number=bp.get("account_number"),
-                            ifsc_code=bp.get("ifsc_code"),
-                            pan=bp.get("pan"),
-                            email=bp.get("email"),
-                            phone=bp.get("phone")
-                        )
-                    bt = pm.get("billed_to_party")
-                    if bt and bt.get("name"):
-                        db.save_or_update_party(
-                            company_name=company_name,
-                            name=bt.get("name"),
-                            gstin=bt.get("gstin"),
-                            address=bt.get("address"),
-                            bank_name=bt.get("bank_name"),
-                            account_number=bt.get("account_number"),
-                            ifsc_code=bt.get("ifsc_code"),
-                            pan=bt.get("pan"),
-                            email=bt.get("email"),
-                            phone=bt.get("phone")
-                        )
+                    def _save_party_master(_pm=pm, _co=company_name):
+                        for _key in ("billing_party", "billed_to_party"):
+                            p = _pm.get(_key)
+                            if p and p.get("name"):
+                                try:
+                                    db.save_or_update_party(
+                                        company_name=_co, name=p.get("name"),
+                                        gstin=p.get("gstin"), address=p.get("address"),
+                                        bank_name=p.get("bank_name"), account_number=p.get("account_number"),
+                                        ifsc_code=p.get("ifsc_code"), pan=p.get("pan"),
+                                        email=p.get("email"), phone=p.get("phone"))
+                                except Exception as _pe:
+                                    print(f"[party master save] {_pe}")
+                    if background_tasks is not None:
+                        background_tasks.add_task(_save_party_master)
+                    else:
+                        _save_party_master()
         except Exception as p_err:
             print(f"Autonomous Party Master extraction error: {p_err}")
 

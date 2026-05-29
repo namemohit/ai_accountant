@@ -941,7 +941,7 @@
                             <div id="chat-attachment-preview" class="attachment-preview"></div>
                             <div id="voice-pill" class="voice-pill" style="display:none;"></div>
                             <div class="chat-input-wrapper">
-                                <input type="file" id="chat-file-input" style="display: none;" accept="image/*,.pdf,.csv,.xlsx,.xls"><!-- single-file by design; multi-attach goes through Bulk Excel -->
+                                <input type="file" id="chat-file-input" multiple style="display: none;" accept="image/*,.pdf,.csv,.xlsx,.xls"><!-- 1 file attaches to composer; multiple process sequentially (one reply each) -->
                                 <input type="file" id="chat-camera-input" style="display: none;" accept="image/*" capture="environment">
                                 <button type="button" class="attachment-btn" id="composer-add-btn" onclick="openAddMenu(this)" title="Add file, voice, statement…"><i class="fas fa-plus"></i></button>
                                 <button type="button" class="camera-btn" id="composer-camera-btn" onclick="openCameraCapture()" title="Take photo"><i class="fas fa-camera"></i></button>
@@ -8931,7 +8931,18 @@
             _updateComposerButtons();
         }
         
-        chatFileInput.onchange = (e) => handleFileSelect(e.target.files[0]);
+        chatFileInput.onchange = (e) => {
+            const fs = e.target.files;
+            if (fs && fs.length > 1) {
+                // Multiple invoices picked → process each in order (one reply per file),
+                // same as multi-file drag-drop.
+                showChatToast(`Processing ${fs.length} files in order…`, 'info');
+                _sendFilesSequentially(fs);
+            } else if (fs && fs.length === 1) {
+                handleFileSelect(fs[0]);
+            }
+            e.target.value = '';   // allow re-picking the same file(s)
+        };
         chatCameraInput.onchange = (e) => handleFileSelect(e.target.files[0]);
 
         // Explicitly handle pasting images and files from clipboard
@@ -9379,11 +9390,16 @@
                 if (meta.category) category = meta.category;
                 if (meta.invoice_total) invoiceTotal = parseFloat(meta.invoice_total) || 0;
                 if (meta.invoice_gst) invoiceGST = parseFloat(meta.invoice_gst) || 0;
+                // GST split (so the voucher legs balance — esp. inter-state IGST).
+                const taxableValue = parseFloat(meta.taxable_value) || 0;
+                const cgstAmount = parseFloat(meta.cgst_amount) || 0;
+                const sgstAmount = parseFloat(meta.sgst_amount) || 0;
+                const igstAmount = parseFloat(meta.igst_amount) || 0;
                 // Sprint 33 — carry the real voucher_type (Payment/Receipt/Sales/…)
                 const voucherType = meta.voucher_type || meta.category || 'Sales';
                 const counterLedger = meta.counter_ledger || '';
                 const paymentMode = meta.payment_mode || '';
-                return { billedToPartyName, billingPartyName, billingPartyGSTIN, billedToPartyGSTIN, invoiceNumber, dateVal, category, invoiceTotal, invoiceGST, voucherType, counterLedger, paymentMode };
+                return { billedToPartyName, billingPartyName, billingPartyGSTIN, billedToPartyGSTIN, invoiceNumber, dateVal, category, invoiceTotal, invoiceGST, taxableValue, cgstAmount, sgstAmount, igstAmount, voucherType, counterLedger, paymentMode };
             }
 
             try {
@@ -9477,7 +9493,11 @@
                 // Confirm & Sync sends the correct type (Payment/Receipt/etc.) to Tally.
                 const vtypeAttr = ` data-voucher-type="${escapeHtml(meta.voucherType || meta.category || 'Sales')}"`
                     + ` data-counter-ledger="${escapeHtml(meta.counterLedger || '')}"`
-                    + ` data-payment-mode="${escapeHtml(meta.paymentMode || '')}"`;
+                    + ` data-payment-mode="${escapeHtml(meta.paymentMode || '')}"`
+                    + ` data-taxable-value="${meta.taxableValue || 0}"`
+                    + ` data-cgst-amount="${meta.cgstAmount || 0}"`
+                    + ` data-sgst-amount="${meta.sgstAmount || 0}"`
+                    + ` data-igst-amount="${meta.igstAmount || 0}"`;
 
                 // Heads-up warnings banner (Sprint 8 follow-up) — AI flags concerns inline
                 const warnings = (data.ui_data && Array.isArray(data.ui_data.warnings)) ? data.ui_data.warnings : [];
@@ -10449,6 +10469,14 @@
                     if (pmField && pmField.value.trim()) paymentMode = pmField.value.trim();
                     if (!counterLedger) counterLedger = partyName; // default head = party
                 }
+                // GST split from the table data-attrs → so the Windows Agent builds the
+                // correct CGST/SGST or IGST leg and the voucher balances (fixes the
+                // inter-state "totaling error" where IGST had no leg).
+                const _num = (a) => parseFloat(table.getAttribute(a)) || 0;
+                const taxableValue = _num('data-taxable-value');
+                const cgstAmount = _num('data-cgst-amount');
+                const sgstAmount = _num('data-sgst-amount');
+                const igstAmount = _num('data-igst-amount');
                 // Send complete payload to Tally and save to DB history
                 const payload = {
                     party_name: partyName,
@@ -10458,6 +10486,10 @@
                     invoice_number: invoiceNumber,
                     date: dateVal,
                     total_amount: totalAmount,
+                    taxable_value: taxableValue,
+                    cgst_amount: cgstAmount,
+                    sgst_amount: sgstAmount,
+                    igst_amount: igstAmount,
                     category: category,
                     voucher_type: voucherType,        // Sprint 33 — correct Tally voucher type
                     counter_ledger: counterLedger,
