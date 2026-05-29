@@ -814,6 +814,8 @@
         <div id="app-topbar">
             <div class="tb-left" id="tb-left"></div>
             <div class="tb-right">
+                <!-- Welcome remark — shows which account is signed in (left of the agent indicator) -->
+                <span id="tb-welcome" style="font-size:0.8rem; color:#94a3b8; white-space:nowrap;" title="Signed-in account"></span>
                 <!-- Windows Agent connectivity (left of the workspace dropdown) -->
                 <span id="tb-agent-status" onclick="showView('training')" title="Windows Agent — checking…"
                       style="display:inline-flex; align-items:center; gap:6px; font-size:0.8rem; color:#cbd5e1; cursor:pointer; white-space:nowrap;">
@@ -3432,6 +3434,13 @@
             if (tbCo && src) { if (tbCo.innerHTML !== src.innerHTML) tbCo.innerHTML = src.innerHTML; tbCo.value = src.value; }
             const wb = document.getElementById('wallet-balance'), tbw = document.getElementById('tb-wallet');
             if (tbw && wb) tbw.textContent = wb.textContent || '—';
+            // Welcome remark — which account is signed in.
+            const tbWel = document.getElementById('tb-welcome');
+            if (tbWel) {
+                let _un = window.__currentUsername || '';
+                if (!_un) { try { _un = (JSON.parse(localStorage.getItem('currentUser') || '{}').username) || ''; } catch (_) {} }
+                tbWel.textContent = _un ? `Welcome, ${_un}!` : '';
+            }
 
             const active = window.__activeAgent;
             const meta = active ? (window.__agentBySlug || {})[active] : null;
