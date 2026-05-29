@@ -79,19 +79,47 @@ def resolve_agent_request(payload: dict, required_perm: str = "edit"):
 
 def validate_agent_session(token):
     """Look up an active session token. Returns the session dict or None if invalid/expired.
-    Side-effect: sliding-window refreshes expires_at on every successful access.
+
+    DB-backed (Sprint 35): sessions live in the agent_sessions table so a server restart
+    or Cloud Run redeploy no longer wipes them — previously the in-memory store was lost
+    on every deploy, silently 401'ing all connected agents (red dot + stalled sync).
+    Sliding-window: db_validate_agent_session atomically refreshes expires_at on each
+    access, so an agent that heartbeats every 30s never expires. Keeps a thin in-memory
+    mirror for speed and as a fallback.
     """
     if not token:
         return None
-    sess = agent_sessions.get(token)
-    if not sess:
-        return None
-    if sess["expires_at"] < datetime.utcnow():
-        agent_sessions.pop(token, None)
-        return None
-    # Sliding window — extend on use
-    sess["expires_at"] = datetime.utcnow() + AGENT_SESSION_TTL
-    return sess
+    ttl = int(AGENT_SESSION_TTL.total_seconds())
+    try:
+        sess = db.db_validate_agent_session(token, ttl_seconds=ttl)
+    except Exception as e:
+        print(f"[validate_agent_session] DB lookup failed: {e}", flush=True)
+        sess = None
+    if sess:
+        entry = {
+            "user_id": sess.get("user_id"),
+            "username": sess.get("username"),
+            "name": sess.get("name"),
+            "is_super_admin": bool(sess.get("is_super_admin")),
+            "expires_at": sess.get("expires_at") or (datetime.utcnow() + AGENT_SESSION_TTL),
+        }
+        agent_sessions[token] = entry   # write-through cache
+        return entry
+    # Fallback: a token minted in THIS process but not yet persisted (e.g. DB write failed
+    # at mint). Honour it if still fresh and opportunistically persist so it survives restarts.
+    mem = agent_sessions.get(token)
+    if mem:
+        if mem["expires_at"] < datetime.utcnow():
+            agent_sessions.pop(token, None)
+            return None
+        mem["expires_at"] = datetime.utcnow() + AGENT_SESSION_TTL
+        try:
+            db.db_create_agent_session(token, mem.get("user_id"), mem.get("username"),
+                                       mem.get("name"), bool(mem.get("is_super_admin")), ttl)
+        except Exception:
+            pass
+        return mem
+    return None
 
 
 def _authorize_bridge(session_token=None, company_name=None, company_id=None, perm="edit"):
@@ -704,7 +732,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "220"
+APP_VERSION = "221"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -8108,6 +8136,14 @@ async def agent_auth(credentials: dict):
         "is_super_admin": bool(u_row["is_super_admin"]),
         "expires_at": datetime.utcnow() + AGENT_SESSION_TTL,
     }
+    # Persist so the session survives server restarts/deploys (Sprint 35).
+    try:
+        db.db_create_agent_session(token, user_id, username,
+                                   legacy_user.get("name", username),
+                                   bool(u_row["is_super_admin"]),
+                                   int(AGENT_SESSION_TTL.total_seconds()))
+    except Exception as e:
+        print(f"[agent/auth] persist session failed: {e}", flush=True)
 
     # Issue a durable device token (valid until revoked) so the Windows Agent can
     # auto-resume on boot without re-entering a password. Company is bound later
@@ -8227,7 +8263,7 @@ async def agent_resume(payload: dict):
     memberships = db.get_user_memberships(user_id)
     serializable_memberships = _serialize_agent_memberships(memberships)
 
-    # Mint a fresh short-lived in-memory session token (same store/TTL as /api/agent/auth).
+    # Mint a fresh session token (same store/TTL as /api/agent/auth).
     token = "ag_" + _secrets.token_hex(32)
     agent_sessions[token] = {
         "user_id": user_id,
@@ -8236,6 +8272,13 @@ async def agent_resume(payload: dict):
         "is_super_admin": bool(u_row["is_super_admin"]),
         "expires_at": datetime.utcnow() + AGENT_SESSION_TTL,
     }
+    # Persist so the session survives server restarts/deploys (Sprint 35).
+    try:
+        db.db_create_agent_session(token, user_id, username, name,
+                                   bool(u_row["is_super_admin"]),
+                                   int(AGENT_SESSION_TTL.total_seconds()))
+    except Exception as e:
+        print(f"[agent/resume] persist session failed: {e}", flush=True)
     db.touch_agent_device(device_token)
 
     return {

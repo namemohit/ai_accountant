@@ -772,6 +772,23 @@ def init_db():
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_devices_user ON agent_devices(user_id)")
 
+    # Persistent agent SESSION store (Sprint 35). Previously sessions lived in an
+    # in-memory dict on the server, so every deploy/restart wiped them → all agents
+    # silently 401'd (red dot + sync stalls) until they re-authed. Persisting here
+    # lets a fresh process validate existing tokens, so deploys no longer log agents out.
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS agent_sessions (
+        token TEXT PRIMARY KEY,
+        user_id UUID,
+        username TEXT,
+        name TEXT,
+        is_super_admin BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        expires_at TIMESTAMP NOT NULL
+    )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_sessions_expires ON agent_sessions(expires_at)")
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS tally_sync_log (
         id UUID PRIMARY KEY,
@@ -1202,6 +1219,81 @@ def revoke_agent_device(token):
         return ok
     except Exception as e:
         print(f"revoke_agent_device error: {e}")
+        try: conn.rollback()
+        except Exception: pass
+        return False
+    finally:
+        cur.close(); pput(conn)
+
+# ── Persistent agent sessions (survive server restarts/deploys) ──────────────
+def db_create_agent_session(token, user_id, username=None, name=None,
+                            is_super_admin=False, ttl_seconds=86400):
+    """Persist (or refresh) an agent session token. Mirrors the old in-memory entry
+    {user_id, username, name, is_super_admin, expires_at} but in the DB so deploys
+    don't wipe it."""
+    if not token:
+        return False
+    conn = pget(); cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO agent_sessions (token, user_id, username, name, is_super_admin, expires_at)
+            VALUES (%s, %s, %s, %s, %s, now() + make_interval(secs => %s))
+            ON CONFLICT (token) DO UPDATE
+              SET user_id = EXCLUDED.user_id, username = EXCLUDED.username,
+                  name = EXCLUDED.name, is_super_admin = EXCLUDED.is_super_admin,
+                  expires_at = EXCLUDED.expires_at
+        """, (token, user_id, username, name, bool(is_super_admin), int(ttl_seconds)))
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"db_create_agent_session error: {e}")
+        try: conn.rollback()
+        except Exception: pass
+        return False
+    finally:
+        cur.close(); pput(conn)
+
+def db_validate_agent_session(token, ttl_seconds=86400):
+    """Return {user_id, username, name, expires_at} if the token is live, else None.
+    Sliding-window: atomically refreshes expires_at on every successful access (so an
+    agent that heartbeats regularly never expires). Returns None for missing/expired."""
+    if not token:
+        return None
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            UPDATE agent_sessions
+               SET expires_at = now() + make_interval(secs => %s)
+             WHERE token = %s AND expires_at >= now()
+            RETURNING user_id, username, name, is_super_admin, expires_at
+        """, (int(ttl_seconds), token))
+        row = cur.fetchone()
+        conn.commit()
+        if not row:
+            return None
+        if row.get("user_id") is not None:
+            row["user_id"] = str(row["user_id"])
+        return dict(row)
+    except Exception as e:
+        print(f"db_validate_agent_session error: {e}")
+        try: conn.rollback()
+        except Exception: pass
+        return None
+    finally:
+        cur.close(); pput(conn)
+
+def db_revoke_agent_session(token):
+    """Delete a session token (e.g. on sign-out). Returns True if a row was removed."""
+    if not token:
+        return False
+    conn = pget(); cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM agent_sessions WHERE token = %s", (token,))
+        ok = cur.rowcount > 0
+        conn.commit()
+        return ok
+    except Exception as e:
+        print(f"db_revoke_agent_session error: {e}")
         try: conn.rollback()
         except Exception: pass
         return False
