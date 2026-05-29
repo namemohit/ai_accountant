@@ -745,7 +745,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "223"
+APP_VERSION = "225"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -959,6 +959,12 @@ def _verify_token(authz):
 # Paths that never require a session (login, onboard, public, desktop agent, static).
 _AUTH_WHITELIST_PREFIXES = ("/api/login", "/api/auth/", "/api/onboard", "/api/register",
                             "/api/agent/", "/tally/", "/api/agents/verify-sso",
+                            # Windows-Agent bridge data endpoints. These authenticate with the
+                            # agent's OWN session_token via _authorize_bridge (not a Supabase user
+                            # JWT), so they must bypass the user-auth middleware — otherwise
+                            # AUTH_ENFORCE=1 returns 401 before _authorize_bridge can run, which
+                            # silently breaks heartbeat + push for every connected agent.
+                            "/api/tally/heartbeat", "/api/tally/queue",
                             "/api/webhooks/", "/static/", "/tally_bridge_agent",
                             "/api/shared/", "/s/")  # Sprint 84 public shared chats
 _AUTH_WHITELIST_EXACT = ("/", "/login", "/sw.js", "/manifest.json", "/favicon.ico",
