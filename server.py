@@ -104,7 +104,7 @@ def _authorize_bridge(session_token=None, company_name=None, company_id=None, pe
         sess = validate_agent_session(session_token)
         if not sess:
             raise HTTPException(status_code=401,
-                detail="Session expired — re-open the YantrAI Tally Bridge to sign in again.")
+                detail="Session expired — re-open the YantrAI Windows Agent to sign in again.")
         cid = company_id or (_resolve_company_id_by_name(company_name) if company_name else None)
         if not cid:
             raise HTTPException(status_code=400, detail="company required")
@@ -112,7 +112,7 @@ def _authorize_bridge(session_token=None, company_name=None, company_id=None, pe
             raise HTTPException(status_code=403, detail="No permission for this company.")
         return company_name
     print(f"[BRIDGE AUTH] DEPRECATED: bridge call without session_token "
-          f"(company_name={company_name!r}). Upgrade the Tally Bridge agent.", flush=True)
+          f"(company_name={company_name!r}). Upgrade the Windows Agent.", flush=True)
     return company_name
 
 @app.websocket("/tally/ws")
@@ -681,7 +681,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "206"
+APP_VERSION = "207"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -1542,7 +1542,7 @@ If on second thought this is actually just a regular accounting question (NOT a 
 
         ⛔ NEVER CLAIM A VOUCHER IS SYNCED / POSTED / DONE. You (the AI) cannot push to Tally.
            Syncing only happens when the USER reviews the editable card and clicks "Confirm & Sync",
-           which queues it to the Tally Bridge Agent. So:
+           which queues it to the Windows Agent. So:
            - Do NOT add a "Sync Status", "Status: Success", "Posted to Tally", "Done ✅", or any
              similar field/line to cards or text that implies the entry is already saved or synced.
            - For ANY voucher the user wants to RECORD (Payment, Receipt, Sales, Purchase, Journal,
@@ -2518,7 +2518,7 @@ async def push_to_tally(data: dict, background_tasks: BackgroundTasks = None):
                     ui_data = json.loads(msg["ui_data"]) if isinstance(msg["ui_data"], str) else msg["ui_data"]
                     if isinstance(ui_data, dict):
                         # It's only QUEUED to the outbox here — NOT yet accepted by Tally.
-                        # The Bridge Agent acks the outbox later; we never claim "synced"
+                        # The Windows Agent acks the outbox later; we never claim "synced"
                         # in the chat card unless that real ack arrives (ui_data.tally_pushed).
                         ui_data["queued"] = True
                         db.update_chat_message_ui_data(msg_id, ui_data)
@@ -2575,7 +2575,7 @@ async def push_to_tally(data: dict, background_tasks: BackgroundTasks = None):
                 db.save_chat_message(
                     session_id, "assistant",
                     f"🟠 Invoice **{inv_num}** for **{p_name}** queued for Tally sync "
-                    f"(₹{float(total):.2f}). The Bridge Agent will push it to Tally Prime "
+                    f"(₹{float(total):.2f}). The Windows Agent will push it to Tally Prime "
                     f"on its next poll — watch the Vouchers tab badge flip ✅ Pushed when "
                     f"Tally accepts it.",
                     "text")
@@ -6581,13 +6581,13 @@ async def upload_tally_xml_dump(file: UploadFile = File(...), company_name: str 
         raise HTTPException(status_code=500, detail=str(e))
 
 # Sprint 29 — Retired. The TDL plugin was a thin alternative that only exported
-# reports; the full Bridge Agent supersedes it. We return 410 Gone so any
+# reports; the full Windows Agent supersedes it. We return 410 Gone so any
 # stale links surface clearly rather than silently 404-ing.
 @app.get("/tally/download-tdl")
 async def download_tally_tdl_plugin():
     raise HTTPException(
         status_code=410,
-        detail="The TDL plugin has been retired. Please download the Tally Bridge Agent (single .exe) from /tally_bridge_agent/download — it does everything the TDL did and more.",
+        detail="The TDL plugin has been retired. Please download the Windows Agent (single .exe) from /tally_bridge_agent/download — it does everything the TDL did and more.",
     )
 
 @app.post("/tally/sync-batch")

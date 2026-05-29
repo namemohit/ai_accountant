@@ -566,7 +566,7 @@
                     if (bridgeEl) {
                         bridgeEl.innerHTML = clients.length > 0
                             ? '<span style="color: #4ade80;">🟢 Connected</span> — ' + clients.join(', ')
-                            : '<span style="color: #f87171;">🔴 Not Connected</span> — Start the Tally Bridge Agent on your local PC';
+                            : '<span style="color: #f87171;">🔴 Not Connected</span> — Start the Windows Agent on your local PC';
                     }
                 } catch (e) {
                     if (bridgeEl) bridgeEl.innerHTML = '<span style="color: #fbbf24;">⚠️ Could not check</span>';
@@ -681,10 +681,10 @@
                     <span style="color:#cbd5e1;">⚡ <strong id="wallet-balance" style="color:#38bdf8;">—</strong> tokens</span>
                     <span style="color:#38bdf8; font-size:0.7rem;">Recharge</span>
                 </div>
-                <!-- Sprint 28 — Tally Bridge Agent live status -->
+                <!-- Sprint 28 — Windows Agent live status -->
                 <div id="tally-bridge-status" style="margin-top:8px; font-size:0.7rem; color:#94a3b8; display:flex; align-items:center; gap:6px;">
                     <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#64748b;"></span>
-                    <span>Bridge Agent: checking…</span>
+                    <span>Windows Agent: checking…</span>
                 </div>
             </div>
             <div class="nav-item" onclick="showView('settings')" style="margin-bottom: 8px;"><span>⚙️</span> Settings</div>
@@ -814,6 +814,12 @@
         <div id="app-topbar">
             <div class="tb-left" id="tb-left"></div>
             <div class="tb-right">
+                <!-- Windows Agent connectivity (left of the workspace dropdown) -->
+                <span id="tb-agent-status" onclick="showView('training')" title="Windows Agent — checking…"
+                      style="display:inline-flex; align-items:center; gap:6px; font-size:0.8rem; color:#cbd5e1; cursor:pointer; white-space:nowrap;">
+                    <span id="tb-agent-dot" style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#64748b;"></span>
+                    <span class="tb-agent-lbl">Windows Agent</span>
+                </span>
                 <select id="tb-company" onchange="switchCompany(this.value)" title="Active company"></select>
                 <span class="ht-btn" onclick="showView('settings')" title="Settings">⚙️ Settings</span>
             </div>
@@ -1726,7 +1732,7 @@
                         <div class="connector-status connected">Connected</div>
                     </div>
                     <h4 class="connector-name">Tally ERP</h4>
-                    <p class="connector-desc">Sync ledgers, vouchers & masters from Tally Prime via Bridge Agent or TDL Plugin.</p>
+                    <p class="connector-desc">Sync ledgers, vouchers & masters from Tally Prime via Windows Agent or TDL Plugin.</p>
                     <div class="connector-meta"><span>Accounting</span><span id="tally-card-ledgers">13 ledgers</span></div>
                 </div>
 
@@ -2325,7 +2331,7 @@
                             <tr style="border-bottom: 1px solid var(--border);">
                                 <td colspan="2" style="padding: 30px; text-align: center; color: #64748b;">
                                     <div style="font-size: 2rem; margin-bottom: 8px;">📊</div>
-                                    Connect Tally Bridge to load live P&L data, or ask the AI Chat: <em>"Show my P&L for this month"</em>
+                                    Connect Windows Agent to load live P&L data, or ask the AI Chat: <em>"Show my P&L for this month"</em>
                                 </td>
                             </tr>
                         </tbody>
@@ -2453,7 +2459,7 @@
                         <input type="text" id="settings-pan" disabled style="opacity: 0.6;">
                     </div>
                     <div style="margin-top: 20px; padding: 16px; background: rgba(218,119,86,0.06); border: 1px solid rgba(218,119,86,0.15); border-radius: 10px;">
-                        <h4 style="margin: 0 0 8px 0; font-size: 0.85rem;">🔗 Tally Bridge Status</h4>
+                        <h4 style="margin: 0 0 8px 0; font-size: 0.85rem;">🔗 Windows Agent Status</h4>
                         <div id="settings-bridge-status" style="font-size: 0.85rem; color: var(--text-secondary);">Checking...</div>
                     </div>
                     <div style="margin-top: 20px; padding: 16px; background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 10px;">
@@ -2600,8 +2606,13 @@
         <nav class="mobile-drawer-nav" id="drawer-agent-nav">
             <!-- populated by _renderDrawer() -->
         </nav>
-        <!-- Bottom: Logout + app version -->
+        <!-- Bottom: Windows Agent status + Logout + app version -->
         <div class="mobile-drawer-footer">
+            <div id="drawer-agent-status" onclick="haptic(); closeMobileMenu(); showView('training');"
+                 style="display:flex; align-items:center; gap:8px; padding:11px 6px; font-size:0.85rem; color:#cbd5e1; cursor:pointer; border-bottom:1px solid var(--border);">
+                <span id="drawer-agent-dot" style="display:inline-block; width:9px; height:9px; border-radius:50%; background:#64748b;"></span>
+                <span class="drawer-agent-lbl">Windows Agent</span>
+            </div>
             <div class="mobile-drawer-logout" onclick="haptic(); handleLogout();"><span>🚪</span> Logout</div>
             <div class="mobile-drawer-version">YantrAI Cloud · v__APP_VER__</div>
         </div>
@@ -5760,7 +5771,7 @@
                     const online = d && (d.online || d.connected || (d.seconds_since_seen != null && d.seconds_since_seen < 120));
                     if (d && d.status === 'success' && !online) {
                         items.push({ icon: '🔌', title: 'Tally not connected',
-                            sub: 'Open the Tally Bridge on your PC to sync',
+                            sub: 'Open the Windows Agent on your PC to sync',
                             action: () => { closeWorkspaceSheet(); showView('training'); } });
                     }
                 }
@@ -9618,7 +9629,7 @@
                     <i class="fas fa-check-circle" style="font-size: 1.1rem; color: #10b981;"></i> Synced to Tally Prime Successfully!
                 </div>` : isLocked ? `
                 <div style="background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); color: #fbbf24; padding: 12px; border-radius: 8px; font-size: 0.84rem; font-weight: 600; display: flex; align-items: center; gap: 8px; margin-top: 12px;">
-                    <i class="fas fa-hourglass-half"></i> Queued for Tally Prime — it'll sync automatically once your Tally Bridge Agent is online. Track status in the Vouchers tab.
+                    <i class="fas fa-hourglass-half"></i> Queued for Tally Prime — it'll sync automatically once your Windows Agent is online. Track status in the Vouchers tab.
                 </div>` : `
                 <div class="table-actions">
                     <button class="btn btn-sm" onclick="addRow('${tableId}')"><i class="fas fa-plus"></i> Add Item</button>
@@ -10485,12 +10496,12 @@
 
                 if (res.ok) {
                     // Sprint 28 — honest two-step: invoice saved in YantrAI books AND
-                    // enqueued for the Tally Bridge Agent. We immediately start polling
+                    // enqueued for the Windows Agent. We immediately start polling
                     // /api/tally/outbox/{invoice_id} so the badge tells the user the
                     // real Tally state (Queued → Pushing → ✅ In Tally / ❌ error).
                     const respData = await (async () => { try { return await res.clone().json(); } catch (e) { return null; } })();
                     const invId = respData && (respData.invoice_id || respData.id);
-                    appendAIMessage({ text: `📥 Saved Invoice **${invoiceNumber}** for **${partyName}** in YantrAI books (₹${totalAmount.toFixed(2)}). Queued for Tally Bridge Agent — confirmation will appear here when Tally accepts it.`, ui_type: 'text' });
+                    appendAIMessage({ text: `📥 Saved Invoice **${invoiceNumber}** for **${partyName}** in YantrAI books (₹${totalAmount.toFixed(2)}). Queued for Windows Agent — confirmation will appear here when Tally accepts it.`, ui_type: 'text' });
 
                     // Sprint 8: tag chat title with ✅ + voucher number so it's clear in sidebar
                     try {
@@ -11177,7 +11188,7 @@
         }
         async function syncFromTally() {
             const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
-            if (typeof showChatToast === 'function') showChatToast('Requesting a pull from Tally (needs the Bridge Agent online)…', 'info');
+            if (typeof showChatToast === 'function') showChatToast('Requesting a pull from Tally (needs the Windows Agent online)…', 'info');
             try {
                 const res = await fetch(`${API}/tally/ingest`, {
                     method:'POST', headers:{'Content-Type':'application/json'},
@@ -11187,7 +11198,7 @@
                 if (!res.ok) throw new Error(d.detail || 'Sync from Tally failed');
                 if (typeof showChatToast === 'function') showChatToast('Sync from Tally requested — vouchers will appear once the Bridge responds.', 'info');
                 if (typeof loadVouchers === 'function') loadVouchers();
-            } catch (e) { alert(e.message || 'Sync from Tally failed (is the Tally Bridge Agent running?)'); }
+            } catch (e) { alert(e.message || 'Sync from Tally failed (is the Windows Agent running?)'); }
         }
 
         function exportToCSV(items) {
@@ -13394,7 +13405,7 @@
                         </div>
 
                         <div id="tally-tab-connection">
-                            <h4 style="margin: 0 0 16px 0; color: white;">Tally Bridge Agent</h4>
+                            <h4 style="margin: 0 0 16px 0; color: white;">Windows Agent</h4>
                             <p style="color:#94a3b8; font-size:0.85rem; margin-bottom:18px;">
                                 One small app on the Windows PC where Tally Prime runs.
                                 Installs in 30 seconds, auto-starts on every boot, never asked for again.
@@ -13407,7 +13418,7 @@
                                     <div style="flex:1; min-width:240px;">
                                         <h5 style="margin: 0 0 6px 0; color: white; display:flex; align-items:center; gap:8px;">
                                             <i class="fas fa-plug" style="color:#38bdf8;"></i>
-                                            Tally Bridge Agent
+                                            Windows Agent
                                             <span id="bridge-agent-pill" style="font-size:0.65rem; padding:2px 8px; border-radius:10px; margin-left:6px; background:rgba(100,116,139,0.2); color:#94a3b8;">checking…</span>
                                         </h5>
                                         <p style="margin: 0; color: #cbd5e1; font-size: 0.85rem; line-height:1.5;">
@@ -13676,7 +13687,7 @@
             const currentUser = JSON.parse(localStorage.getItem('currentUser'));
             const consoleEl = document.getElementById('optimizer-console');
             consoleEl.innerHTML = '';
-            logToOptimizerConsole(`[TALLY CONNECT] Establishing connection to local Tally Bridge Agent...`);
+            logToOptimizerConsole(`[TALLY CONNECT] Establishing connection to local Windows Agent...`);
             logToOptimizerConsole(`[PROCESS] Dispatching seed_baseline command via WebSocket tunnel...`);
             logToOptimizerConsole(`[PROCESS] Pulling all ledgers, groups, and vouchers from TallyPrime (port 9000)...`);
 
@@ -13738,7 +13749,7 @@
                 }
             } catch (err) {
                 logToOptimizerConsole(`[ERROR] Direct Tally Sync failed: ${err.message}`);
-                logToOptimizerConsole(`[HINT] Make sure the Tally Bridge Agent is running and connected!`);
+                logToOptimizerConsole(`[HINT] Make sure the Windows Agent is running and connected!`);
             } finally {
                 _tallyIngesting = false;
                 if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
@@ -13768,10 +13779,10 @@
                 
                 if (result.status === 'success') {
                     // Sprint 28 — honest message: queued, not yet in Tally
-                    const tallyStateBadge = (window.__tallyBridgeOnline === true) ? 'Bridge Agent online — pushing now.'
-                        : (window.__tallyBridgeOnline === false) ? 'Bridge Agent OFFLINE — run tally_bridge_agent.exe on the Tally machine to process the queue.'
-                        : 'Bridge Agent status unknown.';
-                    alert(`Saved ${result.synced_count} voucher(s) to YantrAI books. Queued for Tally Bridge Agent.\n\n${tallyStateBadge}`);
+                    const tallyStateBadge = (window.__tallyBridgeOnline === true) ? 'Windows Agent online — pushing now.'
+                        : (window.__tallyBridgeOnline === false) ? 'Windows Agent OFFLINE — run tally_bridge_agent.exe on the Tally machine to process the queue.'
+                        : 'Windows Agent status unknown.';
+                    alert(`Saved ${result.synced_count} voucher(s) to YantrAI books. Queued for Windows Agent.\n\n${tallyStateBadge}`);
                     loadVouchers();
                 } else {
                     throw new Error(result.message || 'Sync failed');
@@ -15388,7 +15399,7 @@
         }
 
         // ═══════════════════════════════════════════════════════
-        // SPRINT 28 — Tally Bridge Agent status + per-invoice polling
+        // SPRINT 28 — Windows Agent status + per-invoice polling
         // ═══════════════════════════════════════════════════════
         window.__tallyBridgeOnline = null;  // tri-state until first poll
         async function refreshTallyBridgeStatus() {
@@ -15411,12 +15422,12 @@
                     // explain what each count means.
                     const pendBadge = j.pending > 0
                         ? `<span onclick="event.stopPropagation(); openVoucherEventLog('queued_for_tally');"
-                                 title="Invoices queued in YantrAI's tally_outbox waiting for the Bridge Agent to pick up and push to Tally. Click to see details."
+                                 title="Invoices queued in YantrAI's tally_outbox waiting for the Windows Agent to pick up and push to Tally. Click to see details."
                                  style="background:rgba(245,158,11,0.15); color:#f59e0b; padding:0 5px; border-radius:3px; font-size:0.65rem; margin-left:4px; cursor:pointer;">${j.pending} queued</span>`
                         : '';
                     // Sprint 33 — Err count is noise in the sidebar; errors are
                     // visible in the Vouchers → Event Logs tab. Drop the badge here.
-                    const label = j.agent_online ? 'Bridge Agent online' : 'Bridge Agent offline';
+                    const label = j.agent_online ? 'Windows Agent online' : 'Windows Agent offline';
                     el.innerHTML = `${dot} <span title="Pending: ${j.pending}, Pushed: ${j.pushed}, Errors: ${j.error} (see Vouchers → Event Logs). Last push: ${j.last_pushed_at || 'never'}.">${label}</span>${pendBadge}`;
                 }
                 // Sprint 29 — also drive the rich card on Connectors → Tally tab
@@ -15465,6 +15476,20 @@
                         }
                     } catch (ve) { /* silent */ }
                 }
+                // Top-bar (desktop) + hamburger-drawer (mobile) Windows Agent indicators.
+                ['tb-agent', 'drawer-agent'].forEach(pfx => {
+                    const dot = document.getElementById(pfx + '-dot');
+                    if (dot) {
+                        dot.style.background = j.agent_online ? '#10b981' : '#ef4444';
+                        dot.style.boxShadow = j.agent_online ? '0 0 6px rgba(16,185,129,0.6)' : 'none';
+                    }
+                    const wrap = document.getElementById(pfx + '-status');
+                    if (wrap) wrap.title = j.agent_online
+                        ? `Windows Agent online${j.agent_version ? ' · v' + j.agent_version : ''}${j.pending ? ' · ' + j.pending + ' queued' : ''}`
+                        : 'Windows Agent offline — open it on the PC to sync';
+                });
+                const _dl = document.querySelector('#drawer-agent-status .drawer-agent-lbl');
+                if (_dl) _dl.textContent = j.agent_online ? 'Windows Agent online' : 'Windows Agent offline';
             } catch (e) { /* silent */ }
         }
 
@@ -15479,7 +15504,8 @@
                 detail.innerHTML = cur + ` <a href="/tally_bridge_agent/download" download style="color:#38bdf8;">Download the agent →</a>`;
             }
         }
-        // Refresh every 15s
+        // Populate immediately on load, then refresh every 15s.
+        try { refreshTallyBridgeStatus(); } catch (_) {}
         setInterval(refreshTallyBridgeStatus, 15000);
 
         // Poll outbox state for one invoice and update the badge through transitions.
@@ -15519,7 +15545,7 @@
                 } else {
                     // Timed out: tell the user honestly
                     if (window.__tallyBridgeOnline === false) {
-                        badgeEl.innerHTML = `<i class="fas fa-pause-circle" style="color:#f59e0b; font-size:0.95rem;"></i> Saved · Tally Bridge offline (start the agent to sync)`;
+                        badgeEl.innerHTML = `<i class="fas fa-pause-circle" style="color:#f59e0b; font-size:0.95rem;"></i> Saved · Windows Agent offline (start the agent to sync)`;
                     } else {
                         badgeEl.innerHTML = `<i class="fas fa-hourglass-end" style="color:#94a3b8; font-size:0.95rem;"></i> Saved · still queued (will sync when Bridge processes it)`;
                     }
