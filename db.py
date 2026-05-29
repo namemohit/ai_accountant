@@ -711,6 +711,23 @@ def init_db():
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_tally_raw_company ON tally_raw(company_name, entity_type)")
 
+    # Windows Agent durable login — long-lived device token (valid until revoked).
+    # Lets the agent auto-resume on boot (PC reboot + server restart) without re-entering
+    # a password. Only the device_token is persisted; passwords are never stored.
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS agent_devices (
+        device_token TEXT PRIMARY KEY,
+        user_id UUID,
+        username TEXT,
+        company_id UUID,
+        company_name TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at TIMESTAMP,
+        revoked BOOLEAN DEFAULT FALSE
+    )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_devices_user ON agent_devices(user_id)")
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS tally_sync_log (
         id UUID PRIMARY KEY,
@@ -1044,6 +1061,108 @@ def init_db():
     conn.commit()
     cursor.close()
     conn.close()
+
+# ── Windows Agent durable device tokens ───────────────────────────────────────
+def create_agent_device(user_id, username, company_id=None, company_name=None):
+    """Mint a long-lived device token (valid until revoked) and persist it.
+    Returns the new device_token string, or None on failure."""
+    import secrets as _secrets
+    token = "dv_" + _secrets.token_hex(32)
+    conn = pget()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO agent_devices (device_token, user_id, username, company_id, company_name, last_seen_at)
+            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        """, (token, user_id, username, company_id, company_name))
+        conn.commit()
+        return token
+    except Exception as e:
+        print(f"create_agent_device error: {e}")
+        try: conn.rollback()
+        except Exception: pass
+        return None
+    finally:
+        cur.close(); pput(conn)
+
+def get_agent_device(token):
+    """Return the device row (dict) only if it exists and is not revoked, else None."""
+    if not token:
+        return None
+    conn = pget()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT device_token, user_id, username, company_id, company_name,
+                   created_at, last_seen_at, revoked
+            FROM agent_devices
+            WHERE device_token = %s AND revoked = FALSE
+        """, (token,))
+        return cur.fetchone()
+    except Exception as e:
+        print(f"get_agent_device error: {e}")
+        return None
+    finally:
+        cur.close(); pput(conn)
+
+def touch_agent_device(token):
+    """Update last_seen_at on a device token (best-effort)."""
+    if not token:
+        return
+    conn = pget()
+    cur = conn.cursor()
+    try:
+        cur.execute("UPDATE agent_devices SET last_seen_at = CURRENT_TIMESTAMP WHERE device_token = %s", (token,))
+        conn.commit()
+    except Exception as e:
+        print(f"touch_agent_device error: {e}")
+        try: conn.rollback()
+        except Exception: pass
+    finally:
+        cur.close(); pput(conn)
+
+def bind_agent_device(token, company_id=None, company_name=None):
+    """Attach the chosen company to a device token (called after the company picker).
+    Returns True if a non-revoked row was updated."""
+    if not token:
+        return False
+    conn = pget()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE agent_devices
+            SET company_id = %s, company_name = %s, last_seen_at = CURRENT_TIMESTAMP
+            WHERE device_token = %s AND revoked = FALSE
+        """, (company_id, company_name, token))
+        ok = cur.rowcount > 0
+        conn.commit()
+        return ok
+    except Exception as e:
+        print(f"bind_agent_device error: {e}")
+        try: conn.rollback()
+        except Exception: pass
+        return False
+    finally:
+        cur.close(); pput(conn)
+
+def revoke_agent_device(token):
+    """Revoke a device token so future /api/agent/resume calls fail. Returns True if updated."""
+    if not token:
+        return False
+    conn = pget()
+    cur = conn.cursor()
+    try:
+        cur.execute("UPDATE agent_devices SET revoked = TRUE WHERE device_token = %s", (token,))
+        ok = cur.rowcount > 0
+        conn.commit()
+        return ok
+    except Exception as e:
+        print(f"revoke_agent_device error: {e}")
+        try: conn.rollback()
+        except Exception: pass
+        return False
+    finally:
+        cur.close(); pput(conn)
 
 def get_user_by_username(username: str):
     conn = pget()

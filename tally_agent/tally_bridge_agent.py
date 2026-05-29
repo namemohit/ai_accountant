@@ -718,7 +718,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.7.0"   # + capture verbatim Tally XML per record (raw_xml) for first-hand data
+AGENT_VERSION = "0.8.0"   # + durable device-token auto-resume on boot (no re-login)
 
 
 def _post_json(url, body, timeout=15.0):
@@ -1407,6 +1407,13 @@ class TallyBridgeApp:
         self.should_run = False
         self.start_minimized = start_minimized
 
+        # Self-heal the Windows auto-start entry on every launch so the Run key always
+        # points at the *current* exe path (fixes a stale path after reinstall/move).
+        # Only when running as the packaged .exe — never register the dev .py.
+        if getattr(sys, "frozen", False) and (self.config.get("autostart") or self.config.get("device_token")):
+            try: set_autostart(True)
+            except Exception: pass
+
         # Tray
         self.tray_icon = None
         self._tray_notified = False
@@ -1421,9 +1428,17 @@ class TallyBridgeApp:
         self.selected_company_id = None
         self.selected_company_name = None
         self.tally_company_name = None  # Cached from Tally
+        # Durable device token (persisted) — used to auto-resume without a password.
+        self.device_token = self.config.get("device_token")
 
-        # Always start at the login wizard — passwords are never persisted
-        self.build_login_wizard()
+        # Auto-resume the previous session via the durable device token (no password,
+        # no login screen). Falls back to the login wizard if not viable / it fails.
+        # Passwords are still never persisted.
+        if self._can_auto_resume():
+            self.build_reconnecting_screen()
+            threading.Thread(target=self._try_auto_resume, daemon=True).start()
+        else:
+            self.build_login_wizard()
 
         # System tray (background running). Built once; survives screen swaps.
         self._init_tray()
@@ -1675,10 +1690,15 @@ class TallyBridgeApp:
         self.username = data["username"]
         self.user_name = data.get("name", username)
         self.memberships = data.get("memberships", [])
+        # Durable device token — lets the agent auto-resume on boot without a password.
+        # Persisted to config (passwords/session tokens are never written to disk).
+        self.device_token = data.get("device_token")
 
         self.config["last_server_url"] = server_url
         self.config["last_username"] = username
         self.config["tally_url"] = tally_url
+        if self.device_token:
+            self.config["device_token"] = self.device_token
         save_config(self.config)
 
         self.root.unbind("<Return>")
@@ -1796,6 +1816,23 @@ class TallyBridgeApp:
             except Exception: pass
         save_config(self.config)
 
+        # Bind the chosen company onto the durable device token so boot auto-resume
+        # lands directly on this company (best-effort).
+        if getattr(self, "device_token", None):
+            try:
+                _post_json(f"{server_url}/api/agent/device/bind", {
+                    "device_token": self.device_token,
+                    "company_id": chosen["company_id"],
+                    "company_name": chosen["company_name"],
+                }, timeout=10.0)
+            except Exception:
+                pass
+
+        self._enter_running_state(server_url, tally_url)
+
+    def _enter_running_state(self, server_url, tally_url):
+        """Build the dashboard, start the tunnel, and launch the heartbeat/outbox
+        background threads. Shared by first-time setup and boot auto-resume."""
         self.build_dashboard()
         self.start_tunnel()
 
@@ -1817,6 +1854,60 @@ class TallyBridgeApp:
                       getattr(self, "session_token", None)),
                 daemon=True, name="yantrai-outbox-poll",
             ).start()
+
+    # --------------------------------------------------------
+    # Boot auto-resume (durable device token)
+    # --------------------------------------------------------
+    def _can_auto_resume(self):
+        return bool(
+            self.config.get("device_token")
+            and self.config.get("last_server_url")
+            and self.config.get("last_company_name")
+        )
+
+    def _try_auto_resume(self):
+        """Background-thread attempt to resume the previous session via the durable
+        device token. On success → dashboard + tunnel; on failure → login wizard.
+        All Tk UI work is marshalled back to the main thread via root.after()."""
+        server_url = (self.config.get("last_server_url") or "").rstrip("/")
+        tally_url = self.config.get("tally_url") or DEFAULT_TALLY
+        token = self.config.get("device_token")
+        data = _post_json(f"{server_url}/api/agent/resume", {"device_token": token}, timeout=20.0)
+
+        if not isinstance(data, dict) or data.get("_error") or not data.get("session_token"):
+            # Revoked / network error / older server → fall back to the login screen.
+            # Keep the device token in config so the next boot can retry.
+            self.root.after(0, self.build_login_wizard)
+            return
+
+        def _finish():
+            self.session_token = data["session_token"]
+            self.user_id = data.get("user_id")
+            self.username = data.get("username")
+            self.user_name = data.get("name", self.username)
+            self.memberships = data.get("memberships", [])
+            self.device_token = token
+            self.selected_company_id = data.get("company_id") or self.config.get("last_company_id")
+            self.selected_company_name = data.get("company_name") or self.config.get("last_company_name")
+            # Keep legacy config keys consistent for the dashboard/tunnel code.
+            self.config["server_url"] = http_to_ws(server_url)
+            if self.selected_company_id:
+                self.config["token"] = self.selected_company_id
+            save_config(self.config)
+            self._enter_running_state(server_url, tally_url)
+        self.root.after(0, _finish)
+
+    def build_reconnecting_screen(self):
+        """Lightweight splash shown while auto-resume runs, so the login form doesn't flash."""
+        for w in self.root.winfo_children():
+            w.destroy()
+        self._build_header(self.root, "Reconnecting…")
+        outer = tk.Frame(self.root, bg=THEME["bg"], padx=22, pady=40)
+        outer.pack(fill="both", expand=True)
+        tk.Label(outer, text="🔄  Resuming your YantrAI connection…",
+                 bg=THEME["bg"], fg=THEME["text"], font=("Segoe UI", 11, "bold")).pack(pady=(20, 8))
+        tk.Label(outer, text="No need to sign in — restoring your saved session.",
+                 bg=THEME["bg"], fg=THEME["muted"], font=("Segoe UI", 9)).pack()
 
     # --------------------------------------------------------
     # Main Dashboard
@@ -1898,13 +1989,21 @@ class TallyBridgeApp:
         self.is_connected = False
         # Drop the thread handle so next login spawns a fresh tunnel
         self.ws_thread = None
+        # Revoke the durable device token server-side so the next boot won't auto-resume.
+        _tok = self.config.get("device_token")
+        if _tok:
+            _srv = (self.config.get("last_server_url") or "").rstrip("/")
+            try: _post_json(f"{_srv}/api/agent/device/revoke", {"device_token": _tok}, timeout=8.0)
+            except Exception: pass
         self.session_token = None
+        self.device_token = None
         self.user_id = None
         self.selected_company_id = None
         self.selected_company_name = None
         self.memberships = []
         # Keep last_username and last_server_url in config for convenience
         self.config.pop("token", None)
+        self.config.pop("device_token", None)
         save_config(self.config)
         self.build_login_wizard()
 
@@ -2176,14 +2275,21 @@ class TallyBridgeApp:
     def reset_config(self):
         if messagebox.askyesno("Reset", "Return to setup wizard?\n\nThis will clear current tokens."):
             self.stop_tunnel()
+            # Revoke the durable device token server-side before wiping local config.
+            _tok = self.config.get("device_token")
+            if _tok:
+                _srv = (self.config.get("last_server_url") or "").rstrip("/")
+                try: _post_json(f"{_srv}/api/agent/device/revoke", {"device_token": _tok}, timeout=8.0)
+                except Exception: pass
             if os.path.exists(CONFIG_FILE):
                 try:
                     os.remove(CONFIG_FILE)
                 except:
                     pass
             self.config = {}
+            self.device_token = None
             self.synced_count = 0
-            self.build_setup_wizard()
+            self.build_login_wizard()
 
     def on_close(self):
         # X button → keep running in the background (tray), don't quit.

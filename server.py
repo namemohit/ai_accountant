@@ -7989,9 +7989,20 @@ async def agent_auth(credentials: dict):
         "expires_at": datetime.utcnow() + AGENT_SESSION_TTL,
     }
 
+    # Issue a durable device token (valid until revoked) so the Windows Agent can
+    # auto-resume on boot without re-entering a password. Company is bound later
+    # (after the company picker) via /api/agent/device/bind. Best-effort: if it
+    # fails the agent simply won't auto-resume and will show the login wizard.
+    device_token = None
+    try:
+        device_token = db.create_agent_device(user_id, username)
+    except Exception as e:
+        print(f"[agent_auth] device token mint failed: {e}", flush=True)
+
     return {
         "status": "success",
         "session_token": token,
+        "device_token": device_token,
         "user_id": user_id,
         "name": legacy_user.get("name", username),
         "username": username,
@@ -8015,6 +8026,108 @@ async def agent_whoami(payload: dict):
         "name": sess["name"],
         "is_super_admin": sess.get("is_super_admin", False),
         "memberships_count": len(memberships),
+    }
+
+
+def _serialize_agent_memberships(memberships):
+    """Shared membership → JSON serialization for the agent auth/resume endpoints."""
+    out = []
+    for m in memberships:
+        out.append({
+            "membership_id": str(m["membership_id"]),
+            "org_id": str(m["org_id"]),
+            "org_name": m["org_name"],
+            "org_type": m["org_type"],
+            "role": m["role"],
+            "scope_company_ids": m.get("scope_company_ids"),
+            "plan": m.get("plan"),
+            "companies": [
+                {
+                    "id": str(c["id"]),
+                    "name": c["name"],
+                    "gstin": c.get("gstin"),
+                    "is_primary": c.get("is_primary", False),
+                }
+                for c in (m.get("companies") or [])
+            ],
+        })
+    return out
+
+
+@app.post("/api/agent/device/bind")
+async def agent_device_bind(payload: dict):
+    """Attach the chosen company to a device token (called by the agent right after
+    the user picks a company), so auto-resume lands on the right company."""
+    device_token = (payload or {}).get("device_token")
+    company_id = (payload or {}).get("company_id")
+    company_name = (payload or {}).get("company_name")
+    if not device_token:
+        raise HTTPException(status_code=400, detail="device_token is required")
+    ok = db.bind_agent_device(device_token, company_id, company_name)
+    if not ok:
+        raise HTTPException(status_code=401, detail="Device token invalid or revoked")
+    return {"status": "success"}
+
+
+@app.post("/api/agent/device/revoke")
+async def agent_device_revoke(payload: dict):
+    """Revoke a device token so future auto-resume fails (agent 'Disconnect')."""
+    device_token = (payload or {}).get("device_token")
+    if not device_token:
+        raise HTTPException(status_code=400, detail="device_token is required")
+    db.revoke_agent_device(device_token)
+    return {"status": "success"}
+
+
+@app.post("/api/agent/resume")
+async def agent_resume(payload: dict):
+    """Exchange a durable device token for a fresh in-memory session token. Lets the
+    Windows Agent auto-resume on boot across PC reboots and server restarts/deploys."""
+    device_token = (payload or {}).get("device_token")
+    row = db.get_agent_device(device_token)
+    if not row:
+        raise HTTPException(status_code=401, detail="Device token invalid or revoked")
+
+    user_id = str(row["user_id"])
+
+    # Confirm the user still exists + resolve super-admin flag.
+    conn = db.get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT username, is_super_admin FROM public.users WHERE id = %s", (user_id,))
+    u_row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not u_row:
+        raise HTTPException(status_code=401, detail="User no longer exists")
+    username = u_row["username"]
+
+    legacy_user = db.get_user_by_username(username) or {}
+    name = legacy_user.get("name", username)
+
+    memberships = db.get_user_memberships(user_id)
+    serializable_memberships = _serialize_agent_memberships(memberships)
+
+    # Mint a fresh short-lived in-memory session token (same store/TTL as /api/agent/auth).
+    token = "ag_" + _secrets.token_hex(32)
+    agent_sessions[token] = {
+        "user_id": user_id,
+        "username": username,
+        "name": name,
+        "is_super_admin": bool(u_row["is_super_admin"]),
+        "expires_at": datetime.utcnow() + AGENT_SESSION_TTL,
+    }
+    db.touch_agent_device(device_token)
+
+    return {
+        "status": "success",
+        "session_token": token,
+        "user_id": user_id,
+        "name": name,
+        "username": username,
+        "is_super_admin": bool(u_row["is_super_admin"]),
+        "company_id": str(row["company_id"]) if row.get("company_id") else None,
+        "company_name": row.get("company_name"),
+        "memberships": serializable_memberships,
     }
 
 
