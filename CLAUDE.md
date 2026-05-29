@@ -29,3 +29,14 @@ to a specific point if a later push breaks something.
 ## Service worker cache
 `static/sw.js` `CACHE_NAME` must be bumped on every front-end change (currently the
 versioning scheme is `yantrai-accounting-vNN`) or browsers keep stale JS/CSS.
+
+## Test data sandbox (IMPORTANT)
+All test / demo / seed writes go **ONLY** to the **"Agent"** workspace
+(`company_name = "Agent"`, `company_id = a1af854b-5c10-4e33-a886-154f7a38a046`).
+NEVER write test data into a real customer workspace (e.g. Jai Mata Kalka Enterprises) — that's how
+fake `PUR-2026` invoices and `047-TEST` once leaked into a real firm's books.
+- When uploading invoices / pushing vouchers / seeding for a test, set the active company to "Agent".
+- One-off DB smoke checks may use an ephemeral throwaway `company_name` (e.g. `__YAI_TEST__`) and must be
+  deleted immediately after the check.
+- Never create user accounts/workspaces on the user's behalf. If a new sandbox is ever needed, the user
+  creates it and tells me the name/id.
