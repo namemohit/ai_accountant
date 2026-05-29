@@ -6305,16 +6305,9 @@
         // Single predicate combining all 3 layers. Returns true if row should be visible.
         function _voucherFilterMatch(v) {
             const f = _voucherFilters;
-            // Status / lifecycle filter. Archived rows are hidden by default (off the books)
-            // UNLESS "Archived (YantrAI)" is explicitly requested — via the top Status filter
-            // OR the per-column Status chevron filter.
-            const _st = _vRowStatus(v);
-            const _colStatus = (f.columnFilters && f.columnFilters.status && Array.isArray(f.columnFilters.status.values))
-                ? f.columnFilters.status.values : null;
-            const _wantArchived = (f.status === 'Archived (YantrAI)')
-                || (_colStatus && _colStatus.includes('Archived (YantrAI)'));
-            if (_st === 'Archived (YantrAI)' && !_wantArchived) return false;
-            if (f.status && _st !== f.status) return false;
+            // Status / lifecycle filter. "Status: any" (blank) shows ALL lines INCLUDING
+            // archived; picking a specific status (incl. "Archived (YantrAI)") narrows to it.
+            if (f.status && _vRowStatus(v) !== f.status) return false;
             // Sprint 26 — AI Gap filter (joins against client-side suggestions map)
             if (f.ai_gap) {
                 const sugs = (window._aiSuggestionsByVoucherId || {})[v.id] || [];

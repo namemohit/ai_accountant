@@ -3580,10 +3580,11 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
     # Sort merged by date descending
     results.sort(key=lambda r: r.get('date') or '', reverse=True)
 
-    # Get total count for pagination (archived rows are excluded — they're "off the books")
-    cursor.execute(f"SELECT COUNT(*) FROM tally_vouchers WHERE {' AND '.join(tally_where)} AND archived_at IS NULL", tally_params)
+    # Get total count for pagination (counts ALL rows incl. archived, matching the
+    # "Status: any" view which shows every line; the Status column marks archived ones).
+    cursor.execute(f"SELECT COUNT(*) FROM tally_vouchers WHERE {' AND '.join(tally_where)}", tally_params)
     tally_total = cursor.fetchone()['count']
-    cursor.execute(f"SELECT COUNT(*) FROM invoices WHERE {' AND '.join(inv_where)} AND archived_at IS NULL", inv_params)
+    cursor.execute(f"SELECT COUNT(*) FROM invoices WHERE {' AND '.join(inv_where)}", inv_params)
     inv_total = cursor.fetchone()['count']
 
     cursor.close()
