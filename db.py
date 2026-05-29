@@ -105,6 +105,7 @@ def init_db():
         cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS cgst_amount REAL")
         cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sgst_amount REAL")
         cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS igst_amount REAL")
+        cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP")  # soft archive
         # Speeds up the Vouchers list invoice SELECT (ORDER BY created_at DESC, scoped by company)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoices_company_created ON invoices(company_name, created_at DESC)")
     except:
@@ -246,6 +247,9 @@ def init_db():
         # Tally sync-back back to the originating YantrAI invoice (invoices.id) via the round-trip marker.
         "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS origin TEXT",
         "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS yantrai_uid TEXT",
+        # Soft archive (user-driven; SEPARATE from discarded_at which hides AI-duplicates).
+        # Archived rows are hidden from the default list but kept on file + restorable.
+        "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP",
         "ALTER TABLE tds_deductions ADD COLUMN IF NOT EXISTS created_by TEXT",
         "CREATE INDEX IF NOT EXISTS idx_tally_voucher_date ON tally_vouchers(company_name, date)",
         "CREATE INDEX IF NOT EXISTS idx_tally_voucher_type ON tally_vouchers(company_name, voucher_type)",
@@ -3436,7 +3440,8 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                tally_master_id, instrument_number, reconciled,
                COALESCE(needs_resync, FALSE) AS needs_resync, last_edited_at,
                'tally' AS source, updated_at, created_at,
-               COALESCE(origin, 'tally') AS origin, yantrai_uid
+               COALESCE(origin, 'tally') AS origin, yantrai_uid,
+               (archived_at IS NOT NULL) AS archived
         FROM tally_vouchers
         WHERE {' AND '.join(tally_where)}
         ORDER BY date DESC
@@ -3494,7 +3499,8 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                NULL AS tally_master_id, '' AS instrument_number, FALSE AS reconciled,
                FALSE AS needs_resync, NULL AS last_edited_at,
                'invoice' AS source, i.created_at AS updated_at, i.created_at AS created_at,
-               'yantrai' AS origin,
+               'yantrai' AS origin, NULL AS yantrai_uid,
+               (i.archived_at IS NOT NULL) AS archived,
                i.file_url,
                CASE
                  WHEN ob.pushed_state THEN 'synced'
@@ -3574,10 +3580,10 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
     # Sort merged by date descending
     results.sort(key=lambda r: r.get('date') or '', reverse=True)
 
-    # Get total count for pagination
-    cursor.execute(f"SELECT COUNT(*) FROM tally_vouchers WHERE {' AND '.join(tally_where)}", tally_params)
+    # Get total count for pagination (archived rows are excluded — they're "off the books")
+    cursor.execute(f"SELECT COUNT(*) FROM tally_vouchers WHERE {' AND '.join(tally_where)} AND archived_at IS NULL", tally_params)
     tally_total = cursor.fetchone()['count']
-    cursor.execute(f"SELECT COUNT(*) FROM invoices WHERE {' AND '.join(inv_where)}", inv_params)
+    cursor.execute(f"SELECT COUNT(*) FROM invoices WHERE {' AND '.join(inv_where)} AND archived_at IS NULL", inv_params)
     inv_total = cursor.fetchone()['count']
 
     cursor.close()
@@ -5738,6 +5744,75 @@ def add_tally_cleanup(company_name, voucher_number, voucher_type=None, party=Non
              voucher_date if voucher_date else None, reason))
         rid = cur.fetchone()[0]; conn.commit()
         return str(rid)
+    finally:
+        cur.close(); conn.close()
+
+
+def archive_vouchers(company_name, ids, archived_by=None):
+    """Soft-archive vouchers (set archived_at) — NOTHING is deleted. Works for both
+    tally_vouchers and invoices. When the archived voucher is present in Tally (a
+    tally_vouchers row, or a synced invoice), also log a tally_cleanup_log entry so the
+    user knows to void/remove it in Tally Prime. Returns {'archived': n}."""
+    if not ids:
+        return {"archived": 0}
+    conn = get_conn(); cur = conn.cursor()
+    n = 0
+    _reason = "Archived in YantrAI — void/remove in Tally Prime"
+    def _log(vnum, vtype, party, amt, vdate):
+        try:
+            cur.execute("""INSERT INTO tally_cleanup_log
+                (company_name, voucher_number, voucher_type, party, amount, voucher_date, reason)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                (company_name, vnum, vtype, party, amt, vdate or None, _reason))
+        except Exception as ce:
+            print(f"archive cleanup-log warn: {ce}")
+    try:
+        for vid in ids:
+            cur.execute("""UPDATE tally_vouchers SET archived_at = CURRENT_TIMESTAMP
+                           WHERE id = %s AND company_name = %s AND archived_at IS NULL
+                           RETURNING voucher_number, voucher_type, ledger_name, amount, date""",
+                        (vid, company_name))
+            row = cur.fetchone()
+            if row:
+                n += 1
+                _log(row[0], row[1], row[2], row[3], row[4])   # tally-present → cleanup checklist
+                continue
+            cur.execute("""UPDATE invoices SET archived_at = CURRENT_TIMESTAMP
+                           WHERE id = %s AND company_name = %s AND archived_at IS NULL
+                           RETURNING invoice_number, COALESCE(voucher_type, category),
+                                     party_name, total_amount, date, status""",
+                        (vid, company_name))
+            inv = cur.fetchone()
+            if inv:
+                n += 1
+                if (inv[5] or '') == 'synced':   # already in Tally → needs manual void there
+                    _log(inv[0], inv[1], inv[2], inv[3], inv[4])
+        conn.commit()
+        return {"archived": n}
+    except Exception as e:
+        conn.rollback(); print(f"archive_vouchers error: {e}")
+        return {"archived": n, "error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+
+def unarchive_vouchers(company_name, ids):
+    """Restore soft-archived vouchers (clear archived_at) in both tables. Returns {'restored': n}."""
+    if not ids:
+        return {"restored": 0}
+    conn = get_conn(); cur = conn.cursor()
+    n = 0
+    try:
+        for vid in ids:
+            cur.execute("UPDATE tally_vouchers SET archived_at = NULL WHERE id=%s AND company_name=%s AND archived_at IS NOT NULL", (vid, company_name))
+            n += cur.rowcount
+            cur.execute("UPDATE invoices SET archived_at = NULL WHERE id=%s AND company_name=%s AND archived_at IS NOT NULL", (vid, company_name))
+            n += cur.rowcount
+        conn.commit()
+        return {"restored": n}
+    except Exception as e:
+        conn.rollback(); print(f"unarchive_vouchers error: {e}")
+        return {"restored": n, "error": str(e)}
     finally:
         cur.close(); conn.close()
 

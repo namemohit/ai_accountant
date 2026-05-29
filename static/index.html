@@ -1868,6 +1868,15 @@
                                 <span id="vf-types-label">All types</span>
                                 <span style="color:#64748b; font-size:0.7rem;">▾</span>
                             </button>
+                            <!-- Status / lifecycle filter (right of voucher-type). "Archived (YantrAI)"
+                                 surfaces soft-archived rows that need to be voided/removed in Tally. -->
+                            <select id="vf-status" onchange="applyVoucherFilters()" title="Filter by status" style="padding: 6px 10px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
+                                <option value="">🏷️ Status: any</option>
+                                <option value="Tally &amp; YantrAI">🟢 Tally &amp; YantrAI</option>
+                                <option value="YantrAI">🟡 YantrAI</option>
+                                <option value="Edited – resync">🟠 Edited – resync</option>
+                                <option value="Archived (YantrAI)">🗄️ Archived (YantrAI)</option>
+                            </select>
                             <input type="date" id="vf-from" onchange="applyVoucherFilters()" title="From date" style="padding: 6px 8px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
                             <input type="date" id="vf-to" onchange="applyVoucherFilters()" title="To date" style="padding: 6px 8px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
                             <input type="text" id="vf-party" list="vf-party-list" oninput="applyVoucherFilters()" placeholder="Party…" title="Filter by party/ledger" style="padding: 6px 10px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem; width: 140px;">
@@ -1915,7 +1924,9 @@
                             <span title="Date range of visible vouchers">📅 <strong id="vstat-daterange" style="color: #cbd5e1;">—</strong></span>
                             <span style="color: #64748b;">·</span>
                             <span id="selected-count">0 selected</span>
-                            <button id="delete-selected-btn" onclick="deleteSelectedVouchers()" title="Permanently delete the selected vouchers (e.g. test / sample / bad rows). Tally-sourced rows are also removed from YantrAI's copy — your actual Tally data is untouched." style="display:none; margin-left:10px; padding:4px 10px; background:rgba(239,68,68,0.12); color:#ef4444; border:1px solid rgba(239,68,68,0.35); border-radius:6px; font-size:0.75rem; cursor:pointer;">🗑️ Delete selected</button>
+                            <button id="archive-selected-btn" onclick="archiveSelectedVouchers()" title="Soft-archive the selected vouchers — they leave the list but stay on file and can be restored. Vouchers that are in Tally get flagged to be voided/removed there. Nothing is deleted." style="display:none; margin-left:10px; padding:4px 10px; background:rgba(148,163,184,0.14); color:#94a3b8; border:1px solid rgba(148,163,184,0.35); border-radius:6px; font-size:0.75rem; cursor:pointer;">🗄️ Archive selected</button>
+                            <button id="restore-selected-btn" onclick="restoreSelectedVouchers()" title="Restore the selected archived vouchers back into the list." style="display:none; margin-left:10px; padding:4px 10px; background:rgba(56,189,248,0.12); color:#38bdf8; border:1px solid rgba(56,189,248,0.35); border-radius:6px; font-size:0.75rem; cursor:pointer;">♻️ Restore selected</button>
+                            <button id="delete-selected-btn" onclick="deleteSelectedVouchers()" title="super_admin only — permanently delete the selected rows (e.g. true junk / demo data). Removes from YantrAI's copy only; your Tally data is untouched." style="display:none; margin-left:10px; padding:4px 10px; background:rgba(239,68,68,0.12); color:#ef4444; border:1px solid rgba(239,68,68,0.35); border-radius:6px; font-size:0.75rem; cursor:pointer;">🗑️ Delete permanently</button>
                         </div>
                     </div>
                 </div>
@@ -6006,13 +6017,10 @@
                     ? `<span style="background: rgba(56,189,248,0.12); color: #38bdf8; padding: 3px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 600;">Tally</span>`
                     : `<span style="background: rgba(218,119,86,0.12); color: var(--primary); padding: 3px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 600;">YantrAI</span>`;
 
-                // Status badge
+                // Status badge — driven by _vRowStatus so column + filter always agree.
                 const needsResync = !!v.needs_resync;
-                const isSynced = v.source === 'tally' || v.status === 'synced';
-                let badgeBg = isSynced ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)';
-                let badgeColor = isSynced ? '#10b981' : '#f59e0b';
-                let badgeText = isSynced ? 'In Tally 🟢' : 'YantrAI only 🟡';
-                if (needsResync) { badgeBg = 'rgba(249, 115, 22, 0.15)'; badgeColor = '#f97316'; badgeText = 'Edited – resync 🟠'; }
+                const _ss = _vStatusStyle(_vRowStatus(v));
+                let badgeBg = _ss.bg, badgeColor = _ss.c, badgeText = _ss.t;
 
                 // Sprint 37 — edit available on every voucher (tally + invoice/PDF/manual)
                 const canEdit = true;
@@ -6022,6 +6030,10 @@
                 const resyncBtn = needsResync
                     ? `<button onclick="event.stopPropagation(); resyncVoucher('${v.id}')" title="Push edit to Tally" style="margin-left:4px; padding:3px 8px; background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.35); border-radius:4px; font-size:0.7rem; cursor:pointer;"><i class="fas fa-sync-alt"></i> Resync</button>`
                     : '';
+                // Per-row soft archive / restore (nothing deleted).
+                const archiveBtn = v.archived
+                    ? `<button onclick="event.stopPropagation(); restoreVouchers(['${v.id}'])" title="Restore from archive" style="margin-left:4px; padding:3px 7px; background:rgba(56,189,248,0.15); color:#38bdf8; border:1px solid rgba(56,189,248,0.3); border-radius:4px; font-size:0.7rem; cursor:pointer;">♻️</button>`
+                    : `<button onclick="event.stopPropagation(); archiveVouchers(['${v.id}'])" title="Archive (soft) — hides it from the list but keeps it on file; flags it to be voided/removed in Tally" style="margin-left:4px; padding:3px 7px; background:rgba(148,163,184,0.15); color:#94a3b8; border:1px solid rgba(148,163,184,0.3); border-radius:4px; font-size:0.7rem; cursor:pointer;">🗄️</button>`;
 
                 // Sprint 26 — AI Gap chips (clickable; opens review popover)
                 const aiChips = _buildAiChips(v.id);
@@ -6052,7 +6064,7 @@
                     <td style="padding: 10px; text-align: right; color: ${!isDebit ? '#4ade80' : '#64748b'}; font-family: monospace;">${!isDebit ? '₹' + amount.toLocaleString('en-IN') : ''}</td>
                     <td style="padding: 10px;">${originHtml}</td>
                     <td style="padding: 10px;">${sourceDocHtml}</td>
-                    <td style="padding: 10px; white-space: nowrap;"><span style="background: ${badgeBg}; color: ${badgeColor}; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">${badgeText}</span>${editBtn}${resyncBtn}</td>
+                    <td style="padding: 10px; white-space: nowrap;"><span style="background: ${badgeBg}; color: ${badgeColor}; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">${badgeText}</span>${editBtn}${resyncBtn}${archiveBtn}</td>
                     <td id="aiflags-${v.id}" style="padding: 10px; white-space: nowrap;">${aiChips || '<span style="color:#475569;">–</span>'}</td>
                 `;
                 if (hasDetail) {
@@ -6178,7 +6190,7 @@
         window._voucherFilters = window._voucherFilters || {
             types: [], from_date: '', to_date: '',
             party: '', amount_min: null, amount_max: null,
-            sort: 'date_desc', search: '',
+            sort: 'date_desc', search: '', status: '',
             columnFilters: {}   // { colKey: { values:[...], sort: null|'asc'|'desc' } }
         };
 
@@ -6205,6 +6217,7 @@
                 setVal('vf-amount-min', f.amount_min);
                 setVal('vf-amount-max', f.amount_max);
                 setVal('vf-sort',       f.sort);
+                setVal('vf-status',     f.status);
                 setVal('voucher-search', f.search);
             } catch (e) {}
         }
@@ -6222,8 +6235,10 @@
             _voucherFilters.amount_max  = (amax === '' || amax == null) ? null : parseFloat(amax);
             _voucherFilters.sort        = document.getElementById('vf-sort')?.value || 'date_desc';
             _voucherFilters.search      = (document.getElementById('voucher-search')?.value || '').toLowerCase();
+            _voucherFilters.status      = document.getElementById('vf-status')?.value || '';
             // Sprint 26 — AI Gap filter
             _voucherFilters.ai_gap      = document.getElementById('vf-ai-gap')?.value || '';
+            if (typeof updateSelectedCount === 'function') updateSelectedCount();  // archive vs restore toolbar
             _saveVoucherFilters();
             _updateColChevronIndicators();
             renderVouchers();
@@ -6234,12 +6249,13 @@
             _voucherFilters = {
                 types: [], from_date: '', to_date: '',
                 party: '', amount_min: null, amount_max: null,
-                sort: 'date_desc', search: '', columnFilters: {},
+                sort: 'date_desc', search: '', status: '', columnFilters: {},
                 ai_gap: ''   // Sprint 26
             };
             // Reset DOM
             if (typeof _refreshVoucherTypeButton === 'function') _refreshVoucherTypeButton();
             const aiSel = document.getElementById('vf-ai-gap'); if (aiSel) aiSel.value = '';
+            const stSel = document.getElementById('vf-status'); if (stSel) stSel.value = '';
             ['vf-from','vf-to','vf-party','vf-amount-min','vf-amount-max','voucher-search'].forEach(id => {
                 const el = document.getElementById(id);
                 if (el) el.value = '';
@@ -6266,10 +6282,20 @@
             if (o === 'tally') return 'Tally';
             return _vRowSource(v) === 'tally' ? 'Tally' : 'YantrAI';
         }
-        // Status label — mirrors the displayed badge logic (not just `reconciled`).
+        // Status / lifecycle label (priority order). Drives both the badge and the Status filter.
         function _vRowStatus(v) {
+            if (v.archived) return 'Archived (YantrAI)';
             if (v.needs_resync) return 'Edited – resync';
-            return (v.source === 'tally' || v.status === 'synced' || v.reconciled) ? 'In Tally' : 'YantrAI only';
+            return (v.source === 'tally' || v.status === 'synced' || v.reconciled) ? 'Tally & YantrAI' : 'YantrAI';
+        }
+        // Badge styling per status (bg / color / label-with-emoji).
+        function _vStatusStyle(st) {
+            return ({
+                'Tally & YantrAI':    {bg:'rgba(16, 185, 129, 0.15)', c:'#10b981', t:'Tally & YantrAI 🟢'},
+                'YantrAI':            {bg:'rgba(245, 158, 11, 0.15)', c:'#f59e0b', t:'YantrAI 🟡'},
+                'Edited – resync':    {bg:'rgba(249, 115, 22, 0.15)', c:'#f97316', t:'Edited – resync 🟠'},
+                'Archived (YantrAI)': {bg:'rgba(148, 163, 184, 0.15)', c:'#94a3b8', t:'Archived (YantrAI) 🗄️'},
+            })[st] || {bg:'rgba(245, 158, 11, 0.15)', c:'#f59e0b', t:st};
         }
         function _vRowDate(v)   { return (v.date || '').substring(0, 10); }   // YYYY-MM-DD
         // Debit/Credit columns: Purchase+Payment hit Debit; Sales+Receipt hit Credit.
@@ -6279,6 +6305,16 @@
         // Single predicate combining all 3 layers. Returns true if row should be visible.
         function _voucherFilterMatch(v) {
             const f = _voucherFilters;
+            // Status / lifecycle filter. Archived rows are hidden by default (off the books)
+            // UNLESS "Archived (YantrAI)" is explicitly requested — via the top Status filter
+            // OR the per-column Status chevron filter.
+            const _st = _vRowStatus(v);
+            const _colStatus = (f.columnFilters && f.columnFilters.status && Array.isArray(f.columnFilters.status.values))
+                ? f.columnFilters.status.values : null;
+            const _wantArchived = (f.status === 'Archived (YantrAI)')
+                || (_colStatus && _colStatus.includes('Archived (YantrAI)'));
+            if (_st === 'Archived (YantrAI)' && !_wantArchived) return false;
+            if (f.status && _st !== f.status) return false;
             // Sprint 26 — AI Gap filter (joins against client-side suggestions map)
             if (f.ai_gap) {
                 const sugs = (window._aiSuggestionsByVoucherId || {})[v.id] || [];
@@ -11082,11 +11118,19 @@
 
         window.updateSelectedCount = () => {
             const checkedCount = document.querySelectorAll('.history-row-checkbox:checked').length;
-            document.getElementById('selected-count').innerText = `${checkedCount} item(s) selected`;
+            const scEl = document.getElementById('selected-count');
+            if (scEl) scEl.innerText = `${checkedCount} item(s) selected`;
 
-            // Sprint 33 — show the Delete button only when rows are selected
+            const show = checkedCount > 0;
+            const viewingArchived = !!(window._voucherFilters && _voucherFilters.status === 'Archived (YantrAI)');
+            const arcBtn = document.getElementById('archive-selected-btn');
+            const resBtn = document.getElementById('restore-selected-btn');
             const delBtn = document.getElementById('delete-selected-btn');
-            if (delBtn) delBtn.style.display = checkedCount > 0 ? 'inline-flex' : 'none';
+            // Archive when viewing the live list; Restore when viewing the Archived filter.
+            if (arcBtn) arcBtn.style.display = (show && !viewingArchived) ? 'inline-flex' : 'none';
+            if (resBtn) resBtn.style.display = (show && viewingArchived) ? 'inline-flex' : 'none';
+            // Hard-delete is super_admin-only (for true junk / demo rows), never the default.
+            if (delBtn) delBtn.style.display = (show && window.__isSuperAdmin) ? 'inline-flex' : 'none';
 
             // Sync header checkbox
             const headerCheckbox = document.getElementById('select-all-history');
@@ -11094,6 +11138,51 @@
             if (headerCheckbox) {
                 headerCheckbox.checked = checkedCount === totalCount && totalCount > 0;
             }
+        };
+
+        function _selectedVoucherIds() {
+            return Array.from(document.querySelectorAll('.history-row-checkbox:checked'))
+                        .map(cb => cb.getAttribute('data-inv-id')).filter(Boolean);
+        }
+        // Soft archive / restore (nothing is deleted). Used by per-row buttons + bulk toolbar.
+        window.archiveVouchers = async (ids) => {
+            if (!ids || !ids.length) return;
+            const co = _getActiveCo();
+            try {
+                const res = await fetch(`${API}/api/vouchers/archive`, {
+                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({ company_name: co.company_name, ids })
+                });
+                const j = await res.json();
+                if (!res.ok) throw new Error(j.detail || 'archive failed');
+                if (typeof showChatToast === 'function')
+                    showChatToast(`🗄️ Archived ${j.archived||0} voucher(s). Filter Status → "Archived (YantrAI)" to view/restore.`);
+                refreshVouchers();
+            } catch (e) { alert('Archive failed: ' + e.message); }
+        };
+        window.restoreVouchers = async (ids) => {
+            if (!ids || !ids.length) return;
+            const co = _getActiveCo();
+            try {
+                const res = await fetch(`${API}/api/vouchers/unarchive`, {
+                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({ company_name: co.company_name, ids })
+                });
+                const j = await res.json();
+                if (!res.ok) throw new Error(j.detail || 'restore failed');
+                if (typeof showChatToast === 'function') showChatToast(`♻️ Restored ${j.restored||0} voucher(s).`);
+                refreshVouchers();
+            } catch (e) { alert('Restore failed: ' + e.message); }
+        };
+        window.archiveSelectedVouchers = () => {
+            const ids = _selectedVoucherIds();
+            if (!ids.length) return;
+            if (!confirm(`Archive ${ids.length} voucher(s)?\n\nThey leave the list but stay on file and can be restored anytime. Any that are in Tally get flagged to be voided/removed there. Nothing is deleted.`)) return;
+            archiveVouchers(ids);
+        };
+        window.restoreSelectedVouchers = () => {
+            const ids = _selectedVoucherIds();
+            if (ids.length) restoreVouchers(ids);
         };
 
         // Sprint 33 — Delete selected vouchers (test/sample/bad rows). Removes

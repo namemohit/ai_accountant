@@ -685,7 +685,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "214"
+APP_VERSION = "215"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -4269,6 +4269,28 @@ async def delete_vouchers_endpoint(payload: dict):
     except Exception as e:
         import traceback; traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/vouchers/archive")
+async def archive_vouchers_endpoint(payload: dict):
+    """Soft-archive vouchers (nothing is deleted). Body: {company_name, ids:[...]}.
+    Sets archived_at so they leave the default list but stay on file + restorable. When an
+    archived voucher is present in Tally, logs a tally_cleanup_log 'void/remove in Tally' note."""
+    company_name = (payload or {}).get("company_name")
+    ids = (payload or {}).get("ids") or []
+    if not company_name or not ids:
+        raise HTTPException(status_code=400, detail="company_name and ids required")
+    return db.archive_vouchers(company_name, ids, archived_by=(payload or {}).get("archived_by"))
+
+
+@app.post("/api/vouchers/unarchive")
+async def unarchive_vouchers_endpoint(payload: dict):
+    """Restore soft-archived vouchers. Body: {company_name, ids:[...]}."""
+    company_name = (payload or {}).get("company_name")
+    ids = (payload or {}).get("ids") or []
+    if not company_name or not ids:
+        raise HTTPException(status_code=400, detail="company_name and ids required")
+    return db.unarchive_vouchers(company_name, ids)
 
 
 @app.post("/api/vouchers/cleanup/{cleanup_id}/done")
