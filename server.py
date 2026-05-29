@@ -745,7 +745,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "222"
+APP_VERSION = "223"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -8289,13 +8289,16 @@ async def agent_resume(payload: dict):
         "is_super_admin": bool(u_row["is_super_admin"]),
         "expires_at": datetime.utcnow() + AGENT_SESSION_TTL,
     }
-    # Persist + enforce one-latest-session-per-user (see /api/agent/auth).
+    # Persist the resumed session. IMPORTANT: do NOT revoke other sessions here.
+    # /api/agent/resume is the agent's AUTO-RECOVERY path (heartbeat + poll threads can
+    # both trigger it). Revoking-others on resume made two token-bearing callers — or a
+    # racy double-resume — evict each other in an endless 401↔resume loop (the v222 red-dot
+    # regression). Single-latest-session is enforced only on explicit /api/agent/auth
+    # (deliberate login); stale resume tokens simply expire via the sliding TTL.
     try:
         db.db_create_agent_session(token, user_id, username, name,
                                    bool(u_row["is_super_admin"]),
                                    int(AGENT_SESSION_TTL.total_seconds()))
-        db.db_revoke_other_agent_sessions(user_id, token)
-        _prune_user_sessions_in_memory(user_id, token)
     except Exception as e:
         print(f"[agent/resume] persist session failed: {e}", flush=True)
     db.touch_agent_device(device_token)
