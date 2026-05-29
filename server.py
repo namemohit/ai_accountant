@@ -2600,25 +2600,12 @@ async def push_to_tally(data: dict, background_tasks: BackgroundTasks = None):
         # The outbox/agent path is now the ONE canonical way data reaches Tally.
         response = {"note": "queued to tally_outbox; bridge agent will push"}
 
-        if session_id:
-            try:
-                total = data.get('total_amount', 0)
-                inv_num = data.get('invoice_number', '')
-                p_name = data.get('party_name', '')
-                # Sprint 32 — Honest copy. The voucher is QUEUED, not synced.
-                # The bridge agent will pick it up and the Vouchers tab badge
-                # will flip to ✅ Pushed once Tally ack'd. Until then it's
-                # still in tally_outbox awaiting the agent.
-                db.save_chat_message(
-                    session_id, "assistant",
-                    f"🟠 Invoice **{inv_num}** for **{p_name}** queued for Tally sync "
-                    f"(₹{float(total):.2f}). The Windows Agent will push it to Tally Prime "
-                    f"on its next poll — watch the Vouchers tab badge flip ✅ Pushed when "
-                    f"Tally accepts it.",
-                    "text")
-            except Exception as e:
-                print(f"Error saving confirmation messages to DB: {e}")
-                
+        # NOTE: we intentionally do NOT post a separate "queued for Tally sync" chat message
+        # here. It duplicated the invoice card's own status badge ("Saved in YantrAI · Queued
+        # for Tally" → Pushing → ✅/❌) and Source-PDF link, which are the single source of
+        # truth. The voucher is still saved (save_invoice) + enqueued (enqueue_tally_push)
+        # above; the Vouchers tab reflects its state.
+
         return {"status": "success", "tally_response": response}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
