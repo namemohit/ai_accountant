@@ -7174,6 +7174,9 @@
                 // Sprint 33 — manual Tally cleanup
                 'needs_tally_cleanup': { icon: '⚠️', label: 'Delete in Tally',  color: '#fbbf24' },
                 'tally_cleanup_done':  { icon: '🧹', label: 'Cleaned in Tally', color: '#64748b' },
+                // Missing GST/system ledger the user must create in Tally Prime
+                'needs_ledger_create': { icon: '🏷️', label: 'Create ledger in Tally', color: '#f59e0b' },
+                'ledger_created':      { icon: '✅', label: 'Ledger created',           color: '#64748b' },
             };
             // Sprint 33 — Filter dropdown ("folder") at the top of Event Logs.
             const filter = window._voucherEventFilter || '';
@@ -7209,7 +7212,13 @@
                     const payload = r.reviewed_payload || r.parsed_payload || {};
                     let detail = '';
                     if (r.event_source === 'tally_cleanup') {
-                        if (r.status === 'needs_tally_cleanup') {
+                        if (r.status === 'needs_ledger_create') {
+                            const msg = r.last_error || (`Create ledger '${r.ledger_name || ''}' in Tally Prime (Duties & Taxes), then it syncs on the next retry`);
+                            detail = `<span style="color:#f59e0b;" title="${escapeHtml(r.last_error || '')}">${escapeHtml(msg)}</span>
+                                <button onclick="markCleanupDone('${r.id}')" style="margin-left:8px; padding:2px 8px; background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.35); border-radius:4px; font-size:0.7rem; cursor:pointer;">✓ Created in Tally</button>`;
+                        } else if (r.status === 'ledger_created') {
+                            detail = `<span style="color:#64748b;">Created in Tally ✓</span>`;
+                        } else if (r.status === 'needs_tally_cleanup') {
                             const vd = r.voucher_date ? new Date(r.voucher_date).toLocaleDateString('en-IN',{dateStyle:'medium'}) : '';
                             detail = `<span style="color:#fbbf24;" title="In Tally: Gateway → Day Book → set date ${vd} → find this voucher → Alt+D to delete">Delete in Tally Prime (Day Book ${vd} → Alt+D)</span>
                                 <button onclick="markCleanupDone('${r.id}')" style="margin-left:8px; padding:2px 8px; background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.35); border-radius:4px; font-size:0.7rem; cursor:pointer;">✓ Done in Tally</button>`;

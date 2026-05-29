@@ -718,7 +718,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.9.0"   # + stamp [YAI:<uid>] sticky-origin marker into pushed vouchers
+AGENT_VERSION = "0.10.0"  # + verify GST ledger truly-missing in live Tally → ask user to create it
 
 
 def _post_json(url, body, timeout=15.0):
@@ -1050,6 +1050,19 @@ def _is_system_ledger(name):
     return bool(_SYSTEM_LEDGER_PATTERNS.match((name or "").strip()))
 
 
+def _gst_ledger_meta(name, payload):
+    """Structured hint for a missing GST/tax ledger the USER must create in Tally:
+    group, GST duty-head + Output/Input inferred from the name, and the blocking voucher."""
+    n = (name or "").lower()
+    head = ("Central Tax" if "cgst" in n else
+            "State Tax" if "sgst" in n else
+            "Integrated Tax" if "igst" in n else "")
+    io = ("Output" if "output" in n else "Input" if "input" in n else "")
+    vnum = (payload.get("invoice_number") or payload.get("voucher_number") or "").strip()
+    return {"ledger_name": name, "group": "Duties & Taxes",
+            "gst_head": head, "io": io, "voucher_number": vnum}
+
+
 def _try_push_once(payload, tally_url, company_name):
     """One push attempt — returns (ok, info)."""
     try:
@@ -1285,9 +1298,30 @@ def push_voucher_to_tally(payload, tally_url, company_name, server_url=None):
         if not missing or missing in created_ledgers:
             break  # Either Tally's error isn't a missing-ledger one, or we already tried this
         if _is_system_ledger(missing):
-            return False, (f"Tally is missing system ledger '{missing}'. "
-                           f"Please create it in Tally Prime with the correct GST "
-                           f"classification and group, then retry.")
+            # Only ask the user to CREATE it when it's TRULY absent in the LIVE Tally —
+            # our server-side ledger dump can be stale, so verify against Tally right now.
+            try:
+                live = fetch_local_ledgers(tally_url) or []
+            except Exception:
+                live = []
+            live_lc = {n.strip().lower() for n in live}
+            if live and missing.strip().lower() in live_lc:
+                # False alarm — the ledger exists live; don't nag the user to create it.
+                return False, (f"Tally rejected the push but ledger '{missing}' already exists in "
+                               f"Tally — check its GST classification or the voucher. "
+                               f"Details: {str(last_info)[:300]}")
+            if not live:
+                # Couldn't read the live chart of accounts — don't fabricate a 'create ledger' to-do.
+                return False, (f"Tally is missing system ledger '{missing}'. Please create it in "
+                               f"Tally Prime with the correct GST classification, then retry.")
+            # Truly missing in live Tally → structured 'create this ledger' to-do for the user.
+            nl = _gst_ledger_meta(missing, payload)
+            human = (f"Tally is missing system ledger '{missing}'. Create it in Tally Prime "
+                     f"(group {nl['group']}"
+                     + (f" · {nl['gst_head']}" if nl['gst_head'] else "")
+                     + (f" ({nl['io']})" if nl['io'] else "")
+                     + "), then it will sync on the next retry.")
+            return False, "NEEDS_LEDGER|" + json.dumps(nl) + "|" + human
         parent = _guess_parent_group(missing, payload)
         gstin = payload.get("billing_party_gstin") or payload.get("party_gstin")
         pan = payload.get("pan") or payload.get("party_pan")
@@ -1362,9 +1396,19 @@ def outbox_poll_loop(server_url, tally_url, company_name, stop_event, log_fn=Non
                                timeout=10.0)
                 else:
                     log(f"  ✗ Failed outbox row {oid[:8]}… — {info}")
-                    _post_json(f"{server_url}/api/tally/queue/{oid}/fail",
-                               {"error": str(info)[:1000], "session_token": session_token},
-                               timeout=10.0)
+                    fail_body = {"error": str(info)[:1000], "session_token": session_token,
+                                 "company_name": company_name}
+                    # When a GST/system ledger is truly missing in the live Tally, the push
+                    # returns a structured "NEEDS_LEDGER|{json}|message" so the server logs a
+                    # 'create this ledger in Tally Prime' to-do for the user.
+                    if isinstance(info, str) and info.startswith("NEEDS_LEDGER|"):
+                        try:
+                            _, _j, _human = info.split("|", 2)
+                            fail_body["needs_ledger"] = json.loads(_j)
+                            fail_body["error"] = _human[:1000]
+                        except Exception:
+                            pass
+                    _post_json(f"{server_url}/api/tally/queue/{oid}/fail", fail_body, timeout=10.0)
         except Exception as e:
             log(f"poll error: {e}")
         # Poll every 12s — fast enough that the web UI sees state transitions

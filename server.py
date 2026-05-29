@@ -351,12 +351,31 @@ async def tally_queue_ack(outbox_id: str, payload: dict):
 
 @app.post("/api/tally/queue/{outbox_id}/fail")
 async def tally_queue_fail(outbox_id: str, payload: dict):
-    """Bridge agent reports a failure. Body: {error, session_token?}."""
+    """Bridge agent reports a failure. Body: {error, session_token?, company_name?,
+    needs_ledger?: {ledger_name, group, gst_head, io, voucher_number}}.
+    When needs_ledger is present, the agent has CONFIRMED (against the live Tally) that a
+    GST/system ledger is truly missing — log a 'create this ledger in Tally Prime' to-do."""
     try:
         st = (payload or {}).get("session_token")
         if st and not validate_agent_session(st):
             raise HTTPException(status_code=401, detail="Session expired.")
         err = (payload or {}).get("error") or "Unknown error"
+        nl = (payload or {}).get("needs_ledger")
+        cn = (payload or {}).get("company_name")
+        if isinstance(nl, dict) and nl.get("ledger_name") and cn:
+            try:
+                grp = nl.get("group") or "Duties & Taxes"
+                head = nl.get("gst_head") or ""
+                io = nl.get("io") or ""
+                vnum = nl.get("voucher_number") or ""
+                reason = (f"Create ledger '{nl['ledger_name']}' in Tally Prime — group {grp}"
+                          + (f" · {head}" if head else "")
+                          + (f" ({io})" if io else "")
+                          + (f". Needed by voucher {vnum}." if vnum else "."))
+                db.add_tally_cleanup(cn, voucher_number=vnum, reason=reason,
+                                     kind='create_ledger', ledger_name=nl['ledger_name'])
+            except Exception as ce:
+                print(f"[tally_queue_fail] create_ledger log error: {ce}", flush=True)
         return {"status": "success", **db.fail_tally_outbox(outbox_id, err)}
     except HTTPException:
         raise
@@ -685,7 +704,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "218"
+APP_VERSION = "219"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -4290,6 +4309,17 @@ async def mark_cleanup_done_endpoint(cleanup_id: str, payload: dict = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/tally/ledgers-to-create")
+async def ledgers_to_create_endpoint(company_name: str, status: str = "pending"):
+    """Missing GST/system ledgers the agent confirmed absent in the live Tally — the user
+    must create these in Tally Prime. Drives the 'Create these ledgers' checklist."""
+    try:
+        return {"status": "success",
+                "items": db.list_tally_cleanup(company_name, status=(status or None), kind="create_ledger")}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/vouchers/drafts")
 async def list_drafts_endpoint(company_id: str = None, company_name: str = None,
                                  status: str = None, limit: int = 200):
@@ -4871,13 +4901,20 @@ async def voucher_events_endpoint(company_name: str, company_id: str = None, lim
         # Sprint 33 — manual Tally cleanup items (persist past voucher deletion)
         try:
             for cl in db.list_tally_cleanup(company_name):
+                _kind = cl.get("kind") or 'delete_voucher'
+                _is_ledger = (_kind == 'create_ledger')
+                _done = (cl.get("status") == "done")
                 rows.append({
                     "id": cl.get("id"),
                     "event_source": "tally_cleanup",
-                    "status": "needs_tally_cleanup" if cl.get("status") != "done" else "tally_cleanup_done",
+                    "kind": _kind,
+                    "ledger_name": cl.get("ledger_name"),
+                    "status": (("ledger_created" if _is_ledger else "tally_cleanup_done") if _done
+                               else ("needs_ledger_create" if _is_ledger else "needs_tally_cleanup")),
                     "cleanup_status": cl.get("status"),
                     "voucher_type": cl.get("voucher_type"),
-                    "source_file_name": cl.get("voucher_number") or "(voucher)",
+                    "source_file_name": (cl.get("ledger_name") if _is_ledger else cl.get("voucher_number"))
+                                        or ("(ledger)" if _is_ledger else "(voucher)"),
                     "source_file_type": "tally_cleanup",
                     "last_error": cl.get("reason"),
                     "parsed_payload": {"party": cl.get("party"), "total_amount": cl.get("amount")},

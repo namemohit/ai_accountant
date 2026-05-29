@@ -482,6 +482,10 @@ def init_db():
             done_at         TIMESTAMP
         )""",
         "CREATE INDEX IF NOT EXISTS idx_tally_cleanup_company ON tally_cleanup_log(company_name, status, created_at)",
+        # Reuse this table for "things to do in Tally Prime": delete a voucher (default)
+        # OR create a missing GST/system ledger. kind discriminates; ledger_name holds the ledger.
+        "ALTER TABLE tally_cleanup_log ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'delete_voucher'",
+        "ALTER TABLE tally_cleanup_log ADD COLUMN IF NOT EXISTS ledger_name TEXT",
 
         # ── SPRINT 4 — GSTR Reconciliation ──────────────────────────
         """CREATE TABLE IF NOT EXISTS gstr_filings (
@@ -5753,15 +5757,26 @@ def ack_tally_outbox(outbox_id, tally_voucher_guid=None):
 
 
 def add_tally_cleanup(company_name, voucher_number, voucher_type=None, party=None,
-                      amount=None, voucher_date=None, reason=None):
-    """Sprint 33 — Record a voucher the user must manually delete in Tally Prime."""
+                      amount=None, voucher_date=None, reason=None,
+                      kind='delete_voucher', ledger_name=None):
+    """Record a 'to do in Tally Prime' item: a voucher to delete (kind='delete_voucher',
+    default) OR a missing GST/system ledger to create (kind='create_ledger', ledger_name set).
+    For create_ledger, dedup on (company, ledger_name) while still pending."""
     conn = get_conn(); cur = conn.cursor()
     try:
+        if kind == 'create_ledger' and ledger_name:
+            cur.execute("""SELECT id FROM tally_cleanup_log
+                           WHERE company_name=%s AND kind='create_ledger'
+                             AND LOWER(ledger_name)=LOWER(%s) AND status='pending' LIMIT 1""",
+                        (company_name, ledger_name))
+            ex = cur.fetchone()
+            if ex:
+                return str(ex[0])
         cur.execute("""INSERT INTO tally_cleanup_log
-            (company_name, voucher_number, voucher_type, party, amount, voucher_date, reason)
-            VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+            (company_name, voucher_number, voucher_type, party, amount, voucher_date, reason, kind, ledger_name)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
             (company_name, voucher_number, voucher_type, party, amount,
-             voucher_date if voucher_date else None, reason))
+             voucher_date if voucher_date else None, reason, kind, ledger_name))
         rid = cur.fetchone()[0]; conn.commit()
         return str(rid)
     finally:
@@ -5837,8 +5852,9 @@ def unarchive_vouchers(company_name, ids):
         cur.close(); conn.close()
 
 
-def list_tally_cleanup(company_name, status=None):
-    """List manual-Tally-cleanup items for a company."""
+def list_tally_cleanup(company_name, status=None, kind=None):
+    """List manual-Tally-cleanup items for a company. Optionally filter by status
+    ('pending'|'done') and kind ('delete_voucher'|'create_ledger')."""
     conn = get_conn()
     from psycopg2.extras import RealDictCursor
     cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -5847,6 +5863,8 @@ def list_tally_cleanup(company_name, status=None):
         p = [company_name]
         if status:
             q += " AND status=%s"; p.append(status)
+        if kind:
+            q += " AND COALESCE(kind,'delete_voucher')=%s"; p.append(kind)
         q += " ORDER BY created_at DESC"
         cur.execute(q, p)
         rows = []
