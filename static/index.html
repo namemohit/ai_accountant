@@ -10549,8 +10549,8 @@
                 }
             }, 800);
 
-            appendAIMessage({ text: 'Syncing your edited data directly into Tally Prime...', ui_type: 'text' });
-            
+            // (No separate "Syncing…" chat bubble — the invoice card's status badge below
+            //  shows the live state: Saved · Queued for Tally → Pushing → ✅ In Tally / ❌.)
             try {
                 // Send feedback for any corrections made in the chat table
                 if (corrections.length > 0) {
@@ -10655,7 +10655,8 @@
                     // real Tally state (Queued → Pushing → ✅ In Tally / ❌ error).
                     const respData = await (async () => { try { return await res.clone().json(); } catch (e) { return null; } })();
                     const invId = respData && (respData.invoice_id || respData.id);
-                    appendAIMessage({ text: `📥 Saved Invoice **${invoiceNumber}** for **${partyName}** in YantrAI books (₹${totalAmount.toFixed(2)}). Queued for Windows Agent — confirmation will appear here when Tally accepts it.`, ui_type: 'text' });
+                    // No separate confirmation bubble — the card's status badge (below) is the
+                    // single source of truth: "Saved in YantrAI · Queued for Tally" → ✅ / ❌.
 
                     // Sprint 8: tag chat title with ✅ + voucher number so it's clear in sidebar
                     try {
@@ -10671,7 +10672,7 @@
                     } catch (renameErr) { console.warn('chat title rename:', renameErr); }
 
                     if (statusBadge) {
-                        statusBadge.innerHTML = `<i class="fas fa-hourglass-half" style="color: #f59e0b; font-size: 0.95rem;"></i> Saved · Queued for Tally`;
+                        statusBadge.innerHTML = `<i class="fas fa-hourglass-half" style="color: #f59e0b; font-size: 0.95rem;"></i> Saved in YantrAI · Queued for Tally`;
                         statusBadge.style.color = '#f59e0b';
                         // Poll the outbox for up to 2 minutes
                         if (invId && typeof pollTallyOutboxStatus === 'function') {

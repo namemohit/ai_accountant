@@ -5652,6 +5652,25 @@ def enqueue_tally_push(payload, invoice_id=None, voucher_id=None,
         return None
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
+        # Idempotency: if a non-terminal push for this invoice is already queued (pending or
+        # pushing), UPDATE it in place instead of inserting a second one. This prevents a
+        # duplicate Tally voucher when the user clicks Confirm & Sync again before the first
+        # push completes. (After it has pushed + synced back, the /push-to-tally re-push guard
+        # via tally_twin_exists() blocks re-enqueue entirely.)
+        if invoice_id:
+            cur.execute("""SELECT id FROM tally_outbox
+                           WHERE company_name = %s AND invoice_id = %s
+                             AND state IN ('pending','pushing')
+                           ORDER BY enqueued_at DESC LIMIT 1""", (company_name, invoice_id))
+            ex = cur.fetchone()
+            if ex:
+                cur.execute("""UPDATE tally_outbox
+                               SET payload = %s::jsonb, updated_at = CURRENT_TIMESTAMP
+                               WHERE id = %s RETURNING id, enqueued_at, state""",
+                            (json.dumps(payload), ex["id"]))
+                row = cur.fetchone(); conn.commit()
+                return {"id": str(row["id"]), "state": row["state"],
+                        "enqueued_at": row["enqueued_at"], "deduped": True}
         cur.execute("""
             INSERT INTO tally_outbox (invoice_id, voucher_id, company_name, payload, enqueued_by)
             VALUES (%s, %s, %s, %s::jsonb, %s)
