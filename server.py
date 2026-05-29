@@ -77,6 +77,19 @@ def resolve_agent_request(payload: dict, required_perm: str = "edit"):
     return None, None, company_name or "Acme Corp"
 
 
+def _prune_user_sessions_in_memory(user_id, keep_token):
+    """Drop this user's OTHER in-memory session entries so the cache matches the DB's
+    one-latest-session rule (DB is authoritative; this just keeps the mirror clean)."""
+    if not user_id:
+        return
+    try:
+        for t in [t for t, s in agent_sessions.items()
+                  if t != keep_token and s.get("user_id") == user_id]:
+            agent_sessions.pop(t, None)
+    except Exception:
+        pass
+
+
 def validate_agent_session(token):
     """Look up an active session token. Returns the session dict or None if invalid/expired.
 
@@ -732,7 +745,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "221"
+APP_VERSION = "222"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -8136,12 +8149,16 @@ async def agent_auth(credentials: dict):
         "is_super_admin": bool(u_row["is_super_admin"]),
         "expires_at": datetime.utcnow() + AGENT_SESSION_TTL,
     }
-    # Persist so the session survives server restarts/deploys (Sprint 35).
+    # Persist so the session survives server restarts/deploys (Sprint 35), and enforce
+    # ONE latest session per user — revoke this user's older tokens so a stale one can't
+    # linger and win a race against the fresh one.
     try:
         db.db_create_agent_session(token, user_id, username,
                                    legacy_user.get("name", username),
                                    bool(u_row["is_super_admin"]),
                                    int(AGENT_SESSION_TTL.total_seconds()))
+        db.db_revoke_other_agent_sessions(user_id, token)
+        _prune_user_sessions_in_memory(user_id, token)
     except Exception as e:
         print(f"[agent/auth] persist session failed: {e}", flush=True)
 
@@ -8272,11 +8289,13 @@ async def agent_resume(payload: dict):
         "is_super_admin": bool(u_row["is_super_admin"]),
         "expires_at": datetime.utcnow() + AGENT_SESSION_TTL,
     }
-    # Persist so the session survives server restarts/deploys (Sprint 35).
+    # Persist + enforce one-latest-session-per-user (see /api/agent/auth).
     try:
         db.db_create_agent_session(token, user_id, username, name,
                                    bool(u_row["is_super_admin"]),
                                    int(AGENT_SESSION_TTL.total_seconds()))
+        db.db_revoke_other_agent_sessions(user_id, token)
+        _prune_user_sessions_in_memory(user_id, token)
     except Exception as e:
         print(f"[agent/resume] persist session failed: {e}", flush=True)
     db.touch_agent_device(device_token)

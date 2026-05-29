@@ -718,7 +718,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.11.0"  # + use server-resolved real GST ledger names (payload.*_ledger); hardcoded = fallback
+AGENT_VERSION = "0.12.0"  # + live-token worker loops + self-heal on 401 (device-token resume); no more wedged sessions
 
 
 def _post_json(url, body, timeout=15.0):
@@ -1347,29 +1347,46 @@ def push_voucher_to_tally(payload, tally_url, company_name, server_url=None):
     return False, last_info or "Push failed after 5 auto-create attempts"
 
 
-def heartbeat_loop(server_url, company_name, stop_event, session_token=None):
-    """Ping /api/tally/heartbeat every 30s so the web sidebar pill turns 🟢."""
+def heartbeat_loop(server_url, company_name, stop_event, token_provider=None, refresh_fn=None):
+    """Ping /api/tally/heartbeat every 30s so the web sidebar pill turns 🟢.
+
+    Reads the session token LIVE each iteration via token_provider (NOT a value
+    captured at launch) — so when the session refreshes the heartbeat immediately
+    uses the new token, exactly like the tunnel loop. On a 401 (stale session, e.g.
+    after a server redeploy) it self-heals by calling refresh_fn (device-token
+    resume), then the next ping uses the refreshed token."""
+    def _tok():
+        return token_provider() if callable(token_provider) else token_provider
     while not stop_event.is_set():
         try:
-            _post_json(
+            resp = _post_json(
                 f"{server_url}/api/tally/heartbeat",
                 {"company_name": company_name, "agent_version": AGENT_VERSION,
-                 "session_token": session_token},
+                 "session_token": _tok()},
                 timeout=8.0,
             )
+            if isinstance(resp, dict) and "401" in str(resp.get("_error", "")) and callable(refresh_fn):
+                refresh_fn()
         except Exception:
             pass
         stop_event.wait(30)
 
 
 def outbox_poll_loop(server_url, tally_url, company_name, stop_event, log_fn=None,
-                     session_token=None):
-    """Claim pending rows from /api/tally/queue, push each to Tally, ack/fail."""
+                     token_provider=None, refresh_fn=None):
+    """Claim pending rows from /api/tally/queue, push each to Tally, ack/fail.
+
+    Reads the session token LIVE each iteration (token_provider) and self-heals on
+    a 401 (refresh_fn → device-token resume), so a stale session never permanently
+    wedges the pusher — it recovers on the next poll without a manual restart."""
     def log(msg):
         if log_fn: log_fn(msg)
         else: print(f"[outbox] {msg}", flush=True)
+    def _tok():
+        return token_provider() if callable(token_provider) else token_provider
     while not stop_event.is_set():
         try:
+            session_token = _tok()
             _qs = f"company_name={urllib.parse.quote(company_name)}&limit=10"
             if session_token:
                 _qs += f"&session_token={urllib.parse.quote(session_token)}"
@@ -1377,6 +1394,11 @@ def outbox_poll_loop(server_url, tally_url, company_name, stop_event, log_fn=Non
                 f"{server_url}/api/tally/queue?{_qs}",
                 timeout=10.0,
             )
+            # Self-heal: a 401 means the session token went stale (e.g. server
+            # redeploy). Refresh via the durable device token and retry immediately.
+            if isinstance(res, dict) and "401" in str(res.get("_error", "")):
+                if callable(refresh_fn) and refresh_fn():
+                    continue
             rows = (res or {}).get("data") or []
             if rows:
                 log(f"Claimed {len(rows)} voucher(s) for push to Tally.")
@@ -1898,19 +1920,45 @@ class TallyBridgeApp:
         # enqueued by /push-to-tally and writes them into Tally Prime.
         if not getattr(self, "_outbox_stop_event", None):
             self._outbox_stop_event = threading.Event()
+            # Pass a LIVE token provider (lambda) + a self-heal callback, so the loops
+            # always use the current session and recover from a 401 on their own.
+            _token_provider = lambda: getattr(self, "session_token", None)
             threading.Thread(
                 target=heartbeat_loop,
                 args=(server_url, self.selected_company_name, self._outbox_stop_event,
-                      getattr(self, "session_token", None)),
+                      _token_provider, self._refresh_session),
                 daemon=True, name="yantrai-heartbeat",
             ).start()
             threading.Thread(
                 target=outbox_poll_loop,
                 args=(server_url, tally_url, self.selected_company_name,
                       self._outbox_stop_event, getattr(self, "log", None),
-                      getattr(self, "session_token", None)),
+                      _token_provider, self._refresh_session),
                 daemon=True, name="yantrai-outbox-poll",
             ).start()
+
+    def _refresh_session(self):
+        """Self-heal: re-mint a session via the durable device token (no password).
+        Called by the heartbeat/poll loops when they hit a 401 — e.g. the server was
+        redeployed and dropped the session. Rate-limited (~once/15s) so we don't hammer
+        /api/agent/resume. Returns True if the session token was refreshed."""
+        tok = self.config.get("device_token") or getattr(self, "device_token", None)
+        if not tok:
+            return False
+        now = time.time()
+        if now - getattr(self, "_last_session_refresh", 0) < 15:
+            return False
+        self._last_session_refresh = now
+        server_url = (self.config.get("last_server_url") or "").rstrip("/")
+        if not server_url:
+            return False
+        data = _post_json(f"{server_url}/api/agent/resume", {"device_token": tok}, timeout=20.0)
+        if isinstance(data, dict) and data.get("session_token"):
+            self.session_token = data["session_token"]
+            try: self.log("Reconnected — session refreshed automatically.", "success")
+            except Exception: pass
+            return True
+        return False
 
     # --------------------------------------------------------
     # Boot auto-resume (durable device token)

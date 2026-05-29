@@ -1282,6 +1282,27 @@ def db_validate_agent_session(token, ttl_seconds=86400):
     finally:
         cur.close(); pput(conn)
 
+def db_revoke_other_agent_sessions(user_id, keep_token):
+    """Enforce ONE latest session per user: delete this user's other session rows,
+    keeping only `keep_token`. Called right after minting a fresh session so a stale
+    token can never linger and win a race. Returns the number of rows removed."""
+    if not user_id or not keep_token:
+        return 0
+    conn = pget(); cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM agent_sessions WHERE user_id = %s AND token <> %s",
+                    (user_id, keep_token))
+        n = cur.rowcount
+        conn.commit()
+        return n
+    except Exception as e:
+        print(f"db_revoke_other_agent_sessions error: {e}")
+        try: conn.rollback()
+        except Exception: pass
+        return 0
+    finally:
+        cur.close(); pput(conn)
+
 def db_revoke_agent_session(token):
     """Delete a session token (e.g. on sign-out). Returns True if a row was removed."""
     if not token:
