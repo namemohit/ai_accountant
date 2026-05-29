@@ -718,7 +718,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.10.0"  # + verify GST ledger truly-missing in live Tally → ask user to create it
+AGENT_VERSION = "0.11.0"  # + use server-resolved real GST ledger names (payload.*_ledger); hardcoded = fallback
 
 
 def _post_json(url, body, timeout=15.0):
@@ -868,17 +868,23 @@ def _build_voucher_xml(payload, company_name):
             legs.append((party, -gross, "No"))
             if taxable > 0:
                 legs.append((counter_default, taxable, "Yes"))
-            if cgst > 0: legs.append(("CGST Input", cgst, "Yes"))
-            if sgst > 0: legs.append(("SGST Input", sgst, "Yes"))
-            if igst > 0: legs.append(("IGST Input", igst, "Yes"))
+            # Tax ledgers: prefer the customer's REAL ledger names resolved server-side
+            # from their Tally dump (payload.*_ledger). Hard-coded names are only a
+            # fallback when the server couldn't resolve one.
+            if cgst > 0: legs.append((payload.get("cgst_ledger") or "CGST Input", cgst, "Yes"))
+            if sgst > 0: legs.append((payload.get("sgst_ledger") or "SGST Input", sgst, "Yes"))
+            if igst > 0: legs.append((payload.get("igst_ledger") or "IGST Input", igst, "Yes"))
         else:
             # Sales: party is Dr, counter+tax are Cr
             legs.append((party, gross, "Yes"))
             if taxable > 0:
                 legs.append((counter_default, -taxable, "No"))
-            if cgst > 0: legs.append(("CGST Output", -cgst, "No"))
-            if sgst > 0: legs.append(("SGST Output", -sgst, "No"))
-            if igst > 0: legs.append(("IGST Output", -igst, "No"))
+            # Tax ledgers: prefer the customer's REAL ledger names resolved server-side
+            # from their Tally dump (payload.*_ledger). Hard-coded names are only a
+            # fallback when the server couldn't resolve one.
+            if cgst > 0: legs.append((payload.get("cgst_ledger") or "CGST Output", -cgst, "No"))
+            if sgst > 0: legs.append((payload.get("sgst_ledger") or "SGST Output", -sgst, "No"))
+            if igst > 0: legs.append((payload.get("igst_ledger") or "IGST Output", -igst, "No"))
 
     legs_xml = "".join([
         f"<ALLLEDGERENTRIES.LIST>"

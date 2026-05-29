@@ -10659,6 +10659,28 @@
                     });
                 }
 
+                // Missing GST ledger: their Tally chart has no Output/Input ledger for a
+                // tax head on this voucher (we resolve real names from their dump but found
+                // none). The backend has logged a "Create in Tally" to-do — tell them to add
+                // it first. They can still queue anyway (force), at their own risk.
+                if (res.ok && _warnData && _warnData.warn === 'missing_gst_ledger') {
+                    const _heads = (_warnData.missing || []).join(', ');
+                    const _io = _warnData.io || 'tax';
+                    const proceed = confirm(
+                        `Your Tally chart has no ${_io} ledger for: ${_heads}.\n\n` +
+                        `I've added "${_heads} ${_io}" to your "Create in Tally" to-do list.\n` +
+                        `Create the ledger in Tally Prime, then Sync this voucher again.\n\n` +
+                        `Queue the push anyway? (Tally will likely reject it until the ledger exists.)`);
+                    if (!proceed) {
+                        appendAIMessage({ text: `⚠️ Not synced — your Tally has no ${_io} ledger for ${_heads}. Create it in Tally Prime (see the "Create in Tally" to-dos in Event Logs), then Sync again.`, ui_type: 'text' });
+                        return;
+                    }
+                    res = await fetch(`${API}/push-to-tally`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ ...payload, force: true })
+                    });
+                }
+
                 if (res.ok) {
                     // Sprint 28 — honest two-step: invoice saved in YantrAI books AND
                     // enqueued for the Windows Agent. We immediately start polling

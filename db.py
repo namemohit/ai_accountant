@@ -3982,6 +3982,98 @@ def get_ledger_master_for_company(company_id=None, company_name=None):
     return rows
 
 
+def resolve_gst_ledgers(company_name=None, company_id=None):
+    """Map the customer's REAL GST tax ledgers (from their own Tally dump) per head,
+    so a push never hard-codes a name like 'IGST Output' that the customer may not use.
+
+    Why: JMK's live Tally rejects 'IGST Output' because their real, used IGST ledger is
+    'IGST Tax' (closing ~₹13.3L); 'IGST Output' is a stale simulator stub (−35,000, zero
+    real usage). We have the dump but never reconcile the *tax* legs before pushing.
+
+    Strategy — among Duties & Taxes ledgers, bucket candidates per head (igst/cgst/sgst)
+    and split Output vs Input ('input' in the name ⇒ input). Rank each bucket by:
+      (1) USAGE — how often the ledger actually appears in tally_vouchers.ledger_entries
+          (so stale/simulator stubs with zero usage lose to the real, used ledger), then
+      (2) abs(closing_balance) desc as a tiebreak.
+
+    Returns: {igst_out, cgst_out, sgst_out, igst_in, cgst_in, sgst_in} — each the real
+    ledger name (str) or None when the customer has no such ledger at all.
+    """
+    out = {"igst_out": None, "cgst_out": None, "sgst_out": None,
+           "igst_in": None, "cgst_in": None, "sgst_in": None}
+    if not company_name and not company_id:
+        return out
+    conn = pget()
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        # 1) candidate tax ledgers (Duties & Taxes group)
+        if company_id:
+            cur.execute("""
+                SELECT name, COALESCE(closing_balance, 0) AS bal
+                FROM tally_ledgers
+                WHERE company_id = %s
+                  AND (parent_group ILIKE %s OR group_path ILIKE %s)
+            """, (company_id, '%dut%', '%dut%'))
+        else:
+            cur.execute("""
+                SELECT name, COALESCE(closing_balance, 0) AS bal
+                FROM tally_ledgers
+                WHERE company_name = %s
+                  AND (parent_group ILIKE %s OR group_path ILIKE %s)
+            """, (company_name, '%dut%', '%dut%'))
+        cands = cur.fetchall()
+        # 2) usage map: how often each ledger name appears across voucher legs
+        #    (CASE-guard the LATERAL so non-array ledger_entries can't raise)
+        usage = {}
+        try:
+            if company_id:
+                cur.execute("""
+                    SELECT COALESCE(le->>'ledger_name', le->>'ledger') AS lname, COUNT(*) AS n
+                    FROM tally_vouchers tv
+                    CROSS JOIN LATERAL jsonb_array_elements(
+                        CASE WHEN jsonb_typeof(tv.ledger_entries) = 'array'
+                             THEN tv.ledger_entries ELSE '[]'::jsonb END) le
+                    WHERE tv.company_id = %s
+                    GROUP BY 1
+                """, (company_id,))
+            else:
+                cur.execute("""
+                    SELECT COALESCE(le->>'ledger_name', le->>'ledger') AS lname, COUNT(*) AS n
+                    FROM tally_vouchers tv
+                    CROSS JOIN LATERAL jsonb_array_elements(
+                        CASE WHEN jsonb_typeof(tv.ledger_entries) = 'array'
+                             THEN tv.ledger_entries ELSE '[]'::jsonb END) le
+                    WHERE tv.company_name = %s
+                    GROUP BY 1
+                """, (company_name,))
+            for r in cur.fetchall():
+                if r["lname"]:
+                    usage[r["lname"].strip().lower()] = int(r["n"] or 0)
+        except Exception as e:
+            print(f"[resolve_gst_ledgers] usage scan skipped: {e}")
+        cur.close()
+    finally:
+        pput(conn)
+
+    def _pick(head):
+        """Return (best_output_name, best_input_name) for a tax head."""
+        outs, ins = [], []
+        for c in cands:
+            nm = (c["name"] or "").strip()
+            low = nm.lower()
+            if head not in low:
+                continue
+            rank = (usage.get(low, 0), abs(float(c["bal"] or 0)))  # (usage, |balance|)
+            (ins if "input" in low else outs).append((rank, nm))
+        outs.sort(reverse=True); ins.sort(reverse=True)
+        return (outs[0][1] if outs else None), (ins[0][1] if ins else None)
+
+    for head in ("igst", "cgst", "sgst"):
+        o, i = _pick(head)
+        out[head + "_out"], out[head + "_in"] = o, i
+    return out
+
+
 # ═══════════════════════════════════════════════════════════════
 # 360° Bank Transactions — ingestion + CRUD + health
 # ═══════════════════════════════════════════════════════════════

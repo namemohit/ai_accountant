@@ -704,7 +704,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "219"
+APP_VERSION = "220"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -2502,6 +2502,56 @@ async def push_to_tally(data: dict, background_tasks: BackgroundTasks = None):
                             "message": "Your workspace's GSTIN isn't the seller or the buyer on this invoice."}
             except Exception as _pe:
                 print(f"[push_to_tally] party-check skipped: {_pe}", flush=True)
+
+        # ── GST tax-leg reconciliation against the customer's OWN Tally dump ──
+        # The agent used to hard-code 'IGST Output'/'CGST Output'/etc. But a customer's
+        # real Tally may use different names (JMK uses 'IGST Tax'), so live Tally rejects
+        # the push with "missing ledger 'IGST Output'". We have their dump — resolve each
+        # present tax head to the ledger they actually USE (db.resolve_gst_ledgers ranks by
+        # usage, so stale simulator stubs lose) and inject it into the push payload. If a
+        # head has NO ledger at all in their chart, warn BEFORE queuing (+ log a 'create
+        # ledger' to-do) instead of letting the push fail later at Sync time.
+        try:
+            _vt_raw = (data.get("voucher_type") or data.get("category") or "Sales").strip()
+            _vt = {"Sale": "Sales", "Sales": "Sales", "Purchase": "Purchase"}.get(
+                _vt_raw.capitalize(), _vt_raw.capitalize())
+            if _vt in ("Sales", "Purchase"):
+                _cgst = float(data.get("cgst_amount") or 0)
+                _sgst = float(data.get("sgst_amount") or 0)
+                _igst = float(data.get("igst_amount") or 0)
+                if _cgst > 0 or _sgst > 0 or _igst > 0:
+                    _gl = db.resolve_gst_ledgers(data.get("company_name"))
+                    _suffix = "in" if _vt == "Purchase" else "out"
+                    _io = "Input" if _vt == "Purchase" else "Output"
+                    _missing = []
+                    for _head, _amt in (("igst", _igst), ("cgst", _cgst), ("sgst", _sgst)):
+                        if _amt <= 0:
+                            continue
+                        _name = _gl.get(f"{_head}_{_suffix}")
+                        if _name:
+                            data[f"{_head}_ledger"] = _name      # agent uses this verbatim
+                        else:
+                            _missing.append(_head.upper())
+                    if _missing and not data.get("force"):
+                        # Don't silently queue a push Tally will reject. Tell the user to
+                        # create the ledger first (same to-do flow as a missing system ledger).
+                        for _h in _missing:
+                            try:
+                                db.add_tally_cleanup(
+                                    company_name=data.get("company_name"),
+                                    voucher_number=(data.get("invoice_number")
+                                                    or data.get("voucher_number") or ""),
+                                    kind="create_ledger",
+                                    ledger_name=f"{_h} {_io}")
+                            except Exception as _ce:
+                                print(f"[push_to_tally] create_ledger to-do failed: {_ce}", flush=True)
+                        return {"status": "warn", "warn": "missing_gst_ledger",
+                                "missing": _missing, "voucher_type": _vt, "io": _io,
+                                "message": (f"Your Tally chart has no {_io} ledger for "
+                                            f"{', '.join(_missing)}. Create it in Tally Prime, "
+                                            f"then Sync this voucher again.")}
+        except Exception as _ge:
+            print(f"[push_to_tally] gst-ledger resolve skipped: {_ge}", flush=True)
 
         # Save to OUR books — this is YantrAI's record.
         invoice_id = None
