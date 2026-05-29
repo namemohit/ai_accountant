@@ -5999,8 +5999,9 @@
                     sourceDocHtml = `<span style="color: #64748b;">-</span>`;
                 }
 
-                // Origin badge — Tally (imported via Windows Agent) vs YantrAI (uploaded / manual)
-                const isTallyOrigin = v.source === 'tally';
+                // Origin badge — Tally (imported via Windows Agent) vs YantrAI (uploaded / manual).
+                // Uses the persisted origin so a YantrAI voucher that round-tripped Tally stays YantrAI.
+                const isTallyOrigin = _vRowOrigin(v) === 'Tally';
                 const originHtml = isTallyOrigin
                     ? `<span style="background: rgba(56,189,248,0.12); color: #38bdf8; padding: 3px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 600;">Tally</span>`
                     : `<span style="background: rgba(218,119,86,0.12); color: var(--primary); padding: 3px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 600;">YantrAI</span>`;
@@ -6257,8 +6258,14 @@
         function _vRowParty(v)  { return v.party_name || ''; }
         function _vRowNumber(v) { return v.voucher_number || v.invoice_number || ''; }
         function _vRowSource(v) { return v.source || (v.tally_master_id ? 'tally' : ''); }
-        // Origin label for the Origin column filter (matches the row badge).
-        function _vRowOrigin(v) { return _vRowSource(v) === 'tally' ? 'Tally' : 'YantrAI'; }
+        // Origin label — prefer the persisted origin (sticky: a YantrAI voucher that round-trips
+        // through Tally keeps origin 'yantrai'); fall back to the source table for old/cached rows.
+        function _vRowOrigin(v) {
+            const o = (v.origin || '').toLowerCase();
+            if (o === 'yantrai') return 'YantrAI';
+            if (o === 'tally') return 'Tally';
+            return _vRowSource(v) === 'tally' ? 'Tally' : 'YantrAI';
+        }
         // Status label — mirrors the displayed badge logic (not just `reconciled`).
         function _vRowStatus(v) {
             if (v.needs_resync) return 'Edited – resync';

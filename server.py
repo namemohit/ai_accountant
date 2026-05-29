@@ -685,7 +685,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "213"
+APP_VERSION = "214"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -2496,19 +2496,39 @@ async def push_to_tally(data: dict, background_tasks: BackgroundTasks = None):
         except Exception as save_err:
             print(f"[push_to_tally] save_invoice error: {save_err}", flush=True)
 
+        # Sticky-origin marker: pass our immutable YantrAI voucher id (invoices.id) in the
+        # push payload so the agent stamps it into the Tally voucher. When Tally syncs the
+        # voucher back, that id round-trips → origin stays YantrAI + zero duplicates.
+        if invoice_id:
+            data["yantrai_uid"] = invoice_id
+
+        # Zero-dup guard: if this voucher already has a Tally twin (its id present as a
+        # tally_vouchers.yantrai_uid — i.e. it was pushed before and synced back), do NOT
+        # enqueue another push — that would create a second Tally voucher. (Edits go through
+        # /api/vouchers/{id}/resync, which ALTERs the existing Tally voucher.)
+        skip_push = False
+        if invoice_id:
+            try:
+                skip_push = db.tally_twin_exists(data.get("company_name"), invoice_id)
+            except Exception:
+                skip_push = False
+
         # Sprint 28 — Enqueue to tally_outbox. The bridge agent (running locally
         # on the customer's Windows machine alongside Tally Prime) will poll
         # /api/tally/queue, push to Tally's XML API, then ack/fail back here.
         # The web UI polls /api/tally/outbox/{invoice_id} for live status.
-        try:
-            db.enqueue_tally_push(
-                payload=data,
-                invoice_id=invoice_id,
-                company_name=data.get("company_name"),
-                enqueued_by="web",
-            )
-        except Exception as q_err:
-            print(f"[push_to_tally] enqueue_tally_push error: {q_err}", flush=True)
+        if skip_push:
+            print(f"[push_to_tally] skip enqueue — voucher already in Tally (yuid={invoice_id})", flush=True)
+        else:
+            try:
+                db.enqueue_tally_push(
+                    payload=data,
+                    invoice_id=invoice_id,
+                    company_name=data.get("company_name"),
+                    enqueued_by="web",
+                )
+            except Exception as q_err:
+                print(f"[push_to_tally] enqueue_tally_push error: {q_err}", flush=True)
 
         # Seed the workspace knowledge base from this confirmed voucher so Training
         # Progress grows as the user processes invoices (party / items / narration /

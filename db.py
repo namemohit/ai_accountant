@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 import os
 import json
+import re
 
 # Supabase Connection String (Pooler - IPv4 Compatible)
 DB_URL = os.getenv("DB_URL", "postgresql://postgres.vxnflumpectzqdamjqsc:yantr_ai_labs@aws-1-ap-south-1.pooler.supabase.com:5432/postgres")
@@ -241,10 +242,15 @@ def init_db():
         "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS needs_resync BOOLEAN DEFAULT FALSE",
         "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS last_edited_at TIMESTAMP",
         "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS last_edited_by TEXT",
+        # Sticky origin + zero-dup: origin ('yantrai'|'tally'|NULL=tally); yantrai_uid links a
+        # Tally sync-back back to the originating YantrAI invoice (invoices.id) via the round-trip marker.
+        "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS origin TEXT",
+        "ALTER TABLE tally_vouchers ADD COLUMN IF NOT EXISTS yantrai_uid TEXT",
         "ALTER TABLE tds_deductions ADD COLUMN IF NOT EXISTS created_by TEXT",
         "CREATE INDEX IF NOT EXISTS idx_tally_voucher_date ON tally_vouchers(company_name, date)",
         "CREATE INDEX IF NOT EXISTS idx_tally_voucher_type ON tally_vouchers(company_name, voucher_type)",
         "CREATE INDEX IF NOT EXISTS idx_tally_voucher_master_id ON tally_vouchers(company_name, tally_master_id) WHERE tally_master_id IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_tally_vouchers_yuid ON tally_vouchers(company_name, yantrai_uid) WHERE yantrai_uid IS NOT NULL",
     ]
     for stmt in deep_alters:
         try:
@@ -254,6 +260,29 @@ def init_db():
         except Exception as e:
             cursor.execute("ROLLBACK TO SAVEPOINT sp")
             print(f"Migration warning ({stmt[:60]}…): {e}")
+
+    # One-time (idempotent) backfill: tag legacy Tally rows that share an EXACT voucher
+    # number with a synced YantrAI invoice as origin='yantrai'. Number-exact only = safe
+    # (no fuzzy party/amount guessing). Going forward the [YAI:<id>] marker handles this
+    # precisely, and read-time dedup already hides matched twins. Only touches origin-NULL rows.
+    try:
+        cursor.execute("SAVEPOINT sp_origin_bf")
+        cursor.execute("""
+            UPDATE tally_vouchers tv SET origin = 'yantrai'
+            WHERE tv.origin IS NULL AND COALESCE(tv.yantrai_uid, '') = ''
+              AND tv.voucher_number IS NOT NULL AND tv.voucher_number <> ''
+              AND EXISTS (
+                SELECT 1 FROM invoices i
+                WHERE i.company_name = tv.company_name
+                  AND COALESCE(i.status, '') = 'synced'
+                  AND i.invoice_number IS NOT NULL AND i.invoice_number <> ''
+                  AND LOWER(i.invoice_number) = LOWER(tv.voucher_number)
+              )
+        """)
+        cursor.execute("RELEASE SAVEPOINT sp_origin_bf")
+    except Exception as e:
+        cursor.execute("ROLLBACK TO SAVEPOINT sp_origin_bf")
+        print(f"origin backfill warning: {e}")
 
     # ── 360° Bank — statement upload metadata ──────────────────────
     bank_ddl = [
@@ -3406,7 +3435,8 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                taxable_value, cgst_amount, sgst_amount, igst_amount,
                tally_master_id, instrument_number, reconciled,
                COALESCE(needs_resync, FALSE) AS needs_resync, last_edited_at,
-               'tally' AS source, updated_at, created_at
+               'tally' AS source, updated_at, created_at,
+               COALESCE(origin, 'tally') AS origin, yantrai_uid
         FROM tally_vouchers
         WHERE {' AND '.join(tally_where)}
         ORDER BY date DESC
@@ -3464,6 +3494,7 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                NULL AS tally_master_id, '' AS instrument_number, FALSE AS reconciled,
                FALSE AS needs_resync, NULL AS last_edited_at,
                'invoice' AS source, i.created_at AS updated_at, i.created_at AS created_at,
+               'yantrai' AS origin,
                i.file_url,
                CASE
                  WHEN ob.pushed_state THEN 'synced'
@@ -3499,43 +3530,44 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
     # on number alone would wrongly hide hundreds of distinct vouchers.
     # Rule: if an invoice-source row's voucher_number also exists as a
     # tally-source row, drop the invoice row (keep Tally) and carry its file_url.
-    tally_by_num = {}
-    for r in results:
-        if r.get('source') == 'tally':
-            num = (r.get('voucher_number') or '').strip().lower()
-            if num:
-                tally_by_num.setdefault(num, r)
-
-    # Sprint 35 — Suppress the Tally sync-back COPY of a voucher that YantrAI
-    # itself pushed. When the user records a Payment/Receipt and confirms, we
-    # keep the single YantrAI `invoices` row (it shows instantly + flips
-    # Pending→Synced via the outbox status above). The agent then creates the
-    # voucher in Tally under Tally's OWN number, and a later sync ingests it as
-    # a separate tally_vouchers row. We hide that copy so only ONE row shows.
-    # Match key (numbers differ, so use): party + abs(amount) + voucher_type.
+    # Sticky-origin dedup: a voucher that exists in YantrAI (invoices) is YantrAI-origin,
+    # period. When its Tally sync-back ALSO appears (tally_vouchers), collapse to ONE row and
+    # KEEP the YantrAI invoice row (origin=YantrAI, with file_url). Match a Tally row to its
+    # YantrAI twin in priority order:
+    #   (1) round-trip marker  tally.yantrai_uid == invoice.id   (definitive)
+    #   (2) shared voucher_number (only against pushed/synced invoices)
+    #   (3) party + abs(amount) + voucher_type signature (only against pushed/synced invoices)
+    # (2)/(3) are restricted to pushed/synced invoices because only those can have a Tally twin
+    # — this avoids hiding a genuinely-distinct Tally voucher that merely looks similar.
     def _sig(r):
         party = (r.get('party_name') or '').strip().lower()
         try: amt = round(abs(float(r.get('amount') or 0)), 2)
         except Exception: amt = 0
         vt = (r.get('voucher_type') or '').strip().lower()
         return (party, amt, vt)
-    pushed_sigs = set()
-    for r in results:
-        if r.get('source') != 'tally' and r.get('was_pushed'):
-            pushed_sigs.add(_sig(r))
+
+    inv_rows_local = [r for r in results if r.get('source') != 'tally']
+    invoice_ids = {str(r.get('id')) for r in inv_rows_local if r.get('id')}
+    pushed_inv = [r for r in inv_rows_local
+                  if r.get('was_pushed') or r.get('status') == 'synced']
+    pushed_nums = {(r.get('voucher_number') or '').strip().lower()
+                   for r in pushed_inv if (r.get('voucher_number') or '').strip()}
+    pushed_sigs = {_sig(r) for r in pushed_inv}
 
     deduped = []
     for r in results:
-        num = (r.get('voucher_number') or '').strip().lower()
-        if r.get('source') != 'tally' and num and num in tally_by_num:
-            # invoice row shares a number with a Tally twin → drop it, keep Tally
-            twin = tally_by_num[num]
-            if not twin.get('file_url') and r.get('file_url'):
-                twin['file_url'] = r.get('file_url')
-            continue
-        # Sprint 35 — drop the Tally sync-back copy of a YantrAI-pushed voucher
-        if r.get('source') == 'tally' and _sig(r) in pushed_sigs:
-            continue
+        if r.get('source') == 'tally':
+            num = (r.get('voucher_number') or '').strip().lower()
+            yuid = str(r.get('yantrai_uid')) if r.get('yantrai_uid') else None
+            is_yantrai_twin = (
+                (yuid and yuid in invoice_ids)            # (1) definitive marker
+                or (num and num in pushed_nums)           # (2) number match (pushed only)
+                or (_sig(r) in pushed_sigs)               # (3) signature match (pushed only)
+            )
+            if is_yantrai_twin:
+                # Tally sync-back of a YantrAI voucher → hide it; the YantrAI invoice row
+                # (origin=YantrAI, with its file_url) is the single canonical row.
+                continue
         deduped.append(r)
     results = deduped
 
@@ -7265,6 +7297,24 @@ def tds_quarterly_summary(company_id, fy):
     return rows
 
 
+def tally_twin_exists(company_name, yantrai_uid):
+    """True if a tally_vouchers row already carries this YantrAI uid — i.e. the voucher
+    was already pushed to Tally and synced back. Used to avoid creating a duplicate in Tally."""
+    if not yantrai_uid:
+        return False
+    conn = pget(); cur = conn.cursor()
+    try:
+        cur.execute("""SELECT 1 FROM tally_vouchers
+                       WHERE company_name = %s AND yantrai_uid = %s LIMIT 1""",
+                    (company_name, str(yantrai_uid)))
+        return cur.fetchone() is not None
+    except Exception as e:
+        print(f"tally_twin_exists error: {e}")
+        return False
+    finally:
+        cur.close(); pput(conn)
+
+
 def save_tally_vouchers(company_name, vouchers, source=None):
     """
     UPSERT vouchers by (company_name, tally_master_id || voucher_number).
@@ -7313,6 +7363,19 @@ def save_tally_vouchers(company_name, vouchers, source=None):
             raw_xml = v.get("raw_xml") or None
             instrument_number = v.get("instrument_number", "")
 
+            # Sticky-origin marker: a pushed YantrAI voucher carries [YAI:<invoices.id>] in its
+            # narration. If present, this Tally row is the sync-back of that YantrAI voucher →
+            # tag origin + link, and STRIP the marker so users never see it.
+            origin = None
+            yantrai_uid = None
+            _yai = re.search(r'\[YAI:([0-9a-fA-F-]{8,})\]', narration or '')
+            if not _yai and raw_xml:
+                _yai = re.search(r'\[YAI:([0-9a-fA-F-]{8,})\]', raw_xml)
+            if _yai:
+                yantrai_uid = _yai.group(1)
+                origin = 'yantrai'
+                narration = re.sub(r'\s*\[YAI:[0-9a-fA-F-]{8,}\]', '', narration or '').strip()
+
             # If we have no identifier at all, skip
             if not v_num and not tally_master_id:
                 skipped += 1
@@ -7347,6 +7410,7 @@ def save_tally_vouchers(company_name, vouchers, source=None):
                         cost_centres=%s, bill_refs=%s,
                         taxable_value=%s, cgst_amount=%s, sgst_amount=%s, igst_amount=%s,
                         tally_master_id=COALESCE(%s, tally_master_id),
+                        origin=COALESCE(%s, origin), yantrai_uid=COALESCE(%s, yantrai_uid),
                         raw_xml=%s, updated_at=CURRENT_TIMESTAMP
                     WHERE id=%s
                 """, (
@@ -7355,7 +7419,7 @@ def save_tally_vouchers(company_name, vouchers, source=None):
                     place_of_supply, party_gstin, currency,
                     json.dumps(cost_centres), json.dumps(bill_refs),
                     taxable_value, cgst_amount, sgst_amount, igst_amount,
-                    tally_master_id, raw_xml, existing_id
+                    tally_master_id, origin, yantrai_uid, raw_xml, existing_id
                 ))
             else:
                 cursor.execute("""
@@ -7365,16 +7429,16 @@ def save_tally_vouchers(company_name, vouchers, source=None):
                          narration, ledger_entries, reference_no, place_of_supply,
                          party_gstin, currency, cost_centres, bill_refs,
                          taxable_value, cgst_amount, sgst_amount, igst_amount,
-                         tally_master_id, raw_xml, created_by, updated_at)
+                         tally_master_id, origin, yantrai_uid, raw_xml, created_by, updated_at)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,FALSE,
-                            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
+                            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
                 """, (
                     str(uuid.uuid4()), v_date, v_num, party, amount, v_type,
                     instrument_number, company_name,
                     narration, json.dumps(ledger_entries), reference_no, place_of_supply,
                     party_gstin, currency, json.dumps(cost_centres), json.dumps(bill_refs),
                     taxable_value, cgst_amount, sgst_amount, igst_amount,
-                    tally_master_id, raw_xml, v.get("created_by")
+                    tally_master_id, origin, yantrai_uid, raw_xml, v.get("created_by")
                 ))
             upserted += 1
             if existing_id:

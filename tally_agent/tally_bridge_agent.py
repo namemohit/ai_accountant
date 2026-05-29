@@ -718,7 +718,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.8.0"   # + durable device-token auto-resume on boot (no re-login)
+AGENT_VERSION = "0.9.0"   # + stamp [YAI:<uid>] sticky-origin marker into pushed vouchers
 
 
 def _post_json(url, body, timeout=15.0):
@@ -800,6 +800,13 @@ def _build_voucher_xml(payload, company_name):
     party = payload.get("billing_party_name") or payload.get("party_name") or payload.get("party") or "Cash"
     voucher_num = payload.get("invoice_number") or payload.get("voucher_number") or ""
     narration = payload.get("narration") or f"Synced from YantrAI on {datetime.now().strftime('%Y-%m-%d')}"
+    # Sticky-origin marker: stamp YantrAI's immutable voucher id into the narration so it
+    # round-trips through Tally. On the next sync the server reads [YAI:<uid>] to keep origin
+    # = YantrAI and collapse the sync-back onto the original (zero duplicates). Server strips
+    # the tag before display, so users never see it.
+    _yuid = (payload.get("yantrai_uid") or "").strip()
+    if _yuid and "[YAI:" not in narration:
+        narration = f"{narration} [YAI:{_yuid}]"
     total = float(payload.get("total_amount") or payload.get("amount") or 0)
 
     # Tax breakdown if present
