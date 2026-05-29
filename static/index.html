@@ -9279,6 +9279,32 @@
             }
         }
 
+        // Re-run AI extraction on the SAME uploaded file (fetch it back from its stored
+        // URL and resend) — for when an earlier extraction looks wrong/stale. Produces a
+        // fresh reply below; the original card stays in the thread.
+        async function reapplyAiOnFile(tableId) {
+            const table = document.getElementById(tableId);
+            if (!table) return;
+            const fileUrl = table.getAttribute('data-file-url') || '';
+            if (!fileUrl) {
+                if (typeof showChatToast === 'function') showChatToast('No source file on this card to re-run.', 'info');
+                return;
+            }
+            const abs = fileUrl.startsWith('http') ? fileUrl : `${API}/${fileUrl.replace(/^\/+/, '')}`;
+            const name = ((abs.split('/').pop() || 'document').split('?')[0]) || 'document';
+            try {
+                if (typeof showChatToast === 'function') showChatToast('Re-running AI on the file…', 'info');
+                const resp = await fetch(abs);
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const blob = await resp.blob();
+                const file = new File([blob], name, { type: blob.type || 'application/pdf' });
+                await _sendOneToChat('', file);
+            } catch (e) {
+                console.warn('reapplyAiOnFile', e);
+                if (typeof showChatToast === 'function') showChatToast('Could not re-run on the file.', 'error');
+            }
+        }
+
         // ── WhatsApp-style message time + day separators ──────────────────
         function _fmtMsgTime(ts) {
             const d = ts ? new Date(String(ts).replace(' ', 'T')) : new Date();
@@ -9653,6 +9679,7 @@
                 </div>` : `
                 <div class="table-actions">
                     <button class="btn btn-sm" onclick="addRow('${tableId}')"><i class="fas fa-plus"></i> Add Item</button>
+                    ${data.file_url ? `<button class="btn btn-sm" onclick="reapplyAiOnFile('${tableId}')" title="Re-run AI extraction on the same file"><i class="fas fa-rotate-right"></i> Reapply AI</button>` : ''}
                     <button class="btn btn-sm confirm-btn" onclick="confirmTableData('${tableId}')">Confirm & Sync ✨</button>
                 </div>`;
                 
