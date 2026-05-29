@@ -1278,6 +1278,12 @@ async def chat_with_tally(
     try:
         kb = load_kb()
         user_msg = message or ""
+        # Blocking I/O in this async handler (Gemini vision/text calls, Supabase
+        # upload, DB scans) MUST run in a thread, or it freezes the whole server's
+        # event loop for the duration — every other request (chat refresh, polling)
+        # hangs until it finishes.
+        import asyncio as _aio
+        _loop = _aio.get_event_loop()
 
         # Create new session if needed (scoped to user so siblings can't see each other's chats)
         if not session_id or session_id == "null" or session_id == "undefined":
@@ -1302,7 +1308,8 @@ async def chat_with_tally(
             # back to local disk only when Storage is unavailable (dev without creds).
             _slug = re.sub(r'[^a-z0-9]+', '-', (company_name or 'co').lower()).strip('-') or 'co'
             _ext = os.path.splitext(safe_filename)[1]
-            file_url = _supabase_upload(f"{_slug}/chat/{uuid.uuid4().hex}{_ext}",
+            file_url = await _loop.run_in_executor(None, _supabase_upload,
+                                        f"{_slug}/chat/{uuid.uuid4().hex}{_ext}",
                                         file_content, file.content_type)
             if not file_url:
                 os.makedirs("static/uploads", exist_ok=True)
@@ -1323,8 +1330,8 @@ async def chat_with_tally(
                 print(f"[chat] save_company_file error: {_cf_err}", flush=True)
 
             try:
-                # Analyze the document first to get context
-                file_analysis = parser.parse(temp_path, context="Understand what this document is (Purchase, Sale, Report, etc.) and summarize key details for a conversation.")
+                # Analyze the document first to get context (blocking Gemini vision call → off-loop)
+                file_analysis = await _loop.run_in_executor(None, parser.parse, temp_path, "Understand what this document is (Purchase, Sale, Report, etc.) and summarize key details for a conversation.")
                 file_context = f"\n[USER UPLOADED A DOCUMENT]: {file_analysis}\n"
 
                 # AI Auto-Classification: detect document type from content
@@ -1408,7 +1415,8 @@ If on second thought this is actually just a regular accounting question (NOT a 
 }}
 """
             try:
-                sr_response = parser.model.generate_content(sr_prompt)
+                import asyncio as _aio
+                sr_response = await _aio.get_event_loop().run_in_executor(None, parser.model.generate_content, sr_prompt)
                 sr_raw = sr_response.text.strip()
                 _charge_ai(username, company_name, "chat_intent", response=sr_response)
                 import re as re_mod
@@ -1651,7 +1659,13 @@ If on second thought this is actually just a regular accounting question (NOT a 
             3. Extract EVERY row accurately.
             """
         
-        response = parser.model.generate_content(prompt)
+        # Run the (blocking) Gemini call OFF the event loop — calling it directly in
+        # this async handler freezes the whole server for the duration of the
+        # extraction (chat refresh, polling, every request hangs). run_in_executor
+        # keeps the server responsive while one invoice is being extracted.
+        import asyncio as _aio
+        _loop = _aio.get_event_loop()
+        response = await _loop.run_in_executor(None, parser.model.generate_content, prompt)
         raw = response.text.strip()
         _charge_ai(username, company_name, "chat", response=response)   # Sprint 47 — meter tokens
 
@@ -1665,7 +1679,8 @@ If on second thought this is actually just a regular accounting question (NOT a 
                 if not transactions and isinstance(tx_data, list):
                     transactions = tx_data
                 
-                reconciled_results = reconcile_statement(transactions, company_name)
+                # Blocking + heavy (per-transaction embeddings) — keep it off the loop.
+                reconciled_results = await _loop.run_in_executor(None, reconcile_statement, transactions, company_name)
                 ai_response["ui_data"] = reconciled_results
             except Exception as re_err:
                 print(f"Reconciliation processing error: {re_err}")
@@ -1707,7 +1722,8 @@ If on second thought this is actually just a regular accounting question (NOT a 
                 meta = ui_data.get("invoice_metadata") or {}
                 inv_num = meta.get("invoice_number")
                 if inv_num:
-                    existing_invs = db.get_history(company_name)
+                    # Blocking DB scan (loads the company's invoices) — off the loop.
+                    existing_invs = await _loop.run_in_executor(None, db.get_history, company_name)
                     # Check if an existing invoice has the same number
                     duplicate = next((inv for inv in existing_invs if str(inv.get("invoice_number", "")).strip().lower() == str(inv_num).strip().lower()), None)
                     if duplicate:
