@@ -239,8 +239,12 @@ async def get_invoice_history(company_name: str = None):
 async def get_all_vouchers(company_name: str = None, company_id: str = None,
                            voucher_type: str = None, limit: int = 500, offset: int = 0):
     """Return Tally vouchers + invoice-created vouchers merged, sorted by date desc."""
-    return db.get_all_vouchers(company_name=company_name, company_id=company_id,
-                               voucher_type=voucher_type, limit=limit, offset=offset)
+    # Run the (blocking) DB work in a thread so a large voucher load doesn't freeze
+    # the single-worker event loop for every other request.
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: db.get_all_vouchers(
+        company_name=company_name, company_id=company_id,
+        voucher_type=voucher_type, limit=limit, offset=offset))
 
 @app.get("/login")
 async def login_page():
@@ -681,7 +685,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "212"
+APP_VERSION = "213"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""

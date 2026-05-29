@@ -5642,7 +5642,7 @@
                 if (urlInput) urlInput.value = window.location.origin + '/webhook';
             }
 
-            if (view === 'vouchers') { loadVouchers(); }
+            if (view === 'vouchers') { loadVouchers(false); }
             if (view === 'reports') { loadFinancialReports(); }
             if (view === 'users') { loadUsersAndCompanies(); }
 
@@ -5887,25 +5887,24 @@
         // --- Vouchers View Functions ---
         let allVouchers = [];
         let activeVoucherFilter = 'all';
+        let _vouchersLoadedFor = null;   // company whose vouchers are loaded — skip redundant refetch on tab re-entry
 
-        async function loadVouchers() {
+        async function loadVouchers(force = true) {
             const user = JSON.parse(localStorage.getItem('currentUser') || '{}');
-            // Bumped from 2000 — JMK already has 2,841 Tally vouchers and the
-            // old cap was silently truncating the list. 50,000 covers years of
-            // data for any single firm; switch to server-side pagination if we
-            // ever cross that.
-            // Sprint 25 — ALWAYS scope to the active company. Previously the
-            // super_admin bypass dumped vouchers from every company into one
-            // 3,000-row merged view, which is meaningless. Super_admin who
-            // wants to view another tenant's data uses the company switcher
-            // (which now lists every company in the system — Sprint 24).
-            let url = API + '/api/vouchers?limit=50000';
             const activeCompany = (user && user.company_name) || '';
+            // Skip the refetch when this company's vouchers are already loaded and the
+            // caller didn't force it (e.g. just switching back to the Vouchers tab). The
+            // hidden view keeps its rendered DOM, so there's nothing to re-fetch/re-render.
+            if (!force && _vouchersLoadedFor === activeCompany && allVouchers.length) return;
+            // 50,000 covers years of data for any single firm (switch to server-side
+            // pagination if we ever cross that). Always scope to the active company.
+            let url = API + '/api/vouchers?limit=50000';
             if (activeCompany) url += '&company_name=' + encodeURIComponent(activeCompany);
             try {
                 const res = await fetch(url);
                 const data = await res.json();
                 allVouchers = data.vouchers || (Array.isArray(data) ? data : []);
+                _vouchersLoadedFor = activeCompany;
                 currentHistoryItems = allVouchers;
                 // Update total count display
                 if (data.tally_count !== undefined) {
@@ -5925,6 +5924,33 @@
             } catch(e) {
                 console.error('Failed to load vouchers:', e);
             }
+        }
+
+        // Build the AI-gap chip HTML for one voucher id (shared by full render + cell patch).
+        function _buildAiChips(vId) {
+            const aiSugs = (window._aiSuggestionsByVoucherId || {})[vId] || [];
+            return aiSugs.map(s => {
+                const map = {
+                    'missing_gstin':     {icon:'🪪', label:'GSTIN', color:'#38bdf8'},
+                    'duplicate':         {icon:'👯', label:'Dup',   color:'#a855f7'},
+                    'unbalanced':        {icon:'⚖️', label:'Unbal', color:'#ef4444'},
+                    'missing_narration': {icon:'📝', label:'Note',  color:'#f59e0b'},
+                };
+                const m = map[s.gap_type] || {icon:'🤖', label:s.gap_type, color:'#94a3b8'};
+                const conf = Math.round((s.confidence || 0) * 100);
+                return `<span onclick="openAISuggestionPopover('${s.id}', this, event)"
+                              title="${(s.rationale || '').replace(/"/g,'&quot;')}"
+                              style="display:inline-block; background:${m.color}22; color:${m.color}; padding:1px 6px; border-radius:3px; font-size:0.65rem; margin-left:4px; cursor:pointer; border:1px solid ${m.color}55; vertical-align: middle;">
+                              ${m.icon} ${m.label} ${conf}%</span>`;
+            }).join('');
+        }
+        // Patch ONLY the AI-Flags column cells after suggestions load — avoids re-rendering
+        // the whole (large) table just to add chips (removes the post-load flicker).
+        function _applyAiFlagsToRows() {
+            (allVouchers || []).forEach(v => {
+                const cell = document.getElementById('aiflags-' + v.id);
+                if (cell) cell.innerHTML = _buildAiChips(v.id) || '<span style="color:#475569;">–</span>';
+            });
         }
 
         function renderVouchers() {
@@ -5997,21 +6023,7 @@
                     : '';
 
                 // Sprint 26 — AI Gap chips (clickable; opens review popover)
-                const aiSugs = (window._aiSuggestionsByVoucherId || {})[v.id] || [];
-                const aiChips = aiSugs.map(s => {
-                    const map = {
-                        'missing_gstin':     {icon:'🪪', label:'GSTIN', color:'#38bdf8'},
-                        'duplicate':         {icon:'👯', label:'Dup',   color:'#a855f7'},
-                        'unbalanced':        {icon:'⚖️', label:'Unbal', color:'#ef4444'},
-                        'missing_narration': {icon:'📝', label:'Note',  color:'#f59e0b'},
-                    };
-                    const m = map[s.gap_type] || {icon:'🤖', label:s.gap_type, color:'#94a3b8'};
-                    const conf = Math.round((s.confidence || 0) * 100);
-                    return `<span onclick="openAISuggestionPopover('${s.id}', this, event)"
-                                  title="${(s.rationale || '').replace(/"/g,'&quot;')}"
-                                  style="display:inline-block; background:${m.color}22; color:${m.color}; padding:1px 6px; border-radius:3px; font-size:0.65rem; margin-left:4px; cursor:pointer; border:1px solid ${m.color}55; vertical-align: middle;">
-                                  ${m.icon} ${m.label} ${conf}%</span>`;
-                }).join('');
+                const aiChips = _buildAiChips(v.id);
 
                 // Duplicate badge
                 const dupBadge = group.duplicates.length > 0 ? `
@@ -6040,7 +6052,7 @@
                     <td style="padding: 10px;">${originHtml}</td>
                     <td style="padding: 10px;">${sourceDocHtml}</td>
                     <td style="padding: 10px; white-space: nowrap;"><span style="background: ${badgeBg}; color: ${badgeColor}; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">${badgeText}</span>${editBtn}${resyncBtn}</td>
-                    <td style="padding: 10px; white-space: nowrap;">${aiChips || '<span style="color:#475569;">–</span>'}</td>
+                    <td id="aiflags-${v.id}" style="padding: 10px; white-space: nowrap;">${aiChips || '<span style="color:#475569;">–</span>'}</td>
                 `;
                 if (hasDetail) {
                     tr.style.cursor = 'pointer';
@@ -6600,8 +6612,14 @@
                     window._aiSuggestionCounts = k.counts || {};
                     _refreshAiGapDropdown();
                 }
-                // Re-render so chips appear
-                if (typeof renderVouchers === 'function') renderVouchers();
+                // Show the chips. If an AI-gap filter is active the visible row SET depends
+                // on the suggestions, so do a full re-render; otherwise just patch the
+                // AI-Flags cells (no whole-table re-render → no flicker).
+                if (_voucherFilters && _voucherFilters.ai_gap) {
+                    if (typeof renderVouchers === 'function') renderVouchers();
+                } else {
+                    _applyAiFlagsToRows();
+                }
             } catch (e) { console.warn('load AI suggestions failed', e); }
         }
 
@@ -7002,7 +7020,7 @@
             try { localStorage.setItem('voucherActiveTab', tab); } catch (e) {}
             if (tab === 'health') loadVoucherHealth();
             else if (tab === 'events') loadVoucherEvents();
-            else if (tab === 'list' && typeof loadVouchers === 'function') loadVouchers();
+            else if (tab === 'list' && typeof loadVouchers === 'function') loadVouchers(false);
         }
 
         async function loadVoucherHealth() {
@@ -15509,6 +15527,8 @@
         // ═══════════════════════════════════════════════════════
         window.__tallyBridgeOnline = null;  // tri-state until first poll
         async function refreshTallyBridgeStatus() {
+            // Don't poll while the tab is hidden — cuts background "self-polling" chatter.
+            if (document.hidden) return;
             try {
                 const u = JSON.parse(localStorage.getItem('currentUser')||'{}');
                 const company = u.company_name;
@@ -15610,9 +15630,11 @@
                 detail.innerHTML = cur + ` <a href="/tally_bridge_agent/download" download style="color:#38bdf8;">Download the agent →</a>`;
             }
         }
-        // Populate immediately on load, then refresh every 15s.
+        // Populate immediately on load, then refresh every 15s (the call no-ops while
+        // the tab is hidden). Refresh promptly when the tab becomes visible again.
         try { refreshTallyBridgeStatus(); } catch (_) {}
         setInterval(refreshTallyBridgeStatus, 15000);
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) { try { refreshTallyBridgeStatus(); } catch (_) {} } });
 
         // Poll outbox state for one invoice and update the badge through transitions.
         // States: pending → pushing → pushed (✅) | error (❌). Gives up after 120s.

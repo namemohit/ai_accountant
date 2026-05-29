@@ -104,6 +104,8 @@ def init_db():
         cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS cgst_amount REAL")
         cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sgst_amount REAL")
         cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS igst_amount REAL")
+        # Speeds up the Vouchers list invoice SELECT (ORDER BY created_at DESC, scoped by company)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoices_company_created ON invoices(company_name, created_at DESC)")
     except:
         pass
     
@@ -3379,7 +3381,7 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
       id, date, voucher_number, voucher_type, party_name, amount,
       narration, source ('tally'|'invoice'), ledger_entries, ...
     """
-    conn = get_conn()
+    conn = pget()   # warm pooled connection (was a fresh get_conn per call — slow)
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     results = []
 
@@ -3547,7 +3549,7 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
     inv_total = cursor.fetchone()['count']
 
     cursor.close()
-    conn.close()
+    pput(conn)   # return the pooled connection (was conn.close())
 
     # Sprint 33 — total reflects the deduped set (the raw sum would double-count
     # invoices that have a Tally twin).
