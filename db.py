@@ -5860,6 +5860,32 @@ def enqueue_tally_push(payload, invoice_id=None, voucher_id=None,
     polls /api/tally/queue and processes pending rows."""
     if not payload:
         return None
+    # Centralize GST ledger resolution at THE SINGLE chokepoint — every enqueue path
+    # (chat-confirm via /push-to-tally, bulk /tally/sync-batch, resync) injects the
+    # customer's REAL tax ledger (e.g. "IGST Tax" from their dump) so the agent never
+    # falls back to the hardcoded "IGST Output" that doesn't exist in their Tally.
+    # That mismatch was the root cause of the c0000005 Memory Access Violation — the
+    # malformed Import XML crashed Tally mid-parse. Idempotent: skips if /push-to-tally
+    # already injected the names. Best-effort: a resolve failure does NOT block enqueue.
+    try:
+        _vt_raw = (payload.get("voucher_type") or payload.get("category") or "Sales").strip()
+        _vt = {"Sale": "Sales", "Sales": "Sales", "Purchase": "Purchase"}.get(
+            _vt_raw.capitalize(), _vt_raw.capitalize())
+        if _vt in ("Sales", "Purchase") and company_name:
+            _cgst = float(payload.get("cgst_amount") or 0)
+            _sgst = float(payload.get("sgst_amount") or 0)
+            _igst = float(payload.get("igst_amount") or 0)
+            if (_cgst > 0 or _sgst > 0 or _igst > 0) and not any(
+                    payload.get(k) for k in ("igst_ledger", "cgst_ledger", "sgst_ledger")):
+                _gl = resolve_gst_ledgers(company_name)
+                _suffix = "in" if _vt == "Purchase" else "out"
+                for _head, _amt in (("igst", _igst), ("cgst", _cgst), ("sgst", _sgst)):
+                    if _amt > 0:
+                        _name = _gl.get(f"{_head}_{_suffix}")
+                        if _name:
+                            payload[f"{_head}_ledger"] = _name
+    except Exception as _ge:
+        print(f"[enqueue_tally_push] gst-ledger resolve skipped: {_ge}")
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         # Idempotency: if a non-terminal push for this invoice is already queued (pending or

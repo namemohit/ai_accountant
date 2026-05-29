@@ -718,7 +718,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.12.0"  # + live-token worker loops + self-heal on 401 (device-token resume); no more wedged sessions
+AGENT_VERSION = "0.13.0"  # + live-Tally pre-flight ledger validation (blocks malformed-reference imports that crash Tally with c0000005)
 
 
 def _post_json(url, body, timeout=15.0):
@@ -1263,10 +1263,29 @@ def _ensure_ledgers_exist(payload, tally_url, company_name, server_url=None):
     return payload, created, errors
 
 
+def _collect_payload_ledger_refs(payload, company_name):
+    """Return every ledger name the to-be-sent Import XML would reference, by
+    building the XML and extracting <LEDGERNAME> tags. Used by the live-Tally
+    pre-flight so we can refuse to send a payload that names a ledger Tally
+    doesn't actually have (Tally crashes with c0000005 on such imports — it
+    doesn't reject them cleanly)."""
+    try:
+        xml = _build_voucher_xml(payload, company_name)
+    except Exception:
+        return []
+    seen, out = set(), []
+    for n in re.findall(r'<LEDGERNAME>([^<]+)</LEDGERNAME>', xml):
+        n = (n or "").strip()
+        k = n.lower()
+        if n and k not in seen:
+            seen.add(k); out.append(n)
+    return out
+
+
 def push_voucher_to_tally(payload, tally_url, company_name, server_url=None):
-    """Sprint 31 + 32 — Pre-create every needed ledger (using YantrAI's
-    server-side snapshot as ground truth, NOT HTTP-probing Tally), then push
-    the voucher.
+    """Sprint 31 + 32 + 35 — Pre-create every needed ledger (using YantrAI's
+    server-side snapshot as ground truth) AND pre-flight against live Tally so a
+    malformed-reference Import never crashes Tally, then push the voucher.
 
     Returns (ok, guid_or_error)."""
     if not check_tally_alive(tally_url):
@@ -1280,6 +1299,36 @@ def push_voucher_to_tally(payload, tally_url, company_name, server_url=None):
                                                     server_url=server_url)
     if errs:
         return False, "Pre-flight failed: " + "; ".join(errs)
+
+    # Sprint 35 — LIVE-Tally pre-flight (the c0000005 crash fix).
+    # The snapshot above can be stale (e.g. JMK's dump still listed an "IGST Output"
+    # simulator stub that's no longer in live Tally). Tally Prime CRASHES with a
+    # Memory Access Violation when an Import-Data XML references a ledger that doesn't
+    # exist, instead of returning a clean error. So we look BEFORE we leap: pull the
+    # live ledger list and verify every <LEDGERNAME> in the about-to-send XML exists
+    # in real Tally. If any is missing → return a structured NEEDS_LEDGER without
+    # touching Tally's import path. Defensive; cheap (one light fetch_local_ledgers).
+    try:
+        refs = _collect_payload_ledger_refs(payload, company_name)
+        if refs:
+            live = fetch_local_ledgers(tally_url) or []
+            live_lc = {n.strip().lower() for n in live}
+            if live_lc:  # only enforce when we actually got a live list back
+                missing_refs = [r for r in refs if r.strip().lower() not in live_lc]
+                if missing_refs:
+                    m = missing_refs[0]
+                    if _is_system_ledger(m):
+                        nl = _gst_ledger_meta(m, payload)
+                    else:
+                        nl = {"ledger_name": m,
+                              "group": _guess_parent_group(m, payload),
+                              "gst_head": "", "io": "",
+                              "voucher_number": payload.get("invoice_number") or ""}
+                    human = (f"Tally is missing ledger '{m}'. Create it in Tally Prime, then retry. "
+                             f"(Pre-flight blocked the push so Tally wouldn't crash on a malformed import.)")
+                    return False, "NEEDS_LEDGER|" + json.dumps(nl) + "|" + human
+    except Exception as _e:
+        print(f"[push_voucher_to_tally] live pre-flight skipped: {_e}", flush=True)
 
     # Sprint 32 — Loop: each failed attempt may surface ONE missing ledger.
     # Auto-create it, retry, repeat. Up to 5 iterations to cover the
