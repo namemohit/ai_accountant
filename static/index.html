@@ -2033,6 +2033,67 @@
             </div>
         </div>
 
+        <!-- ── Sprint 42: Tally Admin → Create Company (Agent sandbox only) ── -->
+        <div id="tally-admin-view" class="dashboard-view" style="display: none;">
+            <header>
+                <h1>Tally Admin · Create Company</h1>
+                <p style="color:#94a3b8;">Create a new company inside your local Tally Prime. Tunnels through the Windows Bridge agent — Tally must be running and the agent must be connected to the YantrAI <b>Agent</b> workspace. Gated to the sandbox while the XML envelope is being hardened across Tally Prime builds.</p>
+            </header>
+            <div id="tally-admin-gate" style="display:none; background:#1e1b18; border:1px solid #ef4444; color:#fca5a5; padding:14px 18px; border-radius:8px; margin-top:16px;">
+                <b>This page is only available on the YantrAI Agent sandbox workspace.</b>
+                <div style="margin-top:6px; color:#94a3b8; font-size:0.88rem;">Switch to the "Agent" workspace from the top bar to access Tally admin tools.</div>
+            </div>
+            <div id="tally-admin-form-card" style="display:none; max-width:720px; background:#221f1c; border:1px solid #3a3530; border-radius:10px; padding:22px; margin-top:18px;">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
+                    <div style="grid-column: 1 / -1;">
+                        <label for="tac-name" style="display:block; color:#cbd5e1; font-size:0.86rem; margin-bottom:6px;">Company name <span style="color:#ef4444;">*</span></label>
+                        <input id="tac-name" type="text" placeholder="e.g. Acme Traders Pvt Ltd" maxlength="60" style="width:100%; background:#16130f; color:#f5f1ec; border:1px solid #3a3530; border-radius:6px; padding:9px 12px; font-size:0.92rem;">
+                    </div>
+                    <div>
+                        <label for="tac-state" style="display:block; color:#cbd5e1; font-size:0.86rem; margin-bottom:6px;">State <span style="color:#ef4444;">*</span></label>
+                        <select id="tac-state" style="width:100%; background:#16130f; color:#f5f1ec; border:1px solid #3a3530; border-radius:6px; padding:9px 12px; font-size:0.92rem;">
+                            <option value="">— select state —</option>
+                            <option>Andhra Pradesh</option><option>Arunachal Pradesh</option><option>Assam</option>
+                            <option>Bihar</option><option>Chhattisgarh</option><option>Goa</option>
+                            <option>Gujarat</option><option>Haryana</option><option>Himachal Pradesh</option>
+                            <option>Jharkhand</option><option>Karnataka</option><option>Kerala</option>
+                            <option>Madhya Pradesh</option><option>Maharashtra</option><option>Manipur</option>
+                            <option>Meghalaya</option><option>Mizoram</option><option>Nagaland</option>
+                            <option>Odisha</option><option>Punjab</option><option>Rajasthan</option>
+                            <option>Sikkim</option><option>Tamil Nadu</option><option>Telangana</option>
+                            <option>Tripura</option><option>Uttar Pradesh</option><option>Uttarakhand</option>
+                            <option>West Bengal</option>
+                            <option>Andaman and Nicobar Islands</option><option>Chandigarh</option>
+                            <option>Dadra and Nagar Haveli and Daman and Diu</option><option>Delhi</option>
+                            <option>Jammu and Kashmir</option><option>Ladakh</option>
+                            <option>Lakshadweep</option><option>Puducherry</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="tac-books-from" style="display:block; color:#cbd5e1; font-size:0.86rem; margin-bottom:6px;">Books from <span style="color:#ef4444;">*</span></label>
+                        <input id="tac-books-from" type="date" value="2026-04-01" style="width:100%; background:#16130f; color:#f5f1ec; border:1px solid #3a3530; border-radius:6px; padding:9px 12px; font-size:0.92rem;">
+                    </div>
+                    <div>
+                        <label for="tac-pan" style="display:block; color:#cbd5e1; font-size:0.86rem; margin-bottom:6px;">PAN <span style="color:#64748b; font-size:0.76rem;">(optional, 10 chars)</span></label>
+                        <input id="tac-pan" type="text" placeholder="ABCDE1234F" maxlength="10" style="width:100%; background:#16130f; color:#f5f1ec; border:1px solid #3a3530; border-radius:6px; padding:9px 12px; font-size:0.92rem; text-transform:uppercase;">
+                    </div>
+                    <div>
+                        <label for="tac-gstin" style="display:block; color:#cbd5e1; font-size:0.86rem; margin-bottom:6px;">GSTIN <span style="color:#64748b; font-size:0.76rem;">(optional, 15 chars)</span></label>
+                        <input id="tac-gstin" type="text" placeholder="06ABCDE1234F1Z5" maxlength="15" style="width:100%; background:#16130f; color:#f5f1ec; border:1px solid #3a3530; border-radius:6px; padding:9px 12px; font-size:0.92rem; text-transform:uppercase;">
+                    </div>
+                    <div style="grid-column: 1 / -1;">
+                        <label for="tac-address" style="display:block; color:#cbd5e1; font-size:0.86rem; margin-bottom:6px;">Address <span style="color:#64748b; font-size:0.76rem;">(optional)</span></label>
+                        <textarea id="tac-address" rows="2" placeholder="Street, City, PIN" style="width:100%; background:#16130f; color:#f5f1ec; border:1px solid #3a3530; border-radius:6px; padding:9px 12px; font-size:0.92rem; resize:vertical;"></textarea>
+                    </div>
+                </div>
+                <div style="display:flex; align-items:center; gap:14px; margin-top:18px;">
+                    <button id="tac-submit-btn" onclick="tallyCreateCompanySubmit()" style="background:linear-gradient(135deg, #da7756 0%, #e8a87c 100%); color:#1e1b18; font-weight:700; padding:11px 26px; border-radius:7px; border:none; cursor:pointer; font-size:0.92rem;">Create company in Tally Prime →</button>
+                    <div style="color:#64748b; font-size:0.78rem; line-height:1.4;">Tally Prime has no HTTP-XML delete-company. Remove test companies manually via <b style="color:#94a3b8;">Gateway → Alter → Company → F8 Delete</b>.</div>
+                </div>
+                <div id="tac-result" style="margin-top:18px; display:none;"></div>
+            </div>
+        </div>
+
         <!-- Bank Register View (Books > Bank Register) -->
         <div id="bankregister-view" class="dashboard-view" style="display: none;">
             <header>
@@ -5667,6 +5728,11 @@
             }
 
             if (view === 'vouchers') { loadVouchers(false); }
+
+            // Sprint 42 — Tally Admin → Create Company
+            if (view === 'tally-admin') {
+                if (typeof tallyAdminInit === 'function') tallyAdminInit();
+            }
             if (view === 'reports') { loadFinancialReports(); }
             if (view === 'users') { loadUsersAndCompanies(); }
 
@@ -11522,6 +11588,93 @@
                 if (typeof showChatToast === 'function') showChatToast('Sync from Tally requested — vouchers will appear once the Bridge responds.', 'info');
                 if (typeof loadVouchers === 'function') loadVouchers();
             } catch (e) { alert(e.message || 'Sync from Tally failed (is the Windows Agent running?)'); }
+        }
+
+        // ── Sprint 42 — Tally Admin → Create Company ────────────────────────
+        // Gated to the YantrAI "Agent" sandbox workspace
+        // (company_id a1af854b-5c10-4e33-a886-154f7a38a046). Tunnels through
+        // the connected Windows Bridge agent and creates a fresh company in
+        // the user's local Tally Prime.
+        const AGENT_SANDBOX_COMPANY_ID = 'a1af854b-5c10-4e33-a886-154f7a38a046';
+
+        function _tac_user() {
+            try { return JSON.parse(localStorage.getItem('currentUser') || '{}'); } catch (_) { return {}; }
+        }
+        function _tac_isAgentSandbox() {
+            return (_tac_user().company_id || '').toLowerCase() === AGENT_SANDBOX_COMPANY_ID;
+        }
+        function tallyAdminInit() {
+            const gate = document.getElementById('tally-admin-gate');
+            const card = document.getElementById('tally-admin-form-card');
+            if (!gate || !card) return;
+            if (_tac_isAgentSandbox()) {
+                gate.style.display = 'none';
+                card.style.display = 'block';
+            } else {
+                gate.style.display = 'block';
+                card.style.display = 'none';
+            }
+        }
+        async function tallyCreateCompanySubmit() {
+            const name = (document.getElementById('tac-name').value || '').trim();
+            const state = document.getElementById('tac-state').value || '';
+            const booksFrom = document.getElementById('tac-books-from').value || '';
+            const pan = (document.getElementById('tac-pan').value || '').trim();
+            const gstin = (document.getElementById('tac-gstin').value || '').trim();
+            const address = (document.getElementById('tac-address').value || '').trim();
+            const result = document.getElementById('tac-result');
+            const btn = document.getElementById('tac-submit-btn');
+
+            if (!name || !state || !booksFrom) {
+                result.style.display = 'block';
+                result.innerHTML = '<div style="background:#1e1b18; border:1px solid #ef4444; color:#fca5a5; padding:10px 14px; border-radius:6px;">Company name, state, and books-from date are required.</div>';
+                return;
+            }
+            const u = _tac_user();
+            if ((u.company_id || '').toLowerCase() !== AGENT_SANDBOX_COMPANY_ID) {
+                result.style.display = 'block';
+                result.innerHTML = '<div style="background:#1e1b18; border:1px solid #ef4444; color:#fca5a5; padding:10px 14px; border-radius:6px;">Switch to the Agent sandbox workspace first.</div>';
+                return;
+            }
+
+            btn.disabled = true;
+            const origLabel = btn.innerText;
+            btn.innerText = 'Creating in Tally…';
+            result.style.display = 'block';
+            result.innerHTML = '<div style="background:#1e1b18; border:1px solid #38bdf8; color:#7dd3fc; padding:10px 14px; border-radius:6px;">⏳ Sending create-company request through the Bridge agent. Tally Prime is single-threaded; this can take 10–30 s.</div>';
+
+            try {
+                const res = await fetch('/api/tally/create-company', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        company_id: u.company_id,
+                        tally_company_name: name,
+                        state: state,
+                        books_from: booksFrom,
+                        pan: pan || null,
+                        gstin: gstin || null,
+                        address: address || null,
+                    }),
+                });
+                const d = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    const msg = (d && (d.detail || d.message)) || ('HTTP ' + res.status);
+                    result.innerHTML = `<div style="background:#1e1b18; border:1px solid #ef4444; color:#fca5a5; padding:12px 16px; border-radius:6px;"><b>Create-company failed.</b><div style="margin-top:6px; color:#fda4af; font-size:0.86rem;">${msg.replace(/[<>]/g,'')}</div></div>`;
+                    return;
+                }
+                if (d.status === 'success') {
+                    result.innerHTML = `<div style="background:#1e1b18; border:1px solid #4ade80; color:#86efac; padding:12px 16px; border-radius:6px;"><b>✓ Created '${(d.created_company || name).replace(/[<>]/g,'')}' in Tally Prime.</b><div style="margin-top:6px; color:#bbf7d0; font-size:0.86rem;">Open Tally Prime → press F1 → Select Company to find the new entry.</div></div>`;
+                } else {
+                    const raw = (d.xml_response || '').replace(/[<>]/g, m => m === '<' ? '&lt;' : '&gt;');
+                    result.innerHTML = `<div style="background:#1e1b18; border:1px solid #ef4444; color:#fca5a5; padding:12px 16px; border-radius:6px;"><b>Tally rejected the request.</b><div style="margin-top:6px; color:#fda4af; font-size:0.86rem;">${(d.message || 'No detail').replace(/[<>]/g,'')}</div>${raw ? `<details style="margin-top:10px;"><summary style="cursor:pointer; color:#cbd5e1; font-size:0.82rem;">Show raw Tally response</summary><pre style="margin-top:8px; max-height:240px; overflow:auto; background:#16130f; padding:10px; border-radius:4px; font-size:0.75rem; color:#94a3b8; white-space:pre-wrap;">${raw}</pre></details>` : ''}</div>`;
+                }
+            } catch (e) {
+                result.innerHTML = `<div style="background:#1e1b18; border:1px solid #ef4444; color:#fca5a5; padding:12px 16px; border-radius:6px;">Network error: ${(e.message || e).toString().replace(/[<>]/g,'')}</div>`;
+            } finally {
+                btn.disabled = false;
+                btn.innerText = origLabel;
+            }
         }
 
         function exportToCSV(items) {

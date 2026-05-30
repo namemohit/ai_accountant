@@ -466,6 +466,125 @@ async def tally_outbox_invoice_status(invoice_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Sprint 42 — Tally Admin: create a fresh company inside the user's Tally ──
+# UI calls this from the "Tally Admin → Create Company" panel in the Agent
+# workspace. The endpoint tunnels a `create_company` command through the
+# already-connected Windows agent (same WS pipeline as seed_baseline). One-shot
+# write — no outbox involvement. Gated to the Agent sandbox while we prove the
+# Tally XML envelope across builds; future sprint relaxes the gate.
+AGENT_SANDBOX_COMPANY_ID = "a1af854b-5c10-4e33-a886-154f7a38a046"
+
+
+@app.post("/api/tally/create-company")
+async def tally_create_company(payload: dict):
+    """Create a new company inside the user's local Tally Prime.
+
+    Required payload keys:
+        company_id           — YantrAI workspace dispatching this call
+                               (must be the Agent sandbox)
+        tally_company_name   — name of the NEW Tally company to create
+        state                — full Indian state name, e.g. "Haryana"
+        books_from           — first day of the books, YYYY-MM-DD
+    Optional payload keys:
+        session_token        — Windows-agent session token (passed through
+                               if the UI happens to have it; not required)
+        pan, gstin, address
+
+    Auth model: UI traffic is already gated by the Supabase Bearer at the
+    middleware layer; this endpoint adds a hard sandbox-only check on
+    `company_id`. The Windows agent's WS connection is keyed by company_id
+    so dispatch routes naturally.
+    """
+    try:
+        # Sandbox-only gate. The Supabase Bearer auth at the middleware
+        # layer already verifies the caller belongs to this company_id.
+        company_id = (payload.get("company_id") or "").strip()
+        if company_id.lower() != AGENT_SANDBOX_COMPANY_ID:
+            raise HTTPException(
+                status_code=403,
+                detail=("Create-company is gated to the YantrAI Agent sandbox "
+                        "during initial rollout. Switch to the Agent workspace to use it."),
+            )
+
+        # Best-effort caller identity for the audit log (optional).
+        user_id = None
+        try:
+            sess = validate_agent_session(payload.get("session_token") or "")
+            if sess:
+                user_id = sess.get("user_id")
+        except Exception:
+            pass
+
+        tally_company_name = (payload.get("tally_company_name") or "").strip()
+        state = (payload.get("state") or "").strip()
+        books_from = (payload.get("books_from") or "").strip()
+        if not tally_company_name or not state or not books_from:
+            raise HTTPException(
+                status_code=400,
+                detail="tally_company_name, state, and books_from are required.",
+            )
+
+        cmd_payload = {
+            "name": tally_company_name,
+            "state": state,
+            "books_from": books_from,
+            "pan": (payload.get("pan") or "").strip() or None,
+            "gstin": (payload.get("gstin") or "").strip() or None,
+            "address": (payload.get("address") or "").strip() or None,
+        }
+
+        ws_response = await dispatch_tally_command(company_id, "create_company", cmd_payload)
+
+        if not ws_response:
+            raise HTTPException(
+                status_code=502,
+                detail=("Tally bridge unavailable — open Tally and start the YantrAI "
+                        "Tally Bridge agent on that machine, then retry. Nothing was changed."),
+            )
+
+        status_ = ws_response.get("status", "error")
+        if status_ != "success":
+            # Surface the raw Tally response so the user can debug envelope drift.
+            return {
+                "status": "error",
+                "message": ws_response.get("message", "Tally rejected the create-company request."),
+                "xml_response": ws_response.get("xml_response"),
+            }
+
+        # Best-effort audit log (don't fail the request if logging fails).
+        try:
+            conn_a = db.get_conn()
+            cur_a = conn_a.cursor()
+            cur_a.execute(
+                """
+                INSERT INTO tenant_audit_log (user_id, action, entity_type, company_id, payload)
+                VALUES (%s, 'tally_create_company', 'tally', %s, %s::jsonb)
+                """,
+                (user_id, company_id, json.dumps({
+                    "tally_company_name": tally_company_name,
+                    "state": state, "books_from": books_from,
+                    "has_pan": bool(cmd_payload["pan"]),
+                    "has_gstin": bool(cmd_payload["gstin"]),
+                })),
+            )
+            conn_a.commit()
+            cur_a.close()
+            conn_a.close()
+        except Exception as au_err:
+            print(f"[AUDIT] tally_create_company log warning: {au_err}", flush=True)
+
+        return {
+            "status": "success",
+            "message": f"Created '{tally_company_name}' in Tally Prime.",
+            "created_company": ws_response.get("created_company", tally_company_name),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[/api/tally/create-company] error: {e}", flush=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 def _read_agent_version():
     """Sprint 34 — Read AGENT_VERSION straight from the agent source so the web
     download always reports the version that's actually shipping."""
@@ -745,7 +864,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "230"
+APP_VERSION = "231"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""

@@ -590,6 +590,121 @@ def build_voucher_xml(voucher):
     cr_ledger = party if v_type == "Receipt" else cash_bank
     return f"""<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER><BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Vouchers</REPORTNAME></REQUESTDESC><REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF"><VOUCHER VCHTYPE="{v_type}" ACTION="Create"><DATE>{date}</DATE><VOUCHERNUMBER>{number}</VOUCHERNUMBER><PARTYLEDGERNAME>{party}</PARTYLEDGERNAME><ALLLEDGERENTRIES.LIST><LEDGERNAME>{dr_ledger}</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-{amount}</AMOUNT></ALLLEDGERENTRIES.LIST><ALLLEDGERENTRIES.LIST><LEDGERNAME>{cr_ledger}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>{amount}</AMOUNT></ALLLEDGERENTRIES.LIST></VOUCHER></TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>"""
 
+
+# Sprint 42 — Tally Prime company creation envelope.
+# Verified against Tally Prime 4.x running locally. Field-name caveats:
+#   • STARTINGFROM + BOOKSFROM in YYYYMMDD (no separators).
+#   • STATENAME must match Tally's master list exactly (case-sensitive titles —
+#     "Haryana", "Delhi", "Tamil Nadu"). UI sends from a fixed dropdown to avoid
+#     drift.
+#   • COUNTRYNAME hardcoded to "India" — every YantrAI customer is Indian.
+#   • BASECURRENCYSYMBOL is the rupee glyph; FORMALNAME "INR".
+#   • <CREATED>1</CREATED> in Tally's response = success. Otherwise look for
+#     <LINEERROR> / <EXCEPTIONS> for the human-readable failure reason.
+def _xe(s):
+    """Minimal XML escape for element text + attribute values."""
+    if s is None:
+        return ""
+    return (str(s)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&apos;"))
+
+
+def build_create_company_xml(data):
+    """Build the Tally Prime Import Data envelope to CREATE a new company.
+
+    Required keys in `data`:
+        name        — Tally company name (e.g. "Acme Traders Pvt Ltd")
+        state       — full Indian state name (e.g. "Haryana")
+        books_from  — first day of accounting period as YYYY-MM-DD
+    Optional keys:
+        pan         — 10-char PAN  (Tally <INCOMETAXNUMBER>)
+        gstin       — 15-char GSTIN (Tally <SALESTAXNUMBER>)
+        address     — single-line street address
+    """
+    name = _xe(data.get("name") or "")
+    state = _xe(data.get("state") or "")
+    bf_raw = (data.get("books_from") or "").strip()
+    # YYYY-MM-DD → YYYYMMDD (Tally's date wire format).
+    bf = bf_raw.replace("-", "") if len(bf_raw) == 10 and bf_raw[4] == "-" else bf_raw
+
+    pan = _xe(data.get("pan") or "")
+    gstin = _xe(data.get("gstin") or "")
+    address = _xe(data.get("address") or "")
+
+    optional = ""
+    if pan:
+        optional += f"<INCOMETAXNUMBER>{pan}</INCOMETAXNUMBER>"
+    if gstin:
+        optional += f"<SALESTAXNUMBER>{gstin}</SALESTAXNUMBER>"
+        optional += f"<GSTREGISTRATIONTYPE>Regular</GSTREGISTRATIONTYPE>"
+    if address:
+        optional += f"<ADDRESS.LIST TYPE=\"String\"><ADDRESS>{address}</ADDRESS></ADDRESS.LIST>"
+
+    return (
+        f"<ENVELOPE>"
+        f"<HEADER>"
+        f"<VERSION>1</VERSION>"
+        f"<TALLYREQUEST>Import Data</TALLYREQUEST>"
+        f"<TYPE>Data</TYPE>"
+        f"<ID>All Masters</ID>"
+        f"</HEADER>"
+        f"<BODY><IMPORTDATA>"
+        f"<REQUESTDESC><REPORTNAME>All Masters</REPORTNAME></REQUESTDESC>"
+        f"<REQUESTDATA><TALLYMESSAGE xmlns:UDF=\"TallyUDF\">"
+        f"<COMPANY NAME=\"{name}\" ACTION=\"Create\">"
+        f"<NAME>{name}</NAME>"
+        f"<BASICCOMPANYFORMALNAME>{name}</BASICCOMPANYFORMALNAME>"
+        f"<STATENAME>{state}</STATENAME>"
+        f"<COUNTRYNAME>India</COUNTRYNAME>"
+        f"<STARTINGFROM>{bf}</STARTINGFROM>"
+        f"<BOOKSFROM>{bf}</BOOKSFROM>"
+        f"<BASECURRENCYSYMBOL>₹</BASECURRENCYSYMBOL>"
+        f"<FORMALNAME>INR</FORMALNAME>"
+        f"<DECIMALSYMBOL>.</DECIMALSYMBOL>"
+        f"<DECIMALPLACES>2</DECIMALPLACES>"
+        f"<DECIMALPLACESFORPRINTING>2</DECIMALPLACESFORPRINTING>"
+        f"{optional}"
+        f"</COMPANY>"
+        f"</TALLYMESSAGE></REQUESTDATA>"
+        f"</IMPORTDATA></BODY>"
+        f"</ENVELOPE>"
+    )
+
+
+def parse_create_company_response(raw):
+    """Pull the success/failure verdict out of Tally's import response.
+
+    Tally's response shape:
+      <RESPONSE>
+        <CREATED>1</CREATED>      # or 0 on failure
+        <ALTERED>0</ALTERED>
+        <LASTVCHID>...</LASTVCHID>
+        <LINEERROR>...</LINEERROR> # only on failure
+      </RESPONSE>
+    Returns (created: bool, error_message: str|None).
+    """
+    if not raw:
+        return False, "Empty response from Tally (is it running?)"
+    try:
+        m_created = re.search(r'<CREATED>\s*(\d+)\s*</CREATED>', raw, re.IGNORECASE)
+        created_n = int(m_created.group(1)) if m_created else 0
+        m_err = re.search(r'<LINEERROR>(.*?)</LINEERROR>', raw, re.IGNORECASE | re.DOTALL)
+        if created_n >= 1 and not m_err:
+            return True, None
+        if m_err:
+            return False, _clean(m_err.group(1)) or "Tally reported LINEERROR with no detail"
+        # Generic error fallback — surface a slice of the raw response.
+        m_exc = re.search(r'<EXCEPTIONS>(.*?)</EXCEPTIONS>', raw, re.IGNORECASE | re.DOTALL)
+        if m_exc and m_exc.group(1).strip():
+            return False, _clean(m_exc.group(1)) or "Tally exception (no detail)"
+        return False, f"Tally returned CREATED={created_n}; raw response truncated"
+    except Exception as e:
+        return False, f"Could not parse Tally response: {e}"
+
 # ============================================================
 # GUI Application
 # ============================================================
@@ -745,7 +860,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.16.0"  # + per-entity incremental seed_baseline (vouchers/ledgers/groups/stock_items each get their own since_alterid + max_alterid + live_guids on full pulls); RE-ENABLE auto-baseline-sync on connect (gated by once-per-process + _sync_in_progress phase-separation Event so the outbox pusher pauses while the seed pull holds Tally's single-threaded HTTP server)
+AGENT_VERSION = "0.17.0"  # + create_company command (Sprint 42): build_create_company_xml() + parse_create_company_response() + new _tunnel_loop branch — one-shot Import Data envelope to create a fresh Tally Prime company from the YantrAI "Agent" sandbox UI. Runs under _sync_in_progress so the outbox pusher pauses for the heavy write. No outbox involvement.
 
 
 def _post_json(url, body, timeout=15.0):
@@ -2502,6 +2617,55 @@ class TallyBridgeApp:
                             amt = data.get("amount", 0)
                             self.log(f"Voucher posted to local ledger: {party} — ₹{amt}", "success")
                             self.increment_synced()
+
+                        elif cmd_type == "create_company":
+                            # Sprint 42 — create a new company inside the user's local Tally
+                            # Prime. One-shot import (no outbox). Required fields validated
+                            # both client-side (in the UI) and here.
+                            _d = data or {}
+                            _name = (_d.get("name") or "").strip()
+                            _state = (_d.get("state") or "").strip()
+                            _bf = (_d.get("books_from") or "").strip()
+                            if not _name or not _state or not _bf:
+                                response["status"] = "error"
+                                response["message"] = (
+                                    "Missing required field(s): name + state + books_from."
+                                )
+                                self.log("create_company rejected — missing fields.", "error")
+                            else:
+                                # Phase separation — block the outbox pusher while we hold the
+                                # Tally HTTP server. Company creation is the heaviest write
+                                # Tally takes; co-running a voucher push is asking for c0000005.
+                                _sync_in_progress.set()
+                                try:
+                                    self.log(
+                                        f"Building create-company XML for '{_name}' "
+                                        f"(state={_state}, books_from={_bf})…",
+                                        "info",
+                                    )
+                                    xml = build_create_company_xml(_d)
+                                    self.log("Posting create-company to Tally Prime…", "info")
+                                    result = query_local_tally(tally_url, xml, timeout=30.0)
+                                finally:
+                                    _sync_in_progress.clear()
+
+                                ok, err = parse_create_company_response(result)
+                                response["xml_response"] = result
+                                if ok:
+                                    response["status"] = "success"
+                                    response["created_company"] = _name
+                                    self.log(
+                                        f"✓ Tally Prime created company '{_name}'.",
+                                        "success",
+                                    )
+                                    self.increment_synced()
+                                else:
+                                    response["status"] = "error"
+                                    response["message"] = err or "Tally rejected create_company"
+                                    self.log(
+                                        f"✗ create_company failed: {response['message']}",
+                                        "error",
+                                    )
 
                         else:
                             response["status"] = "error"
