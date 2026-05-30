@@ -718,7 +718,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.13.0"  # + live-Tally pre-flight ledger validation (blocks malformed-reference imports that crash Tally with c0000005)
+AGENT_VERSION = "0.15.0"  # + DISABLE auto-baseline-sync on connect (the heavy 40s fetch_vouchers was crashing JMK's Tally with c0000005 + starving outbox pushes)
 
 
 def _post_json(url, body, timeout=15.0):
@@ -1283,39 +1283,35 @@ def _collect_payload_ledger_refs(payload, company_name):
 
 
 def push_voucher_to_tally(payload, tally_url, company_name, server_url=None):
-    """Sprint 31 + 32 + 35 — Pre-create every needed ledger (using YantrAI's
-    server-side snapshot as ground truth) AND pre-flight against live Tally so a
-    malformed-reference Import never crashes Tally, then push the voucher.
+    """Sprint 31 + 32 + 36 — Pre-flight against LIVE Tally first (cheap, authoritative).
+    If every referenced ledger exists in live Tally, skip the flakier snapshot-based
+    pre-flight (which can fail with SVCurrentCompany on Tally state issues) and push
+    straight away. Only fall back to the snapshot path when something looks missing.
 
     Returns (ok, guid_or_error)."""
     if not check_tally_alive(tally_url):
         return False, f"Tally Prime not reachable on {tally_url} (open Tally and try again)"
 
-    # Sprint 32 — Pre-flight against YantrAI's authoritative chart of accounts.
-    # The function may also rewrite party/ledger names in `payload` so they
-    # match the company's actual ledger names (e.g. "SUN PHARMA LTD" →
-    # "SUN PHARMACEUTICAL INDUSTRIES LTD.- HL").
-    payload, created, errs = _ensure_ledgers_exist(payload, tally_url, company_name,
-                                                    server_url=server_url)
-    if errs:
-        return False, "Pre-flight failed: " + "; ".join(errs)
-
-    # Sprint 35 — LIVE-Tally pre-flight (the c0000005 crash fix).
-    # The snapshot above can be stale (e.g. JMK's dump still listed an "IGST Output"
-    # simulator stub that's no longer in live Tally). Tally Prime CRASHES with a
-    # Memory Access Violation when an Import-Data XML references a ledger that doesn't
-    # exist, instead of returning a clean error. So we look BEFORE we leap: pull the
-    # live ledger list and verify every <LEDGERNAME> in the about-to-send XML exists
-    # in real Tally. If any is missing → return a structured NEEDS_LEDGER without
-    # touching Tally's import path. Defensive; cheap (one light fetch_local_ledgers).
+    # Sprint 36 — LIVE-Tally pre-flight runs FIRST. The snapshot-based pre-flight below
+    # has been observed failing on "Could not set SVCurrentCompany" even when the
+    # payload is perfectly valid (Tally state quirk). The live check is cheaper, more
+    # authoritative, and lets a good payload sail through without touching the snapshot
+    # path at all. We also keep this as the crash safety net: Tally throws c0000005
+    # when an Import-Data XML references a missing ledger, so we ALWAYS verify against
+    # live Tally before sending.
+    skip_snapshot_preflight = False
     try:
         refs = _collect_payload_ledger_refs(payload, company_name)
         if refs:
             live = fetch_local_ledgers(tally_url) or []
             live_lc = {n.strip().lower() for n in live}
-            if live_lc:  # only enforce when we actually got a live list back
+            if live_lc:  # only act when we actually got a live list back
                 missing_refs = [r for r in refs if r.strip().lower() not in live_lc]
-                if missing_refs:
+                if not missing_refs:
+                    # All refs exist in live Tally → safe to push WITHOUT the flaky
+                    # snapshot pre-flight. This is the happy path.
+                    skip_snapshot_preflight = True
+                else:
                     m = missing_refs[0]
                     if _is_system_ledger(m):
                         nl = _gst_ledger_meta(m, payload)
@@ -1329,6 +1325,15 @@ def push_voucher_to_tally(payload, tally_url, company_name, server_url=None):
                     return False, "NEEDS_LEDGER|" + json.dumps(nl) + "|" + human
     except Exception as _e:
         print(f"[push_voucher_to_tally] live pre-flight skipped: {_e}", flush=True)
+
+    # Snapshot-based pre-flight — only run when the live check didn't already clear us.
+    # The function may also rewrite party/ledger names in `payload` so they match the
+    # company's actual ledger names (e.g. "SUN PHARMA LTD" → "SUN PHARMACEUTICAL INDUSTRIES LTD.- HL").
+    if not skip_snapshot_preflight:
+        payload, created, errs = _ensure_ledgers_exist(payload, tally_url, company_name,
+                                                        server_url=server_url)
+        if errs:
+            return False, "Pre-flight failed: " + "; ".join(errs)
 
     # Sprint 32 — Loop: each failed attempt may surface ONE missing ledger.
     # Auto-create it, retry, repeat. Up to 5 iterations to cover the
@@ -2298,13 +2303,15 @@ class TallyBridgeApp:
                     self.set_status(True)
                     self.log(f"Secure tunnel active for {self.selected_company_name}. Ready for sync.", "success")
 
-                    # Auto-trigger a baseline sync on first successful connection
-                    # for this session. The agent fires HTTP POST /tally/ingest, which
-                    # the server dispatches back over THIS websocket asking the agent
-                    # for its Tally data. The agent's command loop below handles it.
-                    if not getattr(self, "_baseline_done", False):
-                        self._baseline_done = True
-                        threading.Thread(target=self._trigger_baseline_sync, daemon=True).start()
+                    # Sprint 36 — DO NOT auto-trigger baseline sync on connect. The 40s
+                    # fetch_vouchers (since=0, full history) acquires the global Tally HTTP
+                    # lock and on large/fragile Tally databases can crash Tally with c0000005
+                    # and/or starve concurrent outbox pushes — that's what crashed JMK's Tally
+                    # tonight. The agent connects ready to push the outbox; baseline sync is a
+                    # heavy operation the user can invoke explicitly when they want it (the
+                    # server still accepts /tally/ingest POSTs and seed_baseline commands —
+                    # we just don't fire it automatically on every reconnect).
+                    # (Previously: auto-fired _trigger_baseline_sync in a daemon thread.)
 
                     while self.should_run:
                         msg_str = await ws.recv()

@@ -745,7 +745,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "226"
+APP_VERSION = "227"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -6824,6 +6824,26 @@ async def sync_approved_invoices_batch(payload: dict):
                 "billing_party_gstin": inv.get("party_gstin") or inv.get("gstin"),
                 "narration": inv.get("narration") or "",
             }
+            # Sprint 36 — EXPLICIT GST-ledger injection here too (belt+suspenders alongside
+            # the centralized one in enqueue_tally_push). Resolve the customer's real GST
+            # ledgers ("IGST Tax" etc.) and stamp them into the payload BEFORE enqueue so
+            # the row always has correct names even if the centralized injection fails.
+            try:
+                _vt = {"Sale": "Sales", "Sales": "Sales", "Purchase": "Purchase"}.get(
+                    (enqueue_payload.get("voucher_type") or "").capitalize(),
+                    (enqueue_payload.get("voucher_type") or "").capitalize())
+                _cg = enqueue_payload["cgst_amount"]; _sg = enqueue_payload["sgst_amount"]; _ig = enqueue_payload["igst_amount"]
+                if _vt in ("Sales", "Purchase") and (_cg > 0 or _sg > 0 or _ig > 0):
+                    _gl = db.resolve_gst_ledgers(company)
+                    _suf = "in" if _vt == "Purchase" else "out"
+                    for _hd, _amt in (("igst", _ig), ("cgst", _cg), ("sgst", _sg)):
+                        if _amt > 0:
+                            _nm = _gl.get(f"{_hd}_{_suf}")
+                            if _nm:
+                                enqueue_payload[f"{_hd}_ledger"] = _nm
+                    print(f"[sync-batch] inv {inv_id} {_vt} resolved: igst_ledger={enqueue_payload.get('igst_ledger')!r} cgst_ledger={enqueue_payload.get('cgst_ledger')!r} sgst_ledger={enqueue_payload.get('sgst_ledger')!r}", flush=True)
+            except Exception as _re:
+                print(f"[sync-batch] gst resolve at enqueue failed for {inv_id}: {_re}", flush=True)
             try:
                 db.enqueue_tally_push(payload=enqueue_payload, invoice_id=inv_id,
                                       company_name=company, enqueued_by="sync-batch")
