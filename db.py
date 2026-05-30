@@ -3778,7 +3778,9 @@ def get_history(company_name=None):
 # Tally direction; reco_flag is the Tally → YantrAI direction. Together they
 # give the user an honest two-axis view of every voucher's sync state. See
 # plan: the-reconciled-by-creates-jaunty-dijkstra.md
-_RECO_GST_TOL = 0.50   # ₹0.50 paise tolerance for GST split comparison
+_RECO_GST_TOL = 0.50      # ₹0.50 paise tolerance for GST split comparison
+_RECO_AMOUNT_TOL = 1.0    # ₹1 round-off tolerance — Tally's Round-Off ledger shifts
+                          # totals to the nearest rupee, so ±₹1 is normal, not a mismatch.
 
 
 def _gst_split_differs(row):
@@ -3839,7 +3841,12 @@ def _derive_reco_flag(row):
         tv_amt  = abs(float(row.get('tv_amount') or 0))
     except (TypeError, ValueError):
         inv_amt = tv_amt = 0
-    if abs(inv_amt - tv_amt) > 0.01:
+    # Sprint 47 — round-off tolerance. Tally rounds invoice totals to the nearest
+    # rupee via its Round-Off ledger, so a YantrAI total of ₹3,24,923 routinely
+    # lands in Tally as ₹3,24,924. A 1-paisa tolerance flagged that as an
+    # "amount mismatch" — wrong; ±₹1 is normal rounding, not a discrepancy.
+    # Only flag when the gap exceeds the round-off band (> ₹1).
+    if abs(inv_amt - tv_amt) > _RECO_AMOUNT_TOL:
         return 'amount_mismatch'
     if _gst_split_differs(row):
         return 'gst_mismatch'
