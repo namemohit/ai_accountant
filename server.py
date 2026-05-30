@@ -1029,7 +1029,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "243"
+APP_VERSION = "244"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -6661,11 +6661,30 @@ async def ingest_tally_data(payload: dict):
         # it; with per-entity AlterIds the incremental path now handles routine
         # churn cleanly. Old agents that ignore the new fields fall back to the
         # legacy single `since_alter_id` behaviour and still work.
+        # Phase 1 (Sprint 50) — explicit sync mode from the UI. The Vouchers page
+        # now offers two buttons:
+        #   mode='full'        → force a complete re-import (overrides the 7-day
+        #                        auto-rule); this is also the trigger that runs
+        #                        voucher deletion-reconcile (Phase 3).
+        #   mode='incremental' → only what changed since the last sync, UNLESS
+        #                        there's no prior full baseline (then we must do a
+        #                        full pull — nothing to diff against yet).
+        #   (absent)           → legacy adaptive behaviour (full if first/>7 days).
+        _mode = (payload.get("mode") or "").strip().lower()
         _do_full = True
         _since_v = _since_l = _since_g = _since_s = 0
         try:
             _wm = db.get_sync_watermark(company)
-            if _wm and _wm.get("last_full_sync_at"):
+            _has_baseline = bool(_wm and _wm.get("last_full_sync_at"))
+            if _mode == "full":
+                _do_full = True                      # explicit full re-import
+            elif _mode == "incremental" and _has_baseline:
+                _do_full = False                     # explicit incremental (baseline exists)
+                _since_v = int(_wm.get("last_voucher_alterid") or 0)
+                _since_l = int(_wm.get("last_ledger_alterid") or 0)
+                _since_g = int(_wm.get("last_group_alterid") or 0)
+                _since_s = int(_wm.get("last_stock_alterid") or 0)
+            elif _has_baseline:
                 import datetime as _dt
                 _age = (_dt.datetime.utcnow() - _wm["last_full_sync_at"]).total_seconds()
                 if 0 <= _age < 7 * 24 * 3600:

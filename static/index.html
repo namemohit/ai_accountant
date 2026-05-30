@@ -11956,7 +11956,9 @@
                 { act:'doc',   icon:'🖼️', label:'Image / PDF',   fn:()=>document.getElementById('v-doc-import-input').click() },
                 { act:'xml',   icon:'🧾', label:'Tally XML',      fn:()=>document.getElementById('v-xml-import-input').click() },
                 { sep:true },
-                { act:'sync',  icon:'⬇️', label:'Sync from Tally', fn:()=>syncFromTally() },
+                // Phase 1 (Sprint 50) — two explicit sync modes.
+                { act:'sync_inc',  icon:'⬇️', label:'Incremental sync (changes only)', fn:()=>syncFromTally('incremental') },
+                { act:'sync_full', icon:'🔁', label:'Full import (everything)',          fn:()=>syncFromTally('full') },
             ]);
         }
         function openVoucherExportMenu(ev) {
@@ -12043,35 +12045,46 @@
             };
         }
 
-        async function syncFromTally() {
+        async function syncFromTally(mode) {
+            // Phase 1 (Sprint 50) — explicit sync mode. 'incremental' (default) pulls
+            // only what changed since the last sync; 'full' re-reads the entire Tally
+            // company (slow on big books) and is the trigger for deletion reconcile.
+            mode = (mode === 'full') ? 'full' : 'incremental';
             const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
-            const p = _tallyProgress('⬇ Import from Tally');
+            if (mode === 'full' &&
+                !confirm('Full import re-reads your ENTIRE Tally company (all vouchers, ledgers, groups). On a large book this can take up to a minute.\n\nUse "Incremental sync" for routine updates. Continue with a full import?')) {
+                return;
+            }
+            const title = mode === 'full' ? '🔁 Full import from Tally' : '⬇ Incremental sync from Tally';
+            const p = _tallyProgress(title);
             p.step('Contacting the Windows Tally Bridge…');
-            p.detail('Asking the agent on your Tally machine to read vouchers, ledgers and groups and send them to YantrAI. Large books can take up to a minute.');
+            p.detail(mode === 'full'
+                ? 'Re-reading the whole Tally company — vouchers, ledgers and groups — and sending it to YantrAI. This can take up to a minute for large books.'
+                : 'Asking the agent for everything that changed in Tally since the last sync. This is usually quick.');
             try {
                 const res = await fetch(`${API}/tally/ingest`, {
                     method:'POST', headers:{'Content-Type':'application/json'},
-                    body: JSON.stringify({ company_name: u.company_name })
+                    body: JSON.stringify({ company_name: u.company_name, mode })
                 });
                 const d = await res.json().catch(()=>({}));
-                if (!res.ok) throw new Error(d.detail || `Import failed (HTTP ${res.status})`);
+                if (!res.ok) throw new Error(d.detail || `Sync failed (HTTP ${res.status})`);
                 const counts = [];
                 if (d.vouchers_count != null) counts.push(`${d.vouchers_count} vouchers`);
                 if (d.ledgers_count  != null) counts.push(`${d.ledgers_count} ledgers`);
                 if (d.groups_count   != null) counts.push(`${d.groups_count} groups`);
-                p.success('Import complete',
+                p.success(mode === 'full' ? 'Full import complete' : 'Incremental sync complete',
                     counts.length
                       ? `Pulled from Tally: <strong style="color:#10b981;">${counts.join(', ')}</strong>. Refreshing the list…`
                       : 'Tally responded successfully. Refreshing the voucher list…');
                 if (typeof loadVouchers === 'function') loadVouchers();
             } catch (e) {
-                const msg = e.message || 'Import from Tally failed';
+                const msg = e.message || 'Sync from Tally failed';
                 const isBridge = /bridge unavailable|agent|timeout/i.test(msg);
-                p.error('Import failed',
+                p.error(mode === 'full' ? 'Full import failed' : 'Incremental sync failed',
                     `<div style="color:#fca5a5;">${msg}</div>` + (isBridge
                       ? '<div style="margin-top:8px;">Open Tally Prime and confirm the <strong>YantrAI Tally Bridge</strong> window shows <em>“Tally connected”</em> with a green dot, then retry.</div>'
                       : ''),
-                    () => syncFromTally());
+                    () => syncFromTally(mode));
             }
         }
 
