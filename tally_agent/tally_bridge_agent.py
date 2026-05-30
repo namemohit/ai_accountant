@@ -872,7 +872,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.19.0"  # + voucher delete (Sprint 44): <VOUCHER ACTION="Delete"><MASTERID>...</MASTERID></VOUCHER> envelope keyed on the tally_master_id round-tripped from the original push's ack. push_voucher_to_tally short-circuits the whole pre-flight + consent path when payload.tally_action == "Delete" — delete has no LEDGERNAME refs and needs no chart-of-accounts checks. <DELETED>1</DELETED> recognised as success in _parse_tally_push_response. Same proven IMPORTDATA wrapper as Create/Alter.
+AGENT_VERSION = "0.19.1"  # Sprint 44.1 — Alter + Delete envelopes now branch by tally_master_id shape: numeric LASTVCHID → <MASTERID>N</MASTERID> element (the historical path); full Tally GUID → REMOTEID="<guid>" attribute on <VOUCHER>. Pre-Sprint-44.1 code sent GUIDs into the <MASTERID> element, which Tally silently couldn't match — Alter created duplicates, Delete returned "Cannot delete unnamed object". Also fixes line-954: prefer payload.party_name (real counter-party) over billing_party_name (which is our own workspace name on Sales).
 
 
 def _post_json(url, body, timeout=15.0):
@@ -951,7 +951,16 @@ def _build_voucher_xml(payload, company_name):
     }.get(vt_tally, "Sales Account")
 
     date_str = _to_tally_date(payload.get("date"))
-    party = payload.get("billing_party_name") or payload.get("party_name") or payload.get("party") or "Cash"
+    # Sprint 44 FIX — pick `party_name` (the real counter-party: customer for
+    # Sales/Receipt, vendor for Purchase/Payment) FIRST. `billing_party_name`
+    # carries the seller's own legal name (i.e. our own workspace on a Sales
+    # invoice, or the vendor's bill header on a Purchase) and is only a last-
+    # resort fallback. Pre-Sprint-44 code preferred `billing_party_name` and
+    # ended up booking sales vouchers against our own ledger.
+    party = (payload.get("party_name")
+             or payload.get("party")
+             or payload.get("billing_party_name")
+             or "Cash")
     voucher_num = payload.get("invoice_number") or payload.get("voucher_number") or ""
     narration = payload.get("narration") or f"Synced from YantrAI on {datetime.now().strftime('%Y-%m-%d')}"
     # Sticky-origin marker: stamp YantrAI's immutable voucher id into the narration so it
@@ -1052,12 +1061,32 @@ def _build_voucher_xml(payload, company_name):
     # Edit-voucher: when re-pushing an edited voucher, the web layer sets
     # tally_action="Alter" + tally_master_id so Tally UPDATES the existing
     # voucher (matched by its master id) instead of creating a duplicate.
+    #
+    # Sprint 44.1 — Tally's voucher identifier is stored in two ways in our DB
+    # depending on the origin:
+    #   - After an outbound CREATE push, the agent's ack stores the numeric
+    #     LASTVCHID from Tally's response (e.g. "2") in tally_master_id.
+    #   - After a Sync from Tally (seed_baseline ingest), tally_master_id holds
+    #     the FULL Tally GUID, e.g. "80124ed5-...-00000002".
+    # Tally accepts either form, but in DIFFERENT XML slots:
+    #   - <MASTERID>2</MASTERID>      element — numeric only
+    #   - REMOTEID="<full guid>"      attribute — UUID-shape only
+    # Sending the GUID as <MASTERID> (as the pre-Sprint-44.1 code did) makes
+    # Tally fail to match and silently CREATE a duplicate voucher instead.
     action = (payload.get("tally_action") or "Create").strip().capitalize()
     if action not in ("Create", "Alter"):
         action = "Create"
     master_id = payload.get("tally_master_id")
-    masterid_node = (f"<MASTERID>{_xml_escape(str(master_id))}</MASTERID>"
-                     if action == "Alter" and master_id else "")
+    masterid_node = ""
+    remoteid_attr = ""
+    if action == "Alter" and master_id:
+        mid_s = str(master_id).strip()
+        if mid_s.isdigit():
+            # Numeric LASTVCHID — use the <MASTERID> element.
+            masterid_node = f"<MASTERID>{_xml_escape(mid_s)}</MASTERID>"
+        else:
+            # Full Tally GUID — use the REMOTEID attribute on <VOUCHER>.
+            remoteid_attr = f' REMOTEID="{_xml_escape(mid_s)}"'
 
     envelope = (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -1073,7 +1102,7 @@ def _build_voucher_xml(payload, company_name):
               '</REQUESTDESC>'
               '<REQUESTDATA>'
                 '<TALLYMESSAGE xmlns:UDF="TallyUDF">'
-                  f'<VOUCHER VCHTYPE="{_xml_escape(vt_tally)}" ACTION="{action}" OBJVIEW="Accounting Voucher View">'
+                  f'<VOUCHER VCHTYPE="{_xml_escape(vt_tally)}" ACTION="{action}"{remoteid_attr} OBJVIEW="Accounting Voucher View">'
                     f'{masterid_node}'
                     f'<DATE>{date_str}</DATE>'
                     f'<VOUCHERNUMBER>{_xml_escape(voucher_num)}</VOUCHERNUMBER>'
@@ -1092,15 +1121,25 @@ def _build_voucher_xml(payload, company_name):
 
 
 def _build_voucher_delete_xml(tally_master_id, voucher_type, company_name):
-    """Sprint 44 — Build a Tally Import-Data envelope that DELETES one
-    voucher, identified by its MASTERID. The MASTERID is what Tally returned
-    in <LASTVCHID> on the original push (round-tripped via tally_master_id on
-    tally_vouchers via ack_tally_outbox).
+    """Sprint 44 / 44.1 — Build a Tally Import-Data envelope that DELETES one
+    voucher, identified by its master id.
 
-    Tally's delete envelope is intentionally minimal — no LEDGERNAME refs to
-    pre-flight, no GST classification, no party. Just the voucher GUID +
-    ACTION="Delete". Tally responds with <DELETED>1</DELETED> on success."""
+    Sprint 44.1: like the Alter envelope, the master id arrives in TWO shapes:
+      - numeric LASTVCHID (e.g. "2")  → <MASTERID>2</MASTERID> element
+      - full Tally GUID (e.g. "80124ed5-...-00000002") → REMOTEID="<guid>"
+        attribute on the <VOUCHER> tag. The MASTERID element silently fails
+        to disambiguate when given a GUID and returns the "Cannot delete
+        unnamed object" error.
+
+    Tally responds with <DELETED>1</DELETED> on success."""
     vt_tally = (voucher_type or "Sales").strip().capitalize()
+    mid_s = str(tally_master_id or "").strip()
+    if mid_s.isdigit():
+        ident_attr = ""
+        ident_node = f"<MASTERID>{_xml_escape(mid_s)}</MASTERID>"
+    else:
+        ident_attr = f' REMOTEID="{_xml_escape(mid_s)}"'
+        ident_node = ""
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<ENVELOPE>'
@@ -1115,8 +1154,8 @@ def _build_voucher_delete_xml(tally_master_id, voucher_type, company_name):
               '</REQUESTDESC>'
               '<REQUESTDATA>'
                 '<TALLYMESSAGE xmlns:UDF="TallyUDF">'
-                  f'<VOUCHER VCHTYPE="{_xml_escape(vt_tally)}" ACTION="Delete">'
-                    f'<MASTERID>{_xml_escape(str(tally_master_id))}</MASTERID>'
+                  f'<VOUCHER VCHTYPE="{_xml_escape(vt_tally)}" ACTION="Delete"{ident_attr}>'
+                    f'{ident_node}'
                   '</VOUCHER>'
                 '</TALLYMESSAGE>'
               '</REQUESTDATA>'
