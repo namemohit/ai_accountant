@@ -240,9 +240,21 @@ async def tally_websocket_endpoint(websocket: WebSocket):
             print(f"[WS CLEANUP] Removed connection for key: {conn_key}", flush=True)
 
 async def dispatch_tally_command(token: str, cmd_type: str, data: dict = None) -> dict:
-    ws = None
-    if token in tally_connections:
-        ws = tally_connections[token]
+    ws = tally_connections.get(token)
+    # Sprint 47 — the agent's WebSocket can briefly drop + auto-reconnect
+    # (code 1006 flaps on flaky links / server restarts). Rather than fail
+    # Import/Export the instant we catch it mid-reconnect, wait up to ~8s for
+    # the agent to re-register. This turns a spurious "bridge unavailable"
+    # into a short pause that almost always resolves. Still scoped to the
+    # exact token — no cross-tenant fallback.
+    if not ws:
+        import asyncio as _aio
+        for _ in range(16):              # 16 × 0.5s = 8s grace window
+            await _aio.sleep(0.5)
+            ws = tally_connections.get(token)
+            if ws:
+                print(f"[WS DISPATCH] agent reconnected for '{token}' after grace wait.", flush=True)
+                break
     # P0 FIX: no "first available connection" fallback — routing a command to a
     # different company's agent would pull the WRONG tenant's Tally data.
     if not ws:
@@ -1001,7 +1013,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "235"
+APP_VERSION = "236"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""

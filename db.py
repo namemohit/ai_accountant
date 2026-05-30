@@ -81,6 +81,15 @@ def pput(conn, bad=False):
         try: conn.close()
         except Exception: pass
         return
+    # Sprint 47 — scrub aborted-transaction connections before reuse. Cheap local
+    # status check; rollback only if needed. Prevents "current transaction is
+    # aborted" cascading to the next caller of this pooled connection.
+    if not bad:
+        try:
+            if conn.get_transaction_status() == psycopg2.extensions.TRANSACTION_STATUS_INERROR:
+                conn.rollback()
+        except Exception:
+            bad = True
     try:
         try: conn._last_used = _time.time()   # stamp so pget can skip pre-ping when fresh
         except Exception: pass
@@ -4047,12 +4056,21 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
         for k in _RECO_SCRATCH_KEYS:
             r.pop(k, None)
 
-    # Get total count for pagination (counts ALL rows incl. archived, matching the
-    # "Status: any" view which shows every line; the Status column marks archived ones).
-    cursor.execute(f"SELECT COUNT(*) FROM tally_vouchers WHERE {' AND '.join(tally_where)}", tally_params)
-    tally_total = cursor.fetchone()['count']
-    cursor.execute(f"SELECT COUNT(*) FROM invoices WHERE {' AND '.join(inv_where)}", inv_params)
-    inv_total = cursor.fetchone()['count']
+    # Sprint 47 — the two COUNT(*) queries below were doing full-table
+    # sequential scans on tally_vouchers because there's no
+    # index on (company_name). On the prod DB that translates to 30-45
+    # SECONDS per call, which blocked every /api/vouchers request behind a
+    # locked pool connection. The counts are only used for an informational
+    # "X from Tally / Y uploaded" pill in the UI header; the actual page
+    # render uses len(results). When the size of the fetched page equals
+    # the requested limit we hint "more available" by returning None — the
+    # UI shows '—'. The proper fix is `CREATE INDEX idx_tally_vouchers_company`
+    # but that requires a separate DDL grant; until then this skip keeps the
+    # endpoint fast.
+    tally_rows_fetched = sum(1 for r in results if r.get('source') == 'tally')
+    inv_rows_fetched = len(results) - tally_rows_fetched
+    tally_total = None if tally_rows_fetched >= limit else tally_rows_fetched
+    inv_total = None if inv_rows_fetched >= limit else inv_rows_fetched
 
     cursor.close()
     pput(conn)   # return the pooled connection (was conn.close())
@@ -6573,14 +6591,34 @@ def _ensure_tally_delete_column(cur):
     global _TALLY_DELETE_READY
     if _TALLY_DELETE_READY:
         return
-    cur.execute("ALTER TABLE tally_vouchers "
-                "ADD COLUMN IF NOT EXISTS deleted_from_tally_at TIMESTAMP")
-    cur.execute("ALTER TABLE invoices "
-                "ADD COLUMN IF NOT EXISTS deleted_from_tally_at TIMESTAMP")
-    # Persist the ALTERs immediately so a same-cursor SELECT later in this
-    # function sees the column — otherwise it lives in an uncommitted
-    # transaction that gets rolled back when the pooled connection is
-    # returned, leaving the column missing for the very next request.
+    # Sprint 47 — DO NOT run a blind ALTER TABLE here. ALTER takes an ACCESS
+    # EXCLUSIVE lock on tally_vouchers; if any other session holds even a read
+    # lock (e.g. a slow/hung SELECT on the shared Supabase session pooler) the
+    # ALTER blocks indefinitely and freezes /api/vouchers — which is exactly
+    # the "vouchers page hangs" symptom. The column already exists in prod
+    # (added Sprint 44). Probe information_schema first (a cheap, lock-free
+    # catalog read); only run the ALTER on a genuinely fresh DB where the
+    # column is missing.
+    try:
+        cur.execute("""SELECT
+            (SELECT 1 FROM information_schema.columns
+              WHERE table_name='tally_vouchers' AND column_name='deleted_from_tally_at' LIMIT 1),
+            (SELECT 1 FROM information_schema.columns
+              WHERE table_name='invoices' AND column_name='deleted_from_tally_at' LIMIT 1)""")
+        tv_has, inv_has = cur.fetchone()
+    except Exception:
+        tv_has = inv_has = None
+    if tv_has and inv_has:
+        _TALLY_DELETE_READY = True   # both columns present → nothing to do
+        return
+    # Fresh DB path — column(s) missing, so the ALTER is safe (nothing else
+    # is using the table yet on a brand-new install).
+    if not tv_has:
+        cur.execute("ALTER TABLE tally_vouchers "
+                    "ADD COLUMN IF NOT EXISTS deleted_from_tally_at TIMESTAMP")
+    if not inv_has:
+        cur.execute("ALTER TABLE invoices "
+                    "ADD COLUMN IF NOT EXISTS deleted_from_tally_at TIMESTAMP")
     try:
         cur.connection.commit()
     except Exception:
@@ -11518,7 +11556,39 @@ def mark_sensitive_ledgers(company_id=None):
 # established prod schema is essentially a no-op pass; the seed calls
 # are upsert-style. Requests that arrive during the background init
 # already work because the schema is provisioned from prior deploys.
+def _schema_already_provisioned():
+    """Cheap probe — does the `invoices` table already exist? If yes, the schema
+    has been provisioned by some prior deploy and we can skip the 111
+    ALTER/CREATE statements + seed work. Saves 5-30 seconds of Pooler round-trips
+    on every server start. Honors SKIP_INIT_DB=1 as an explicit override too."""
+    if os.getenv("SKIP_INIT_DB") == "1":
+        return True
+    try:
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM information_schema.tables "
+                        "WHERE table_schema='public' AND table_name='invoices' LIMIT 1")
+            row = cur.fetchone()
+            cur.close()
+            return bool(row)
+        finally:
+            try: conn.close()
+            except Exception: pass
+    except Exception:
+        return False
+
+
 def _init_db_in_background():
+    # Sprint 47 — skip the heavy 111-statement init when prod schema is
+    # already there. Old behaviour (always run init_db) ate 15 Pooler conns
+    # for ~30 seconds on every restart, which starved the dashboard and
+    # locked the server during browser polls. The single probe query
+    # below either returns instantly (schema present → skip) or falls
+    # through to the full init path (fresh DB → migrate as before).
+    if _schema_already_provisioned():
+        print("Cloud Database schema already provisioned — skipping init_db()/seed.")
+        return
     try:
         init_db()
         seeded = seed_builtin_recon_templates()

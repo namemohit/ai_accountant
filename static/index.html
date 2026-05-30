@@ -12009,19 +12009,97 @@
                 if (typeof loadVouchers === 'function') loadVouchers();
             } catch (e) { alert(e.message || 'XML import failed'); }
         }
+        // ── Sprint 47 — Tally Import/Export progress dialog ──────────────────
+        // One clear modal with live status for Sync-from / Sync-to Tally,
+        // replacing the transient toast + browser alert. States: running
+        // (spinner + step), success (✅ + summary), error (⚠️ + real server
+        // message + Retry).
+        function _tallyProgress(title) {
+            let modal = document.getElementById('tally-progress-modal');
+            if (!modal) {
+                modal = document.createElement('div');
+                modal.id = 'tally-progress-modal';
+                modal.style.cssText = 'position:fixed; inset:0; z-index:9999; background:rgba(8,12,20,0.72); display:flex; align-items:center; justify-content:center;';
+                modal.innerHTML = `
+                  <div style="background:var(--bg-surface,#1c1814); border:1px solid var(--border,#3a332e); border-radius:14px; width:min(460px,92vw); box-shadow:0 24px 70px rgba(0,0,0,0.6); overflow:hidden;">
+                    <div style="padding:18px 22px; border-bottom:1px solid var(--border,#3a332e); display:flex; align-items:center; gap:12px;">
+                      <span id="tp-icon" style="font-size:1.3rem;">🔄</span>
+                      <strong id="tp-title" style="color:#f1f5f9; font-size:1.02rem;"></strong>
+                    </div>
+                    <div style="padding:22px;">
+                      <div style="color:#cbd5e1; font-size:0.9rem; display:flex; align-items:center; gap:10px;">
+                        <i class="fas fa-spinner fa-spin" id="tp-spin" style="color:var(--primary,#da7756);"></i>
+                        <span id="tp-step-text">Starting…</span>
+                      </div>
+                      <div id="tp-detail" style="margin-top:14px; color:#94a3b8; font-size:0.82rem; line-height:1.5; max-height:200px; overflow:auto;"></div>
+                    </div>
+                    <div style="padding:14px 22px; border-top:1px solid var(--border,#3a332e); display:flex; justify-content:flex-end; gap:10px;">
+                      <button id="tp-retry" style="display:none; padding:8px 16px; background:rgba(56,189,248,0.12); color:#38bdf8; border:1px solid rgba(56,189,248,0.4); border-radius:8px; font-weight:600; cursor:pointer; font-size:0.84rem;">↻ Retry</button>
+                      <button id="tp-close" style="display:none; padding:8px 18px; background:var(--primary,#da7756); color:white; border:none; border-radius:8px; font-weight:700; cursor:pointer; font-size:0.84rem;">Close</button>
+                    </div>
+                  </div>`;
+                document.body.appendChild(modal);
+            }
+            modal.style.display = 'flex';
+            const $ = id => modal.querySelector('#' + id);
+            $('tp-title').textContent = title;
+            $('tp-icon').textContent = '🔄';
+            $('tp-spin').style.display = '';
+            $('tp-step-text').textContent = 'Starting…';
+            $('tp-detail').innerHTML = '';
+            $('tp-close').style.display = 'none';
+            $('tp-retry').style.display = 'none';
+            const close = () => { modal.style.display = 'none'; };
+            return {
+                step:   t => { $('tp-step-text').textContent = t; },
+                detail: h => { $('tp-detail').innerHTML = h; },
+                success(t, h) {
+                    $('tp-icon').textContent = '✅'; $('tp-spin').style.display = 'none';
+                    $('tp-step-text').textContent = t;
+                    if (h) $('tp-detail').innerHTML = h;
+                    $('tp-close').style.display = ''; $('tp-close').onclick = close;
+                },
+                error(t, h, onRetry) {
+                    $('tp-icon').textContent = '⚠️'; $('tp-spin').style.display = 'none';
+                    $('tp-step-text').innerHTML = `<span style="color:#fca5a5;">${t}</span>`;
+                    if (h) $('tp-detail').innerHTML = h;
+                    $('tp-close').style.display = ''; $('tp-close').onclick = close;
+                    if (onRetry) { const r = $('tp-retry'); r.style.display = ''; r.onclick = () => { close(); onRetry(); }; }
+                },
+                close
+            };
+        }
+
         async function syncFromTally() {
             const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
-            if (typeof showChatToast === 'function') showChatToast('Requesting a pull from Tally (needs the Windows Agent online)…', 'info');
+            const p = _tallyProgress('⬇ Import from Tally');
+            p.step('Contacting the Windows Tally Bridge…');
+            p.detail('Asking the agent on your Tally machine to read vouchers, ledgers and groups and send them to YantrAI. Large books can take up to a minute.');
             try {
                 const res = await fetch(`${API}/tally/ingest`, {
                     method:'POST', headers:{'Content-Type':'application/json'},
                     body: JSON.stringify({ company_name: u.company_name })
                 });
                 const d = await res.json().catch(()=>({}));
-                if (!res.ok) throw new Error(d.detail || 'Sync from Tally failed');
-                if (typeof showChatToast === 'function') showChatToast('Sync from Tally requested — vouchers will appear once the Bridge responds.', 'info');
+                if (!res.ok) throw new Error(d.detail || `Import failed (HTTP ${res.status})`);
+                const counts = [];
+                if (d.vouchers_count != null) counts.push(`${d.vouchers_count} vouchers`);
+                if (d.ledgers_count  != null) counts.push(`${d.ledgers_count} ledgers`);
+                if (d.groups_count   != null) counts.push(`${d.groups_count} groups`);
+                p.success('Import complete',
+                    counts.length
+                      ? `Pulled from Tally: <strong style="color:#10b981;">${counts.join(', ')}</strong>. Refreshing the list…`
+                      : 'Tally responded successfully. Refreshing the voucher list…');
                 if (typeof loadVouchers === 'function') loadVouchers();
-            } catch (e) { alert(e.message || 'Sync from Tally failed (is the Windows Agent running?)'); }
+            } catch (e) {
+                const msg = e.message || 'Import from Tally failed';
+                const isBridge = /bridge unavailable|agent|timeout/i.test(msg);
+                p.error('Import failed',
+                    `<div style="color:#fca5a5;">${msg}</div>` + (isBridge
+                      ? '<div style="margin-top:8px;">Open Tally Prime and confirm the <strong>YantrAI Tally Bridge</strong> window shows <em>“Tally connected”</em> with a green dot, then retry.</div>'
+                      : ''),
+                    () => syncFromTally());
+            }
         }
 
         // ── Sprint 42 — Tally Admin → Create Company ────────────────────────
@@ -14687,33 +14765,35 @@
             }
 
             const invoiceIds = Array.from(checkedBoxes).map(cb => cb.getAttribute('data-inv-id'));
-            
-            const selectedCountDiv = document.getElementById('selected-count');
-            const originalText = selectedCountDiv.innerHTML;
-            selectedCountDiv.innerHTML = `<span style="color: var(--primary); font-weight: bold;"><i class="fas fa-spinner fa-spin"></i> Syncing ${invoiceIds.length} invoices to Tally ERP...</span>`;
 
+            // Sprint 47 — progress dialog instead of inline spinner + alert.
+            const p = _tallyProgress('⬆ Export to Tally');
+            p.step(`Queuing ${invoiceIds.length} voucher(s) for Tally…`);
+            p.detail('Each voucher is saved to YantrAI and queued for the Windows Tally Bridge, which writes it into Tally Prime and reports back here.');
             try {
                 const response = await fetch('/tally/sync-batch', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ invoice_ids: invoiceIds })
                 });
-                const result = await response.json();
-                
-                if (result.status === 'success') {
-                    // Sprint 28 — honest message: queued, not yet in Tally
-                    const tallyStateBadge = (window.__tallyBridgeOnline === true) ? 'Windows Agent online — pushing now.'
-                        : (window.__tallyBridgeOnline === false) ? 'Windows Agent OFFLINE — run tally_bridge_agent.exe on the Tally machine to process the queue.'
-                        : 'Windows Agent status unknown.';
-                    alert(`Saved ${result.synced_count} voucher(s) to YantrAI books. Queued for Windows Agent.\n\n${tallyStateBadge}`);
-                    loadVouchers();
-                } else {
-                    throw new Error(result.message || 'Sync failed');
+                const result = await response.json().catch(()=>({}));
+                if (!response.ok || result.status !== 'success') {
+                    throw new Error(result.message || result.detail || `Export failed (HTTP ${response.status})`);
                 }
+                const online = window.__tallyBridgeOnline;
+                const badge = online === true
+                    ? '<div style="margin-top:8px; color:#10b981;">Windows Agent is online — pushing to Tally now. Watch the Status column flip to 🟢 Synced.</div>'
+                    : online === false
+                    ? '<div style="margin-top:8px; color:#fbbf24;">Windows Agent is OFFLINE — start the YantrAI Tally Bridge on the Tally machine to process the queue.</div>'
+                    : '<div style="margin-top:8px; color:#94a3b8;">Windows Agent status unknown — if vouchers don\'t turn 🟢, check the Bridge.</div>';
+                p.success(`Queued ${result.synced_count} voucher(s)`,
+                    `Saved to YantrAI books and queued for Tally.${badge}`);
+                loadVouchers();
             } catch (err) {
-                console.error("Direct Tally Sync error:", err);
-                alert(`Tally Sync Failed: ${err.message}`);
-                selectedCountDiv.innerHTML = originalText;
+                console.error("Tally Export error:", err);
+                p.error('Export failed',
+                    `<div style="color:#fca5a5;">${err.message}</div>`,
+                    () => syncSelectedToTally());
             }
         }
 
