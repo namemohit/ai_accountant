@@ -1974,6 +1974,7 @@
                                 <option value="amount_mismatch">⚠️ Amount mismatch</option>
                                 <option value="gst_mismatch">⚠️ GST split mismatch</option>
                                 <option value="deleted_in_tally">🗑️ Deleted in Tally</option>
+                                <option value="edited_in_tally">✏️ Edited in Tally</option>
                                 <option value="still_in_tally">⚠️ Still in Tally (archived)</option>
                                 <option value="removed_from_tally">🗑️ Removed from Tally (archived)</option>
                             </select>
@@ -6290,11 +6291,18 @@
                     ? `<span style="background: ${_rs.bg}; color: ${_rs.c}; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">${_rs.t}</span>`
                     : `<span style="color:#475569;">—</span>`;
 
-                // Sprint 37 — edit available on every voucher (tally + invoice/PDF/manual)
-                const canEdit = true;
-                const editBtn = canEdit
-                    ? `<button onclick="event.stopPropagation(); openEditVoucherModal('${v.id}')" title="Edit voucher" style="margin-left:6px; padding:3px 8px; background:rgba(59,130,246,0.15); color:#60a5fa; border:1px solid rgba(59,130,246,0.3); border-radius:4px; font-size:0.7rem; cursor:pointer;"><i class="fas fa-edit"></i></button>`
-                    : '';
+                // Phase 4 (Sprint 53) — Edit honesty. A voucher that LIVES in Tally
+                // (pulled from Tally, or a synced YantrAI invoice) can't be edited
+                // in-place through the API — pushing an edit creates a DUPLICATE in
+                // Tally (proven across Sprint 44). So for those rows the Edit button
+                // routes to a hint: change it in Tally Prime, then Sync — YantrAI
+                // catches the edit (Phase 4 edit-detection) and reflects it. Edit
+                // stays fully functional for YantrAI-only drafts NOT yet in Tally
+                // (their push is a fresh CREATE, which IS reliable).
+                const _inTally = (v.source === 'tally' || v.origin === 'tally' || v.was_pushed || v.status === 'synced');
+                const editBtn = _inTally
+                    ? `<button onclick="event.stopPropagation(); editInTallyHint()" title="This voucher lives in Tally. Edit it in Tally Prime, then Sync — YantrAI catches the change. (YantrAI can't reliably push edits into Tally.)" style="margin-left:6px; padding:3px 8px; background:rgba(148,163,184,0.12); color:#94a3b8; border:1px solid rgba(148,163,184,0.3); border-radius:4px; font-size:0.7rem; cursor:help;"><i class="fas fa-edit"></i></button>`
+                    : `<button onclick="event.stopPropagation(); openEditVoucherModal('${v.id}')" title="Edit voucher (YantrAI draft — not yet in Tally)" style="margin-left:6px; padding:3px 8px; background:rgba(59,130,246,0.15); color:#60a5fa; border:1px solid rgba(59,130,246,0.3); border-radius:4px; font-size:0.7rem; cursor:pointer;"><i class="fas fa-edit"></i></button>`;
                 const resyncBtn = needsResync
                     ? `<button onclick="event.stopPropagation(); resyncVoucher('${v.id}')" title="Push edit to Tally" style="margin-left:4px; padding:3px 8px; background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.35); border-radius:4px; font-size:0.7rem; cursor:pointer;"><i class="fas fa-sync-alt"></i> Resync</button>`
                     : '';
@@ -6630,6 +6638,8 @@
                 // Phase 3 — archived-aware lifecycle (shown in the Archived view).
                 'still_in_tally':     {bg:'rgba(245, 158, 11, 0.15)',  c:'#f59e0b', t:'⚠ Still in Tally'},
                 'removed_from_tally': {bg:'rgba(100, 116, 139, 0.15)', c:'#64748b', t:'🗑 Removed from Tally'},
+                // Phase 4 — voucher was edited IN Tally (AlterId climbed). Informational.
+                'edited_in_tally':    {bg:'rgba(56, 189, 248, 0.15)',  c:'#38bdf8', t:'✏️ Edited in Tally'},
             })[flag] || null;
         }
         function _vRowDate(v)   { return (v.date || '').substring(0, 10); }   // YYYY-MM-DD
@@ -6658,7 +6668,7 @@
             if (f.reco) {
                 const flag = v.reco_flag || '';
                 if (f.reco === 'needs_attention') {
-                    if (!flag || flag === 'matched' || flag === 'removed_from_tally') return false;
+                    if (!flag || flag === 'matched' || flag === 'removed_from_tally' || flag === 'edited_in_tally') return false;
                 } else if (f.reco !== flag) return false;
             }
             // Sprint 26 — AI Gap filter (joins against client-side suggestions map)
@@ -7700,8 +7710,9 @@
             // Pill is hidden when zero so the strip stays clean for healthy data.
             const needsAttn = filtered.filter(v => {
                 const f = v.reco_flag || '';
-                // Phase 3 — 'removed_from_tally' is resolved (archived + gone), not a gap.
-                return f && f !== 'matched' && f !== 'removed_from_tally';
+                // Phase 3/4 — 'removed_from_tally' (resolved) and 'edited_in_tally'
+                // (informational provenance) are not action-needed gaps.
+                return f && f !== 'matched' && f !== 'removed_from_tally' && f !== 'edited_in_tally';
             }).length;
             const attnEl = document.getElementById('vstat-attention');
             const attnWrap = document.getElementById('vstat-attention-wrap');
@@ -15984,6 +15995,16 @@
             } catch (e) {
                 console.error(e); alert('Error loading voucher: ' + e.message);
             }
+        };
+
+        // Phase 4 (Sprint 53) — honest hint when the user clicks Edit on a voucher
+        // that lives in Tally. YantrAI can't reliably push an in-place edit back to
+        // Tally (the XML API duplicates it — proven Sprint 44), so we direct the
+        // user to edit in Tally Prime and Sync; edit-detection then reflects it.
+        window.editInTallyHint = function() {
+            const short = "✏️ This voucher lives in Tally — edit it in Tally Prime, then Sync. YantrAI catches the change automatically (it can't reliably push edits into Tally).";
+            if (typeof showChatToast === 'function') { showChatToast(short); return; }
+            alert("✏️ This voucher lives in Tally.\n\nTo change it, edit it in Tally Prime, then run Sync from Tally — YantrAI detects the edit and updates the Reco column.\n\nYantrAI can't reliably push in-place edits into Tally (the API would create a duplicate), so we don't pretend to.");
         };
 
         // ── Edit Voucher ────────────────────────────────────────────────

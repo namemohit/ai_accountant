@@ -3827,7 +3827,13 @@ def _derive_reco_flag(row):
     A NON-archived voucher that vanished from Tally is 'deleted_in_tally' (a real gap
     YantrAI still considers active). "Gone" = its own missing_from_tally_at sentinel
     (set by reconcile_voucher_deletions) OR the legacy discarded_at; for invoice rows
-    the same is read off the Tally twin (tv_missing_from_tally_at / tv_discarded_at)."""
+    the same is read off the Tally twin (tv_missing_from_tally_at / tv_discarded_at).
+
+    Phase 4 (Sprint 53) — 'edited_in_tally' (pencil): the voucher's Tally AlterId climbed
+    since we last stored it, i.e. someone edited it IN Tally. Ranks BELOW the value
+    gaps (amount/GST mismatch is more actionable) but ABOVE 'matched', so an edit that
+    only touched narration/party/line-items — which the amount/GST check can't see —
+    still surfaces. Informational, not a 'needs-attention' gap."""
     archived = bool(row.get('archived'))
     # Tally-source rows: the row IS YantrAI's mirror of what's in Tally.
     if row.get('source') != 'invoice':
@@ -3835,6 +3841,8 @@ def _derive_reco_flag(row):
             return 'removed_from_tally' if archived else 'deleted_in_tally'
         if archived:
             return 'still_in_tally'
+        if row.get('tally_edited_at'):
+            return 'edited_in_tally'
         return 'matched'
     # Invoice-source rows: compare against Tally twin from LATERAL lookup.
     if row.get('tv_missing_from_tally_at') or row.get('tv_discarded_at'):
@@ -3864,12 +3872,14 @@ def _derive_reco_flag(row):
         return 'amount_mismatch'
     if _gst_split_differs(row):
         return 'gst_mismatch'
+    if row.get('tv_tally_edited_at'):
+        return 'edited_in_tally'       # Tally-side edit with no value drift (narration/line change)
     return 'matched'
 
 
 _RECO_SCRATCH_KEYS = (
     'tv_count', 'tv_amount', 'tv_discarded_at', 'tv_missing_from_tally_at',
-    'tv_cgst_amount', 'tv_sgst_amount', 'tv_igst_amount',
+    'tv_tally_edited_at', 'tv_cgst_amount', 'tv_sgst_amount', 'tv_igst_amount',
 )
 
 
@@ -3913,7 +3923,7 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                'tally' AS source, updated_at, created_at,
                COALESCE(origin, 'tally') AS origin, yantrai_uid,
                (archived_at IS NOT NULL) AS archived,
-               deleted_from_tally_at, discarded_at, missing_from_tally_at
+               deleted_from_tally_at, discarded_at, missing_from_tally_at, tally_edited_at
         FROM tally_vouchers
         WHERE {' AND '.join(tally_where)}
         ORDER BY date DESC
@@ -3947,6 +3957,9 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
         # Sprint 52 — stringify the voucher deletion-detection sentinel.
         if r.get('missing_from_tally_at'):
             r['missing_from_tally_at'] = str(r['missing_from_tally_at'])
+        # Sprint 53 — stringify the Tally-side edit sentinel.
+        if r.get('tally_edited_at'):
+            r['tally_edited_at'] = str(r['tally_edited_at'])
         results.append(r)
 
     # --- Invoice-created vouchers (from invoices table) ---
@@ -3999,6 +4012,7 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                COALESCE(ob.pushed_state, FALSE) AS was_pushed,
                COALESCE(tv.tv_count, 0) AS tv_count,
                tv.tv_amount, tv.tv_discarded_at, tv.tv_missing_from_tally_at,
+               tv.tv_tally_edited_at,
                tv.tv_cgst_amount, tv.tv_sgst_amount, tv.tv_igst_amount
         FROM invoices i
         LEFT JOIN LATERAL (
@@ -4025,6 +4039,7 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                    MAX(amount) AS tv_amount,
                    MAX(discarded_at) AS tv_discarded_at,
                    MAX(missing_from_tally_at) AS tv_missing_from_tally_at,
+                   MAX(tally_edited_at) AS tv_tally_edited_at,
                    MAX(cgst_amount) AS tv_cgst_amount,
                    MAX(sgst_amount) AS tv_sgst_amount,
                    MAX(igst_amount) AS tv_igst_amount
@@ -4055,6 +4070,9 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
         # Sprint 52 — stringify the Tally-twin deletion-detection sentinel.
         if r.get('tv_missing_from_tally_at'):
             r['tv_missing_from_tally_at'] = str(r['tv_missing_from_tally_at'])
+        # Sprint 53 — stringify the Tally-twin edit sentinel.
+        if r.get('tv_tally_edited_at'):
+            r['tv_tally_edited_at'] = str(r['tv_tally_edited_at'])
         r['ledger_entries'] = []
         r['cost_centres'] = []
         r['bill_refs'] = []
@@ -6680,11 +6698,15 @@ def _ensure_tally_delete_column(cur):
             (SELECT 1 FROM information_schema.columns
               WHERE table_name='invoices' AND column_name='deleted_from_tally_at' LIMIT 1),
             (SELECT 1 FROM information_schema.columns
-              WHERE table_name='tally_vouchers' AND column_name='missing_from_tally_at' LIMIT 1)""")
-        tv_has, inv_has, miss_has = cur.fetchone()
+              WHERE table_name='tally_vouchers' AND column_name='missing_from_tally_at' LIMIT 1),
+            (SELECT 1 FROM information_schema.columns
+              WHERE table_name='tally_vouchers' AND column_name='alter_id' LIMIT 1),
+            (SELECT 1 FROM information_schema.columns
+              WHERE table_name='tally_vouchers' AND column_name='tally_edited_at' LIMIT 1)""")
+        tv_has, inv_has, miss_has, alt_has, ted_has = cur.fetchone()
     except Exception:
-        tv_has = inv_has = miss_has = None
-    if tv_has and inv_has and miss_has:
+        tv_has = inv_has = miss_has = alt_has = ted_has = None
+    if tv_has and inv_has and miss_has and alt_has and ted_has:
         _TALLY_DELETE_READY = True   # all columns present → nothing to do
         return
     # Fresh DB path — column(s) missing, so the ALTER is safe (nothing else
@@ -6704,6 +6726,18 @@ def _ensure_tally_delete_column(cur):
     if not miss_has:
         cur.execute("ALTER TABLE tally_vouchers "
                     "ADD COLUMN IF NOT EXISTS missing_from_tally_at TIMESTAMP")
+    # Phase 4 (Sprint 53) — per-voucher edit detection. alter_id stores Tally's
+    # monotonic change counter for the voucher; tally_edited_at is set by
+    # save_tally_vouchers when a re-pull shows a HIGHER alter_id than we last
+    # stored — i.e. the voucher was edited IN Tally. This catches edits the
+    # amount/GST reco can't (narration, party, line-item mix) and works on both
+    # incremental and full sync (an edit bumps AlterId, so the row is re-fetched).
+    if not alt_has:
+        cur.execute("ALTER TABLE tally_vouchers "
+                    "ADD COLUMN IF NOT EXISTS alter_id BIGINT DEFAULT 0")
+    if not ted_has:
+        cur.execute("ALTER TABLE tally_vouchers "
+                    "ADD COLUMN IF NOT EXISTS tally_edited_at TIMESTAMP")
     try:
         cur.connection.commit()
     except Exception:
@@ -8416,6 +8450,11 @@ def save_tally_vouchers(company_name, vouchers, source=None):
     created = 0
     updated = 0
     try:
+        # Phase 4 (Sprint 53) — make sure alter_id / tally_edited_at (+ the Sprint
+        # 52 sentinels) exist before the upsert references them. Lock-free probe;
+        # ALTERs only on a genuinely fresh DB. The sync path may reach here before
+        # get_all_vouchers ever ran.
+        _ensure_tally_delete_column(cursor)
         for v in vouchers:
             date_raw = str(v.get("date", ""))
             if len(date_raw) == 8 and date_raw.isdigit():
@@ -8443,6 +8482,10 @@ def save_tally_vouchers(company_name, vouchers, source=None):
             tally_master_id = v.get("tally_master_id") or v.get("guid") or None
             raw_xml = v.get("raw_xml") or None
             instrument_number = v.get("instrument_number", "")
+            # Phase 4 — Tally's per-voucher change counter. The agent stamps it as
+            # "alterid" on every pulled voucher (full + incremental). A higher value
+            # than we last stored means the voucher was edited IN Tally.
+            incoming_alter = int(v.get("alterid") or v.get("alter_id") or 0)
 
             # Sticky-origin marker: a pushed YantrAI voucher carries [YAI:<invoices.id>] in its
             # narration. If present, this Tally row is the sync-back of that YantrAI voucher →
@@ -8466,20 +8509,28 @@ def save_tally_vouchers(company_name, vouchers, source=None):
             # else (company, voucher_number). This avoids needing a hard unique index since
             # legacy data may contain duplicates.
             existing_id = None
+            prior_alter = 0
             if tally_master_id:
                 cursor.execute("""
-                    SELECT id FROM tally_vouchers
+                    SELECT id, COALESCE(alter_id, 0) FROM tally_vouchers
                      WHERE company_name = %s AND tally_master_id = %s LIMIT 1
                 """, (company_name, tally_master_id))
             else:
                 cursor.execute("""
-                    SELECT id FROM tally_vouchers
+                    SELECT id, COALESCE(alter_id, 0) FROM tally_vouchers
                      WHERE company_name = %s AND voucher_number = %s
                        AND (tally_master_id IS NULL OR tally_master_id = '') LIMIT 1
                 """, (company_name, v_num))
             row = cursor.fetchone()
             if row:
                 existing_id = row[0]
+                prior_alter = int(row[1] or 0)
+
+            # Phase 4 — flag a Tally-side edit: the voucher's AlterId climbed above
+            # what we last stored (and we HAD a real prior value, so it's not just
+            # the first capture of a legacy NULL row). Catches narration/party/line
+            # edits the amount/GST reco can't see.
+            _edited_in_tally = bool(incoming_alter and prior_alter and incoming_alter > prior_alter)
 
             if existing_id:
                 cursor.execute("""
@@ -8492,7 +8543,10 @@ def save_tally_vouchers(company_name, vouchers, source=None):
                         taxable_value=%s, cgst_amount=%s, sgst_amount=%s, igst_amount=%s,
                         tally_master_id=COALESCE(%s, tally_master_id),
                         origin=COALESCE(%s, origin), yantrai_uid=COALESCE(%s, yantrai_uid),
-                        raw_xml=%s, updated_at=CURRENT_TIMESTAMP
+                        raw_xml=%s,
+                        alter_id=GREATEST(COALESCE(alter_id, 0), %s),
+                        tally_edited_at=CASE WHEN %s::boolean THEN CURRENT_TIMESTAMP ELSE tally_edited_at END,
+                        updated_at=CURRENT_TIMESTAMP
                     WHERE id=%s
                 """, (
                     v_date, v_num, party, amount, v_type, instrument_number,
@@ -8500,7 +8554,8 @@ def save_tally_vouchers(company_name, vouchers, source=None):
                     place_of_supply, party_gstin, currency,
                     json.dumps(cost_centres), json.dumps(bill_refs),
                     taxable_value, cgst_amount, sgst_amount, igst_amount,
-                    tally_master_id, origin, yantrai_uid, raw_xml, existing_id
+                    tally_master_id, origin, yantrai_uid, raw_xml,
+                    incoming_alter, _edited_in_tally, existing_id
                 ))
             else:
                 cursor.execute("""
@@ -8510,16 +8565,16 @@ def save_tally_vouchers(company_name, vouchers, source=None):
                          narration, ledger_entries, reference_no, place_of_supply,
                          party_gstin, currency, cost_centres, bill_refs,
                          taxable_value, cgst_amount, sgst_amount, igst_amount,
-                         tally_master_id, origin, yantrai_uid, raw_xml, created_by, updated_at)
+                         tally_master_id, origin, yantrai_uid, raw_xml, alter_id, created_by, updated_at)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,FALSE,
-                            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
+                            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
                 """, (
                     str(uuid.uuid4()), v_date, v_num, party, amount, v_type,
                     instrument_number, company_name,
                     narration, json.dumps(ledger_entries), reference_no, place_of_supply,
                     party_gstin, currency, json.dumps(cost_centres), json.dumps(bill_refs),
                     taxable_value, cgst_amount, sgst_amount, igst_amount,
-                    tally_master_id, origin, yantrai_uid, raw_xml, v.get("created_by")
+                    tally_master_id, origin, yantrai_uid, raw_xml, incoming_alter, v.get("created_by")
                 ))
             upserted += 1
             if existing_id:
