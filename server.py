@@ -4377,6 +4377,11 @@ async def resync_voucher_endpoint(voucher_id: str):
             raise HTTPException(status_code=404, detail="Voucher not found")
 
         master_id = v.get("tally_master_id")
+        # Sprint 44.2 — prefer yantrai_uid for the REMOTEID-based Alter target.
+        # tally_vouchers.yantrai_uid carries the original invoice id when the
+        # row was created by us (set during ack/save); falls back to the row's
+        # own id for vouchers we authored directly.
+        yantrai_uid = v.get("yantrai_uid") or voucher_id
         payload = {
             "voucher_type": v.get("voucher_type"),
             "date": v.get("date"),
@@ -4392,8 +4397,9 @@ async def resync_voucher_endpoint(voucher_id: str):
             "igst_amount": v.get("igst_amount"),
             "company_name": v.get("company_name"),
             # Edit-voucher: tell the bridge agent to alter the existing Tally voucher
-            "tally_action": "Alter" if master_id else "Create",
+            "tally_action": "Alter" if (master_id or yantrai_uid) else "Create",
             "tally_master_id": master_id,
+            "yantrai_uid": yantrai_uid,
         }
         q = db.enqueue_tally_push(
             payload=payload, voucher_id=voucher_id,
