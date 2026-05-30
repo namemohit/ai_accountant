@@ -6,6 +6,7 @@ Headless driver — does exactly what the Tally agent GUI does, end-to-end.
 4. Wait for sync + embedding to complete
 5. Verify DB state
 """
+import os
 import asyncio
 import json
 import time
@@ -19,8 +20,11 @@ import db
 SERVER = "http://localhost:8000"
 WS = "ws://localhost:8000/tally/ws"
 TALLY = "http://localhost:9000"
-USERNAME = "rahul"
-PASSWORD = "rahul"
+USERNAME = os.environ.get("YANTRAI_TEST_USERNAME", "rahul")
+# Sprint 40 — no committed password. Set YANTRAI_TEST_PASSWORD in your shell to run this demo.
+PASSWORD = os.environ.get("YANTRAI_TEST_PASSWORD")
+if not PASSWORD:
+    raise RuntimeError("Set YANTRAI_TEST_PASSWORD env var before running drive_sync.py.")
 TARGET_COMPANY = "Jai Mata Kalka Enterprises"
 
 

@@ -7,12 +7,23 @@ from google import generativeai as genai
 
 load_dotenv()
 
+# Sprint 40 — fail-fast on missing env vars; no committed fallbacks.
+def _require_env(name: str) -> str:
+    v = os.getenv(name)
+    if not v:
+        raise RuntimeError(
+            f"Required env var {name!r} is not set. "
+            f"Add it to .env or your shell. See .env.example for the full list."
+        )
+    return v
+
+
 # Configure Gemini API
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyCuVgfmx3oaja0O4Mr3jMb8wP7Ikpe9BXs")
+GEMINI_API_KEY = _require_env("GEMINI_API_KEY")
 genai.configure(api_key=GEMINI_API_KEY)
 
 # Supabase Connection String
-DB_URL = os.getenv("DB_URL", "postgresql://postgres.vxnflumpectzqdamjqsc:yantr_ai_labs@aws-1-ap-south-1.pooler.supabase.com:5432/postgres")
+DB_URL = _require_env("DB_URL")
 
 def get_embedding(text: str):
     try:

@@ -6,8 +6,31 @@ import os
 import json
 import re
 
-# Supabase Connection String (Pooler - IPv4 Compatible)
-DB_URL = os.getenv("DB_URL", "postgresql://postgres.vxnflumpectzqdamjqsc:yantr_ai_labs@aws-1-ap-south-1.pooler.supabase.com:5432/postgres")
+# Sprint 40 — fail-fast on missing env vars instead of falling back to literals in
+# committed source. Pulls .env into the process if it isn't already loaded (so this
+# module works for scripts that don't go through server.py).
+from dotenv import load_dotenv
+load_dotenv()
+
+
+def _require_env(name: str) -> str:
+    """Return the value of env var `name`, or raise a clear error if it's not set.
+    Use this in place of os.getenv(name, '<literal>') — fallbacks bake live
+    credentials into committed code, which means git history leaks them forever
+    even after you delete the line."""
+    v = os.getenv(name)
+    if not v:
+        raise RuntimeError(
+            f"Required env var {name!r} is not set. "
+            f"Add it to .env (local) or the Cloud Run service env (prod). "
+            f"See .env.example at the repo root for the full list."
+        )
+    return v
+
+
+# Supabase Connection String (Pooler — IPv4 compatible). Read from env only; no
+# in-code fallback — the password belongs in .env / Cloud Run env config.
+DB_URL = _require_env("DB_URL")
 
 def get_conn():
     return psycopg2.connect(DB_URL)

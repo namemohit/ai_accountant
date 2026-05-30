@@ -745,7 +745,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "228"
+APP_VERSION = "229"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -809,7 +809,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyCuVgfmx3oaja0O4Mr3jMb8wP7Ikpe9BXs") # Fallback to hardcoded key
+GEMINI_API_KEY = db._require_env("GEMINI_API_KEY")  # Sprint 40 — fail-fast, no committed fallback
 from google import generativeai as genai
 genai.configure(api_key=GEMINI_API_KEY)
 parser = InvoiceParser(api_key=GEMINI_API_KEY)

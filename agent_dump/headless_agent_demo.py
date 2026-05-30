@@ -8,6 +8,7 @@ but without the Tkinter window. Used to verify Sprint 1 end-to-end:
      same fetch_* functions the GUI agent uses
   5. Print sync results
 """
+import os
 import asyncio
 import json
 import sys
@@ -30,8 +31,11 @@ from tally_bridge_agent import (
 SERVER_URL = "http://localhost:8000"
 WS_URL = "ws://localhost:8000/tally/ws"
 TALLY_URL = "http://localhost:9000"
-USERNAME = "rahul"
-PASSWORD = "rahul"
+USERNAME = os.environ.get("YANTRAI_TEST_USERNAME", "rahul")
+# Sprint 40 — no committed password. Set YANTRAI_TEST_PASSWORD in your shell to run this demo.
+PASSWORD = os.environ.get("YANTRAI_TEST_PASSWORD")
+if not PASSWORD:
+    raise RuntimeError("Set YANTRAI_TEST_PASSWORD env var before running headless_agent_demo.py.")
 TARGET_COMPANY = "Jai Mata Kalka Enterprises"
 
 
