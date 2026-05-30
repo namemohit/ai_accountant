@@ -1029,7 +1029,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "247"
+APP_VERSION = "248"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -4930,6 +4930,19 @@ async def unarchive_vouchers_endpoint(payload: dict):
     if not company_name or not ids:
         raise HTTPException(status_code=400, detail="company_name and ids required")
     return db.unarchive_vouchers(company_name, ids)
+
+
+@app.post("/api/vouchers/dup/{dup_ref}/status")
+async def set_voucher_dup_status_endpoint(dup_ref: str, payload: dict):
+    """Sprint 53.2 — user's decision on a potential-duplicate cluster (shared dup_ref).
+    Body: {company_name, status}. status ∈ open | dismissed (not a duplicate) | resolved.
+    The detector only TAGS clusters; this endpoint is the ONLY thing that changes a
+    cluster's status — the system never acts on duplicates on its own."""
+    company_name = (payload or {}).get("company_name")
+    status = (payload or {}).get("status") or "open"
+    if not company_name:
+        raise HTTPException(status_code=400, detail="company_name required")
+    return db.set_dup_group_status(company_name, dup_ref, status)
 
 
 @app.post("/api/vouchers/cleanup/{cleanup_id}/done")

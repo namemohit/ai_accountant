@@ -1968,6 +1968,7 @@
                             <select id="vf-reco" onchange="applyVoucherFilters()" title="Filter by reconciliation flag — Tally → YantrAI direction" style="padding: 6px 10px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
                                 <option value="">⚖️ Reco: any</option>
                                 <option value="needs_attention">📝 Needs attention (any gap)</option>
+                                <option value="duplicates">🔁 Possible duplicates (look-alikes)</option>
                                 <option value="matched">✓ Matched</option>
                                 <option value="not_in_tally">⊘ Not in Tally</option>
                                 <option value="duplicate_in_tally">🔁 Duplicate in Tally</option>
@@ -6287,9 +6288,15 @@
                 // Sprint 45 — Reco badge (Tally → YantrAI direction). null style ⇒
                 // em-dash. The flag itself comes from db._derive_reco_flag.
                 const _rs = _vRecoStyle(_vRecoFlag(v));
-                const recoHtml = _rs
+                let recoHtml = _rs
                     ? `<span style="background: ${_rs.bg}; color: ${_rs.c}; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">${_rs.t}</span>`
                     : `<span style="color:#475569;">—</span>`;
+                // Sprint 53.2 — duplicate-cluster chip. The system only TAGS look-alikes
+                // with a shared ref; the user decides. Chip → mark the cluster "not a
+                // duplicate" (dismiss). To remove a real duplicate, use Archive on its row.
+                if (v.dup_ref && v.dup_status === 'open') {
+                    recoHtml += ` <span onclick="event.stopPropagation(); dismissDupCluster('${v.dup_ref}')" title="Possible duplicate — ${v.dup_count||2} look-alikes share ${v.dup_ref}. Filter: Reco → 'Possible duplicates'. Click to mark this group as NOT a duplicate. (To remove a real duplicate, Archive that row.)" style="background:rgba(168,85,247,0.15); color:#a855f7; border:1px solid rgba(168,85,247,0.35); padding:2px 6px; border-radius:4px; font-size:0.68rem; font-weight:600; cursor:pointer; white-space:nowrap;">🔁 ${v.dup_ref}</span>`;
+                }
 
                 // Phase 4 (Sprint 53) — Edit honesty. A voucher that LIVES in Tally
                 // (pulled from Tally, or a synced YantrAI invoice) can't be edited
@@ -6669,6 +6676,9 @@
                 const flag = v.reco_flag || '';
                 if (f.reco === 'needs_attention') {
                     if (!flag || flag === 'matched' || flag === 'removed_from_tally' || flag === 'edited_in_tally') return false;
+                } else if (f.reco === 'duplicates') {
+                    // Sprint 53.2 — only rows tagged in an OPEN duplicate cluster.
+                    if (!(v.dup_ref && v.dup_status === 'open')) return false;
                 } else if (f.reco !== flag) return false;
             }
             // Sprint 26 — AI Gap filter (joins against client-side suggestions map)
@@ -16005,6 +16015,26 @@
             const short = "✏️ This voucher lives in Tally — edit it in Tally Prime, then Sync. YantrAI catches the change automatically (it can't reliably push edits into Tally).";
             if (typeof showChatToast === 'function') { showChatToast(short); return; }
             alert("✏️ This voucher lives in Tally.\n\nTo change it, edit it in Tally Prime, then run Sync from Tally — YantrAI detects the edit and updates the Reco column.\n\nYantrAI can't reliably push in-place edits into Tally (the API would create a duplicate), so we don't pretend to.");
+        };
+
+        // Sprint 53.2 — duplicate clusters are TAGGED, never auto-actioned. The user
+        // either Archives the duplicate row, or dismisses the whole cluster as "not a
+        // duplicate" here (stops re-flagging; persisted server-side).
+        window.dismissDupCluster = async function(dupRef) {
+            const co = _getActiveCo();
+            if (!co.company_name || !dupRef) return;
+            if (!confirm(`Mark ${dupRef} as NOT a duplicate?\n\nAll look-alikes in this group stop being flagged.\n\n(If it IS a duplicate, instead use the 🗄️ Archive button on the extra row to remove it.)`)) return;
+            try {
+                const res = await fetch(`${API}/api/vouchers/dup/${encodeURIComponent(dupRef)}/status`, {
+                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({ company_name: co.company_name, status: 'dismissed' })
+                });
+                if (!res.ok) throw new Error('failed');
+                if (typeof showChatToast === 'function') showChatToast(`✓ ${dupRef} dismissed — not a duplicate.`);
+                if (typeof loadVouchers === 'function') loadVouchers(true);
+            } catch (e) {
+                alert('Could not dismiss: ' + (e.message || e));
+            }
         };
 
         // ── Edit Voucher ────────────────────────────────────────────────

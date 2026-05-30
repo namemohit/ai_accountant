@@ -3883,6 +3883,64 @@ _RECO_SCRATCH_KEYS = (
 )
 
 
+# ── Sprint 53.2 — Duplicate TAGGER (tag-and-review; never auto-acts) ──────────
+# Potential-duplicate clusters get a stable shared `dup_ref`; the USER filters by
+# it and decides (archive / cleanup-in-Tally / dismiss). The system only TAGS.
+_DUP_GROUPS_READY = False
+
+
+def _ensure_dup_groups_table(cur):
+    """voucher_dup_groups records a cluster's user-set status (open/dismissed/
+    resolved) keyed by (company_name, dup_ref). CREATE IF NOT EXISTS is lock-safe
+    (new table). Cached after first call."""
+    global _DUP_GROUPS_READY
+    if _DUP_GROUPS_READY:
+        return
+    try:
+        cur.execute("""CREATE TABLE IF NOT EXISTS voucher_dup_groups (
+            company_name TEXT NOT NULL,
+            dup_ref      TEXT NOT NULL,
+            status       TEXT NOT NULL DEFAULT 'open',
+            updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (company_name, dup_ref))""")
+        cur.connection.commit()
+    except Exception as e:
+        print(f"[_ensure_dup_groups_table] {e}")
+        try: cur.connection.rollback()
+        except Exception: pass
+    _DUP_GROUPS_READY = True
+
+
+def _dup_ref_for(scope_key):
+    """Deterministic, stable cluster ref from the cluster key (no counter needed)."""
+    import hashlib
+    return 'DUP-' + hashlib.sha1(scope_key.encode('utf-8')).hexdigest()[:6].upper()
+
+
+def set_dup_group_status(company_name, dup_ref, status):
+    """User decision on a duplicate cluster: 'open' | 'dismissed' (not a dup) |
+    'resolved'. Upsert. The detector never changes this — only the user does."""
+    if status not in ('open', 'dismissed', 'resolved'):
+        return {'ok': False, 'error': 'invalid status'}
+    if not company_name or not dup_ref:
+        return {'ok': False, 'error': 'missing company/dup_ref'}
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        _ensure_dup_groups_table(cur)
+        cur.execute("""INSERT INTO voucher_dup_groups (company_name, dup_ref, status, updated_at)
+            VALUES (%s,%s,%s,CURRENT_TIMESTAMP)
+            ON CONFLICT (company_name, dup_ref)
+            DO UPDATE SET status=EXCLUDED.status, updated_at=CURRENT_TIMESTAMP""",
+            (company_name, dup_ref, status))
+        conn.commit()
+        return {'ok': True, 'dup_ref': dup_ref, 'status': status}
+    except Exception as e:
+        conn.rollback(); print(f"[set_dup_group_status] {e}")
+        return {'ok': False, 'error': str(e)}
+    finally:
+        cur.close(); conn.close()
+
+
 def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limit=500, offset=0):
     """Return merged vouchers from tally_vouchers + invoices, sorted by date desc.
 
@@ -4087,26 +4145,20 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
     # Sticky-origin dedup: a voucher that exists in YantrAI (invoices) is YantrAI-origin,
     # period. When its Tally sync-back ALSO appears (tally_vouchers), collapse to ONE row and
     # KEEP the YantrAI invoice row (origin=YantrAI, with file_url). Match a Tally row to its
-    # YantrAI twin in priority order:
+    # YantrAI twin — Sprint 53.2: ONLY on a CONFIDENT same-voucher signal:
     #   (1) round-trip marker  tally.yantrai_uid == invoice.id   (definitive)
     #   (2) shared voucher_number (only against pushed/synced invoices)
-    #   (3) party + abs(amount) + voucher_type signature (only against pushed/synced invoices)
-    # (2)/(3) are restricted to pushed/synced invoices because only those can have a Tally twin
-    # — this avoids hiding a genuinely-distinct Tally voucher that merely looks similar.
-    def _sig(r):
-        party = (r.get('party_name') or '').strip().lower()
-        try: amt = round(abs(float(r.get('amount') or 0)), 2)
-        except Exception: amt = 0
-        vt = (r.get('voucher_type') or '').strip().lower()
-        return (party, amt, vt)
-
+    # The old (3) loose "party + amount + type" signature match was REMOVED: it
+    # silently HID genuinely-distinct Tally vouchers that merely looked like a pushed
+    # invoice (e.g. JMK 047-TEST, a real duplicate, was hidden because it shared 047's
+    # party/amount/type). Look-alikes are no longer hidden here — they survive and are
+    # surfaced (not actioned) by the duplicate TAGGER below (shared dup_ref).
     inv_rows_local = [r for r in results if r.get('source') != 'tally']
     invoice_ids = {str(r.get('id')) for r in inv_rows_local if r.get('id')}
     pushed_inv = [r for r in inv_rows_local
                   if r.get('was_pushed') or r.get('status') == 'synced']
     pushed_nums = {(r.get('voucher_number') or '').strip().lower()
                    for r in pushed_inv if (r.get('voucher_number') or '').strip()}
-    pushed_sigs = {_sig(r) for r in pushed_inv}
 
     deduped = []
     for r in results:
@@ -4115,12 +4167,11 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
             yuid = str(r.get('yantrai_uid')) if r.get('yantrai_uid') else None
             is_yantrai_twin = (
                 (yuid and yuid in invoice_ids)            # (1) definitive marker
-                or (num and num in pushed_nums)           # (2) number match (pushed only)
-                or (_sig(r) in pushed_sigs)               # (3) signature match (pushed only)
+                or (num and num in pushed_nums)           # (2) exact number match (pushed only)
             )
             if is_yantrai_twin:
-                # Tally sync-back of a YantrAI voucher → hide it; the YantrAI invoice row
-                # (origin=YantrAI, with its file_url) is the single canonical row.
+                # Confident same-voucher echo of a YantrAI invoice → collapse to the
+                # single canonical invoice row. (No loose signature drop anymore.)
                 continue
         deduped.append(r)
     results = deduped
@@ -4134,6 +4185,38 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
         r['reco_flag'] = _derive_reco_flag(r)
         for k in _RECO_SCRATCH_KEYS:
             r.pop(k, None)
+
+    # Sprint 53.2 — Duplicate TAGGER. Cluster the SURVIVING rows (confident
+    # same-voucher echoes already collapsed above) by (party, voucher_type,
+    # amount rounded to ₹, date). A cluster of 2+ = potential duplicates; every
+    # member gets the SAME stable dup_ref + the user-set cluster status. Tag only —
+    # we never hide or act. The user filters by dup_ref and decides.
+    try:
+        _cname = company_name or (str(company_id) if company_id else '')
+        _ensure_dup_groups_table(cursor)
+        cursor.execute("SELECT dup_ref, status FROM voucher_dup_groups WHERE company_name=%s", (_cname,))
+        _dup_status = {row['dup_ref']: row['status'] for row in cursor.fetchall()}
+        _clusters = {}
+        for r in results:
+            try: _amt_r = int(round(abs(float(r.get('amount') or 0))))
+            except (TypeError, ValueError): _amt_r = 0
+            _party = (r.get('party_name') or '').strip().lower()
+            _vt = (r.get('voucher_type') or '').strip().lower()
+            _dt = (r.get('date') or '')[:10]
+            if not _party or _amt_r <= 0:
+                continue   # don't cluster blank-party / zero-amount rows
+            _clusters.setdefault(f"{_cname}|{_party}|{_vt}|{_amt_r}|{_dt}", []).append(r)
+        for _key, _members in _clusters.items():
+            if len(_members) < 2:
+                continue
+            _ref = _dup_ref_for(_key)
+            _st = _dup_status.get(_ref, 'open')
+            for r in _members:
+                r['dup_ref'] = _ref
+                r['dup_count'] = len(_members)
+                r['dup_status'] = _st
+    except Exception as _de:
+        print(f"[dup tagger] {_de}")
 
     # Sprint 47 — the two COUNT(*) queries below were doing full-table
     # sequential scans on tally_vouchers because there's no
