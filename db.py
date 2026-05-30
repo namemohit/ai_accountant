@@ -3565,6 +3565,9 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
     """
     conn = pget()   # warm pooled connection (was a fresh get_conn per call — slow)
     cursor = conn.cursor(cursor_factory=RealDictCursor)
+    # Sprint 44 — make sure deleted_from_tally_at exists on both tables before
+    # the SELECTs reference it. Idempotent + flag-cached after the first call.
+    _ensure_tally_delete_column(cursor)
     results = []
 
     # --- Tally vouchers ---
@@ -3590,7 +3593,8 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                COALESCE(needs_resync, FALSE) AS needs_resync, last_edited_at,
                'tally' AS source, updated_at, created_at,
                COALESCE(origin, 'tally') AS origin, yantrai_uid,
-               (archived_at IS NOT NULL) AS archived
+               (archived_at IS NOT NULL) AS archived,
+               deleted_from_tally_at
         FROM tally_vouchers
         WHERE {' AND '.join(tally_where)}
         ORDER BY date DESC
@@ -3615,6 +3619,9 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
         if r.get('date'):
             r['date'] = str(r['date'])
         r['created_at'] = str(r['created_at']) if r.get('created_at') else None
+        # Sprint 44 — stringify the delete-from-tally timestamp for the UI.
+        if r.get('deleted_from_tally_at'):
+            r['deleted_from_tally_at'] = str(r['deleted_from_tally_at'])
         results.append(r)
 
     # --- Invoice-created vouchers (from invoices table) ---
@@ -3650,6 +3657,7 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                'invoice' AS source, i.created_at AS updated_at, i.created_at AS created_at,
                'yantrai' AS origin, NULL AS yantrai_uid,
                (i.archived_at IS NOT NULL) AS archived,
+               i.deleted_from_tally_at,
                i.file_url,
                CASE
                  WHEN ob.pushed_state THEN 'synced'
@@ -3674,6 +3682,9 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
         if r.get('date'):
             r['date'] = str(r['date'])
         r['created_at'] = str(r['created_at']) if r.get('created_at') else None
+        # Sprint 44 — stringify the delete-from-tally timestamp for the UI.
+        if r.get('deleted_from_tally_at'):
+            r['deleted_from_tally_at'] = str(r['deleted_from_tally_at'])
         r['ledger_entries'] = []
         r['cost_centres'] = []
         r['bill_refs'] = []
@@ -6234,6 +6245,143 @@ def unarchive_vouchers(company_name, ids):
     except Exception as e:
         conn.rollback(); print(f"unarchive_vouchers error: {e}")
         return {"restored": n, "error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+
+# Sprint 44 — explicit "deleted from Tally" state. Distinct from archive
+# (user-initiated YantrAI-only soft-delete with a manual-cleanup todo) and
+# from hard-delete (drops the row entirely). When the agent successfully
+# pushes a <VOUCHER ACTION="Delete"> and acks, ack_tally_outbox calls
+# mark_voucher_deleted_in_tally — the YantrAI row becomes:
+#   archived_at            = NOW()  (so it disappears from the active list)
+#   deleted_from_tally_at  = NOW()  (so the UI can render a distinct
+#                                    "Deleted (synced with Tally)" badge)
+#   needs_resync           = FALSE  (defensive: nothing to resync now)
+# The row is kept (no hard delete) so audit trails remain intact.
+_TALLY_DELETE_READY = False
+
+
+def _ensure_tally_delete_column(cur):
+    global _TALLY_DELETE_READY
+    if _TALLY_DELETE_READY:
+        return
+    cur.execute("ALTER TABLE tally_vouchers "
+                "ADD COLUMN IF NOT EXISTS deleted_from_tally_at TIMESTAMP")
+    cur.execute("ALTER TABLE invoices "
+                "ADD COLUMN IF NOT EXISTS deleted_from_tally_at TIMESTAMP")
+    # Persist the ALTERs immediately so a same-cursor SELECT later in this
+    # function sees the column — otherwise it lives in an uncommitted
+    # transaction that gets rolled back when the pooled connection is
+    # returned, leaving the column missing for the very next request.
+    try:
+        cur.connection.commit()
+    except Exception:
+        pass
+    _TALLY_DELETE_READY = True
+
+
+def mark_voucher_deleted_in_tally(voucher_id, company_name=None):
+    """Sprint 44 — flip a voucher to 'deleted in both systems' state. Idempotent;
+    safe to call repeatedly. Operates on both tally_vouchers AND invoices
+    (UI routes deletes through whichever table owns the row).
+
+    Returns {'updated': n} where n is 0 or 1."""
+    if not voucher_id:
+        return {"updated": 0}
+    conn = get_conn(); cur = conn.cursor()
+    n = 0
+    try:
+        _ensure_tally_delete_column(cur)
+        # tally_vouchers
+        if company_name:
+            cur.execute("""UPDATE tally_vouchers
+                SET deleted_from_tally_at = CURRENT_TIMESTAMP,
+                    archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+                    needs_resync = FALSE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND company_name = %s""",
+                (voucher_id, company_name))
+        else:
+            cur.execute("""UPDATE tally_vouchers
+                SET deleted_from_tally_at = CURRENT_TIMESTAMP,
+                    archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+                    needs_resync = FALSE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s""", (voucher_id,))
+        n += cur.rowcount
+        # invoices (yantrai-uid path: chat-confirmed vouchers live here)
+        if company_name:
+            cur.execute("""UPDATE invoices
+                SET deleted_from_tally_at = CURRENT_TIMESTAMP,
+                    archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP)
+                WHERE id = %s AND company_name = %s""",
+                (voucher_id, company_name))
+        else:
+            cur.execute("""UPDATE invoices
+                SET deleted_from_tally_at = CURRENT_TIMESTAMP,
+                    archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP)
+                WHERE id = %s""", (voucher_id,))
+        n += cur.rowcount
+        conn.commit()
+        return {"updated": n}
+    except Exception as e:
+        conn.rollback(); print(f"mark_voucher_deleted_in_tally error: {e}")
+        return {"updated": n, "error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+
+def get_voucher_for_delete(voucher_id, company_name=None):
+    """Sprint 44 — fetch a voucher's minimal delete-relevant fields from EITHER
+    tally_vouchers OR invoices. Returns dict with tally_master_id, voucher_type,
+    voucher_number, party, company_name, source ('tally'|'invoice'), id."""
+    if not voucher_id:
+        return None
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_tally_delete_column(cur)
+        # tally_vouchers first
+        if company_name:
+            cur.execute("""SELECT id, voucher_number, voucher_type, ledger_name AS party,
+                                  company_name, tally_master_id
+                           FROM tally_vouchers WHERE id = %s AND company_name = %s""",
+                        (voucher_id, company_name))
+        else:
+            cur.execute("""SELECT id, voucher_number, voucher_type, ledger_name AS party,
+                                  company_name, tally_master_id
+                           FROM tally_vouchers WHERE id = %s""", (voucher_id,))
+        row = cur.fetchone()
+        if row:
+            d = dict(row); d["source"] = "tally"; d["id"] = str(d["id"])
+            return d
+        # invoices
+        if company_name:
+            cur.execute("""SELECT id, invoice_number AS voucher_number,
+                                  COALESCE(voucher_type, category) AS voucher_type,
+                                  party_name AS party, company_name,
+                                  NULL::text AS tally_master_id
+                           FROM invoices WHERE id = %s AND company_name = %s""",
+                        (voucher_id, company_name))
+        else:
+            cur.execute("""SELECT id, invoice_number AS voucher_number,
+                                  COALESCE(voucher_type, category) AS voucher_type,
+                                  party_name AS party, company_name,
+                                  NULL::text AS tally_master_id
+                           FROM invoices WHERE id = %s""", (voucher_id,))
+        row = cur.fetchone()
+        if row:
+            d = dict(row); d["source"] = "invoice"; d["id"] = str(d["id"])
+            # Look up the tally_master_id from a previously-pushed outbox row.
+            cur.execute("""SELECT tally_voucher_guid FROM tally_outbox
+                           WHERE invoice_id = %s AND state = 'pushed'
+                             AND tally_voucher_guid IS NOT NULL
+                           ORDER BY pushed_at DESC LIMIT 1""", (voucher_id,))
+            r2 = cur.fetchone()
+            if r2 and r2.get("tally_voucher_guid"):
+                d["tally_master_id"] = r2["tally_voucher_guid"]
+            return d
+        return None
     finally:
         cur.close(); conn.close()
 

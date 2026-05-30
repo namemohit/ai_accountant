@@ -6185,6 +6185,26 @@
                 const archiveBtn = v.archived
                     ? `<button onclick="event.stopPropagation(); restoreVouchers(['${v.id}'])" title="Restore from archive" style="margin-left:4px; padding:3px 7px; background:rgba(56,189,248,0.15); color:#38bdf8; border:1px solid rgba(56,189,248,0.3); border-radius:4px; font-size:0.7rem; cursor:pointer;">♻️</button>`
                     : `<button onclick="event.stopPropagation(); archiveVouchers(['${v.id}'])" title="Archive (soft) — hides it from the list but keeps it on file; flags it to be voided/removed in Tally" style="margin-left:4px; padding:3px 7px; background:rgba(148,163,184,0.15); color:#94a3b8; border:1px solid rgba(148,163,184,0.3); border-radius:4px; font-size:0.7rem; cursor:pointer;">🗄️</button>`;
+                // Sprint 44 — Delete from Tally (visible only when we have the
+                // Tally GUID, i.e. the voucher was actually pushed). Deletes from
+                // BOTH systems via /api/vouchers/{id}/delete-from-tally; the
+                // outbox status poller updates the row badge as the agent
+                // processes the delete.
+                const hasTallyGuid = !!(v.tally_master_id || v.tally_voucher_guid);
+                const deleteFromTallyBtn = (hasTallyGuid && !v.deleted_from_tally_at)
+                    ? `<button onclick="event.stopPropagation(); deleteVoucherFromTally('${v.id}', '${(v.invoice_number || v.voucher_number || '').replace(/'/g, '&#39;')}')" title="Delete from BOTH Tally Prime and YantrAI — permanent. Use Archive for a soft delete." style="margin-left:4px; padding:3px 7px; background:rgba(239,68,68,0.12); color:#fca5a5; border:1px solid rgba(239,68,68,0.3); border-radius:4px; font-size:0.7rem; cursor:pointer;"><i class="fas fa-trash-alt"></i></button>`
+                    : '';
+                // Sprint 44 — "Edited locally" amber pill (Resync prompt is the
+                // existing resyncBtn; this is just a visible status indicator
+                // for vouchers waiting on re-sync). Shown only when the
+                // voucher has been edited but not yet re-pushed.
+                const editedPill = needsResync
+                    ? `<span title="You edited this voucher locally. Click Resync to push the change to Tally." style="background: rgba(245,158,11,0.15); color: #fbbf24; padding: 2px 7px; border-radius: 4px; font-size: 0.7rem; font-weight: 600; margin-left: 6px; display: inline-flex; align-items: center; gap: 3px;"><i class="fas fa-pen" style="font-size: 0.6rem;"></i> Edited locally</span>`
+                    : '';
+                // Sprint 44 — "Deleted from Tally" greyed-out indicator.
+                const deletedSyncedPill = v.deleted_from_tally_at
+                    ? `<span title="This voucher was deleted from Tally Prime via YantrAI." style="background: rgba(148,163,184,0.15); color: #94a3b8; padding: 2px 7px; border-radius: 4px; font-size: 0.7rem; font-weight: 600; margin-left: 6px;"><i class="fas fa-ban" style="font-size: 0.6rem;"></i> Deleted (synced)</span>`
+                    : '';
 
                 // Sprint 26 — AI Gap chips (clickable; opens review popover)
                 const aiChips = _buildAiChips(v.id);
@@ -6215,7 +6235,7 @@
                     <td style="padding: 10px; text-align: right; color: ${!isDebit ? '#4ade80' : '#64748b'}; font-family: monospace;">${!isDebit ? '₹' + amount.toLocaleString('en-IN') : ''}</td>
                     <td style="padding: 10px;">${originHtml}</td>
                     <td style="padding: 10px;">${sourceDocHtml}</td>
-                    <td style="padding: 10px; white-space: nowrap;"><span style="background: ${badgeBg}; color: ${badgeColor}; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">${badgeText}</span>${editBtn}${resyncBtn}${archiveBtn}</td>
+                    <td style="padding: 10px; white-space: nowrap;"><span style="background: ${badgeBg}; color: ${badgeColor}; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">${badgeText}</span>${deletedSyncedPill}${editedPill}${editBtn}${resyncBtn}${archiveBtn}${deleteFromTallyBtn}</td>
                     <td id="aiflags-${v.id}" style="padding: 10px; white-space: nowrap;">${aiChips || '<span style="color:#475569;">–</span>'}</td>
                 `;
                 if (hasDetail) {
@@ -15592,6 +15612,44 @@
                 loadVouchers();
             } catch (e) {
                 alert('Error queuing resync: ' + e.message);
+            }
+        };
+
+        // Sprint 44 — Delete a voucher from BOTH Tally Prime and YantrAI.
+        // Routes through tally_outbox so the agent's poll loop handles it the
+        // same way it handles a Create or Alter. On ack the row is soft-
+        // deleted in YantrAI (archived_at + deleted_from_tally_at = NOW) so
+        // the audit trail stays intact.
+        window.deleteVoucherFromTally = async (voucherId, label) => {
+            const labelTxt = (label || 'this voucher').replace(/[<>]/g, '');
+            if (!confirm(
+                `Permanently delete ${labelTxt} from BOTH Tally Prime and YantrAI?\n\n` +
+                `This cannot be undone. Use Archive (🗄️) instead if you only want ` +
+                `to hide it on the YantrAI side.`
+            )) return;
+            const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
+            try {
+                const res = await fetch(`${API}/api/vouchers/${encodeURIComponent(voucherId)}/delete-from-tally`,
+                    { method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ company_name: u.company_name || '', confirm: true }) });
+                const j = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    alert((j.detail || j.message || 'Delete failed') +
+                          '\n\nIf this voucher was never pushed to Tally, use the ' +
+                          'Archive button instead.');
+                    return;
+                }
+                if (typeof showChatToast === 'function') {
+                    showChatToast('Delete queued — Tally update on the next agent poll (~15s).', 'info');
+                } else {
+                    alert('Delete queued. The agent will remove it from Tally on its next poll (~15s).');
+                }
+                // Optimistic refresh; the outbox poller will mark the row deleted
+                // once Tally confirms.
+                setTimeout(() => { if (typeof loadVouchers === 'function') loadVouchers(); }, 1500);
+            } catch (e) {
+                alert('Error queuing delete: ' + (e.message || e));
             }
         };
 

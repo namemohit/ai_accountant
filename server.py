@@ -377,13 +377,56 @@ async def tally_queue_claim(company_name: str, limit: int = 10, session_token: s
 
 @app.post("/api/tally/queue/{outbox_id}/ack")
 async def tally_queue_ack(outbox_id: str, payload: dict):
-    """Bridge agent confirms a successful push. Body: {tally_voucher_guid?, session_token?}."""
+    """Bridge agent confirms a successful push. Body: {tally_voucher_guid?, session_token?}.
+
+    Sprint 44 — when the original outbox payload's tally_action == 'Delete', we
+    also soft-delete the YantrAI row (sets deleted_from_tally_at + archived_at).
+    The voucher then renders as "Deleted (synced with Tally)" in the UI."""
     try:
         st = (payload or {}).get("session_token")
         if st and not validate_agent_session(st):
             raise HTTPException(status_code=401, detail="Session expired.")
         guid = payload.get("tally_voucher_guid") if isinstance(payload, dict) else None
-        return {"status": "success", **db.ack_tally_outbox(outbox_id, tally_voucher_guid=guid)}
+
+        # Inspect the outbox row's stored payload BEFORE we ack it, so we can
+        # detect whether this was a Delete push.
+        try:
+            conn_p = db.get_conn()
+            cur_p = conn_p.cursor()
+            cur_p.execute("SELECT payload, voucher_id, invoice_id, company_name "
+                          "FROM tally_outbox WHERE id = %s", (outbox_id,))
+            _r = cur_p.fetchone()
+            cur_p.close(); conn_p.close()
+            outbox_payload = (_r[0] if _r else None) or {}
+            outbox_voucher_id = _r[1] if _r else None
+            outbox_invoice_id = _r[2] if _r else None
+            outbox_company    = _r[3] if _r else None
+        except Exception as _pe:
+            outbox_payload = {}; outbox_voucher_id = None
+            outbox_invoice_id = None; outbox_company = None
+            print(f"[ack] could not read outbox payload: {_pe}", flush=True)
+
+        is_delete = (str(outbox_payload.get("tally_action") or "")
+                     .strip().capitalize() == "Delete")
+
+        # Ack normally — flips state to 'pushed', stamps tally_master_id on the
+        # YantrAI row (for non-deletes; the COALESCE in ack_tally_outbox handles
+        # the delete case safely too — it just sets master_id to "deleted" which
+        # is harmless because the row is also being marked deleted below).
+        ack_result = db.ack_tally_outbox(outbox_id, tally_voucher_guid=guid)
+
+        if is_delete:
+            # Sprint 44 — mark the YantrAI row as "deleted (synced with Tally)".
+            try:
+                target_id = (outbox_payload.get("yantrai_uid")
+                             or outbox_voucher_id or outbox_invoice_id)
+                if target_id:
+                    db.mark_voucher_deleted_in_tally(
+                        target_id, company_name=outbox_company)
+            except Exception as _de:
+                print(f"[ack] mark_voucher_deleted_in_tally error: {_de}", flush=True)
+
+        return {"status": "success", **ack_result}
     except HTTPException:
         raise
     except Exception as e:
@@ -937,7 +980,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "232"
+APP_VERSION = "233"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -4360,6 +4403,64 @@ async def resync_voucher_endpoint(voucher_id: str):
         # once the bridge agent CONFIRMS the push (a failed push stays flagged).
         return {"status": "success", "outbox": q,
                 "action": payload["tally_action"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Sprint 44 — Delete a voucher in Tally ───────────────────────────────────
+# Routes through the same tally_outbox pipeline as Create / Alter pushes. The
+# row's payload sets tally_action="Delete" + tally_master_id; the agent's
+# push_voucher_to_tally short-circuits to _build_voucher_delete_xml and posts
+# <VOUCHER ACTION="Delete"><MASTERID>...</MASTERID></VOUCHER>. On Tally's
+# <DELETED>1</DELETED> response, the agent acks; the ack handler then
+# soft-deletes the YantrAI row via db.mark_voucher_deleted_in_tally.
+
+@app.post("/api/vouchers/{voucher_id}/delete-from-tally")
+async def delete_voucher_from_tally(voucher_id: str, payload: dict = None):
+    """Delete a voucher from BOTH Tally Prime and YantrAI. Requires the
+    voucher to have a tally_master_id (i.e. it was previously pushed to
+    Tally). For YantrAI-only invoices that were never pushed, use
+    POST /api/vouchers/delete instead.
+
+    Body: {company_name?: str, confirm?: bool}. confirm is informational —
+    the UI already shows a confirm modal."""
+    try:
+        body = payload or {}
+        company_name = body.get("company_name")
+        v = db.get_voucher_for_delete(voucher_id, company_name=company_name)
+        if not v:
+            raise HTTPException(status_code=404, detail="Voucher not found")
+        master_id = v.get("tally_master_id")
+        if not master_id:
+            raise HTTPException(
+                status_code=400,
+                detail=("This voucher was never pushed to Tally (no "
+                        "tally_master_id). Use POST /api/vouchers/delete for "
+                        "YantrAI-side removal."),
+            )
+
+        cn = company_name or v.get("company_name")
+        delete_payload = {
+            "tally_action":     "Delete",
+            "tally_master_id":  str(master_id),
+            "voucher_type":     v.get("voucher_type") or "Sales",
+            "voucher_number":   v.get("voucher_number") or "",
+            "party_name":       v.get("party"),
+            "company_name":     cn,
+            "yantrai_uid":      str(voucher_id),
+        }
+        q = db.enqueue_tally_push(
+            payload=delete_payload,
+            voucher_id=voucher_id if v.get("source") == "tally" else None,
+            invoice_id=voucher_id if v.get("source") == "invoice" else None,
+            company_name=cn,
+            enqueued_by="web-delete",
+        )
+        return {"status": "success", "outbox": q, "action": "Delete",
+                "tally_master_id": str(master_id)}
     except HTTPException:
         raise
     except Exception as e:

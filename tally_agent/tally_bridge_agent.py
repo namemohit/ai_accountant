@@ -872,7 +872,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.18.0"  # + propose-then-create ledger flow (Sprint 43): every Tally master write is now gated on per-voucher user approval. _build_system_ledger_xml() handles GST output/input + Sales/Purchase + Round Off; _classify_missing_ledger() whitelists what we know how to create; _propose_create_bundle() builds the UI-facing approval JSON; outbox_poll_loop forwards NEEDS_APPROVAL bundles to /needs_approval, treats it as a soft ack (NOT a failure), and on the next poll picks the row back up with approved_ledgers populated to actually create + push. Removes the silent Sprint 32 party auto-create — same envelope, but now opt-in.
+AGENT_VERSION = "0.19.0"  # + voucher delete (Sprint 44): <VOUCHER ACTION="Delete"><MASTERID>...</MASTERID></VOUCHER> envelope keyed on the tally_master_id round-tripped from the original push's ack. push_voucher_to_tally short-circuits the whole pre-flight + consent path when payload.tally_action == "Delete" — delete has no LEDGERNAME refs and needs no chart-of-accounts checks. <DELETED>1</DELETED> recognised as success in _parse_tally_push_response. Same proven IMPORTDATA wrapper as Create/Alter.
 
 
 def _post_json(url, body, timeout=15.0):
@@ -1091,15 +1091,58 @@ def _build_voucher_xml(payload, company_name):
     return envelope
 
 
+def _build_voucher_delete_xml(tally_master_id, voucher_type, company_name):
+    """Sprint 44 — Build a Tally Import-Data envelope that DELETES one
+    voucher, identified by its MASTERID. The MASTERID is what Tally returned
+    in <LASTVCHID> on the original push (round-tripped via tally_master_id on
+    tally_vouchers via ack_tally_outbox).
+
+    Tally's delete envelope is intentionally minimal — no LEDGERNAME refs to
+    pre-flight, no GST classification, no party. Just the voucher GUID +
+    ACTION="Delete". Tally responds with <DELETED>1</DELETED> on success."""
+    vt_tally = (voucher_type or "Sales").strip().capitalize()
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<ENVELOPE>'
+          '<HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>'
+          '<BODY>'
+            '<IMPORTDATA>'
+              '<REQUESTDESC>'
+                '<REPORTNAME>Vouchers</REPORTNAME>'
+                '<STATICVARIABLES>'
+                  f'<SVCURRENTCOMPANY>{_xml_escape(company_name)}</SVCURRENTCOMPANY>'
+                '</STATICVARIABLES>'
+              '</REQUESTDESC>'
+              '<REQUESTDATA>'
+                '<TALLYMESSAGE xmlns:UDF="TallyUDF">'
+                  f'<VOUCHER VCHTYPE="{_xml_escape(vt_tally)}" ACTION="Delete">'
+                    f'<MASTERID>{_xml_escape(str(tally_master_id))}</MASTERID>'
+                  '</VOUCHER>'
+                '</TALLYMESSAGE>'
+              '</REQUESTDATA>'
+            '</IMPORTDATA>'
+          '</BODY>'
+        '</ENVELOPE>'
+    )
+
+
 def _parse_tally_push_response(xml_str):
     """Tally returns an envelope with <CREATED>1</CREATED> on success or
-    <LINEERROR>…</LINEERROR> on failure. Returns (ok: bool, info: str)."""
+    <LINEERROR>…</LINEERROR> on failure. Returns (ok: bool, info: str).
+
+    Sprint 32 — <ALTERED> is also a success indicator (re-import of an
+    existing master returns ALTERED).
+    Sprint 44 — <DELETED> is also a success indicator (ACTION="Delete")."""
     if not xml_str:
         return False, "Empty response from Tally (Prime not running on :9000?)"
     txt = xml_str
     # Success indicators
     m_created = re.search(r"<CREATED>(\d+)</CREATED>", txt)
     created = int(m_created.group(1)) if m_created else 0
+    m_altered = re.search(r"<ALTERED>(\d+)</ALTERED>", txt)
+    altered = int(m_altered.group(1)) if m_altered else 0
+    m_deleted = re.search(r"<DELETED>(\d+)</DELETED>", txt)
+    deleted = int(m_deleted.group(1)) if m_deleted else 0
     m_lastvch = re.search(r"<LASTVCHID>([^<]+)</LASTVCHID>", txt)
     guid = m_lastvch.group(1).strip() if m_lastvch else None
     # Error indicators
@@ -1107,11 +1150,9 @@ def _parse_tally_push_response(xml_str):
     m_desc_err = re.search(r"<DESC>([^<]+)</DESC>", txt) if "<DESC>" in txt else None
     err = (m_line_err.group(1) if m_line_err else
            (m_desc_err.group(1) if m_desc_err else None))
-    # Sprint 32 — <ALTERED> is also a success indicator: when we re-import a master
-    # that already exists with the same content, Tally returns ALTERED instead of CREATED.
-    m_altered = re.search(r"<ALTERED>(\d+)</ALTERED>", txt)
-    altered = int(m_altered.group(1)) if m_altered else 0
-    if created > 0 or altered > 0:
+    if created > 0 or altered > 0 or deleted > 0:
+        if deleted > 0 and created == 0:
+            return True, "deleted"
         return True, guid or ("altered" if altered > 0 else "ok")
     return False, (err or txt[:300])
 
@@ -1637,9 +1678,32 @@ def push_voucher_to_tally(payload, tally_url, company_name, server_url=None,
     the outbox-poll caller can POST the new bundle to /needs_approval and the UI
     can ask the user again.
 
+    Sprint 44 — when `payload.tally_action == "Delete"` we run a totally
+    separate, simpler path: no ledger pre-flight, no snapshot rewrite, no
+    consent gate (the UI already showed the user a destructive-action confirm
+    modal). Just build the Delete XML, POST it, parse the response.
+
     Returns (ok, guid_or_error)."""
     if not check_tally_alive(tally_url):
         return False, f"Tally Prime not reachable on {tally_url} (open Tally and try again)"
+
+    # Sprint 44 — Delete branch. Short-circuit everything else.
+    if (payload.get("tally_action") or "").strip().capitalize() == "Delete":
+        master_id = (payload.get("tally_master_id") or "").strip()
+        if not master_id:
+            return False, ("Cannot delete: this voucher has no tally_master_id, "
+                           "so it was never pushed to Tally. Remove it from YantrAI "
+                           "via the YantrAI-side delete path instead.")
+        vt = payload.get("voucher_type") or payload.get("category") or "Sales"
+        xml = _build_voucher_delete_xml(master_id, vt, company_name)
+        resp = query_local_tally(tally_url, xml, timeout=30.0)
+        ok, info = _parse_tally_push_response(resp or "")
+        if ok:
+            # Sprint 44 — agent /ack accepts an opaque info string; we pass
+            # "deleted" so the server's ack-handler can distinguish a delete
+            # from a normal push when picking the soft-delete branch.
+            return True, "deleted"
+        return False, f"Tally rejected delete of voucher {master_id}: {info}"
 
     # Sprint 43 — pre-create user-approved ledgers FIRST. The 2.5 s settle is
     # the same proven cadence Sprint 32's party auto-create has been using since
