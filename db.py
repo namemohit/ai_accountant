@@ -3783,13 +3783,29 @@ _RECO_GST_TOL = 0.50   # ₹0.50 paise tolerance for GST split comparison
 
 def _gst_split_differs(row):
     """True if the Tally twin's GST split disagrees with the YantrAI invoice's
-    split. Compares CGST / SGST / IGST amounts directly (both tables carry the
-    breakdown columns since Sprint 27/35). Tolerance absorbs paise rounding."""
+    split. Compares CGST / SGST / IGST amounts directly. Tolerance absorbs paise
+    rounding.
+
+    Sprint 47 — guard against a false 'GST split mismatch': many Tally-side rows
+    don't carry the GST breakdown in the cgst/sgst/igst COLUMNS (it lives inside
+    the ledger_entries JSON instead), so those columns are all 0. Comparing the
+    invoice's real GST against Tally-zero would flag EVERY matched voucher as a
+    mismatch (which is exactly what happened to JMK). Rule: if the Tally twin has
+    no GST breakdown captured at all (all three columns ~0), we can't compare —
+    so we do NOT flag a mismatch. The total-amount check in _derive_reco_flag has
+    already confirmed the headline amounts agree, so 'matched' is the honest call.
+    A real mismatch only fires when Tally HAS non-zero GST that actually differs."""
+    def _f(v):
+        try: return abs(float(v or 0))
+        except (TypeError, ValueError): return 0.0
+    tv_gst_total = _f(row.get('tv_cgst_amount')) + _f(row.get('tv_sgst_amount')) + _f(row.get('tv_igst_amount'))
+    if tv_gst_total <= _RECO_GST_TOL:
+        return False   # Tally side has no GST breakdown captured → cannot compare → don't false-flag
     def _close(a, b):
         try:
             return abs(float(a or 0) - float(b or 0)) <= _RECO_GST_TOL
         except (TypeError, ValueError):
-            return True   # treat unparseable as no-difference; don't false-flag
+            return True
     if not _close(row.get('cgst_amount'), row.get('tv_cgst_amount')): return True
     if not _close(row.get('sgst_amount'), row.get('tv_sgst_amount')): return True
     if not _close(row.get('igst_amount'), row.get('tv_igst_amount')): return True
@@ -3969,6 +3985,18 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
               AND o.payload->>'invoice_number' = i.invoice_number
         ) ob ON TRUE
         LEFT JOIN LATERAL (
+            -- Sprint 47 — match an invoice to its Tally twin by EITHER the
+            -- round-trip marker (tvi.yantrai_uid = i.id) OR an exact
+            -- voucher_number match. Older pushes (and pre-marker agents) wrote
+            -- a human narration ("Synced from YantrAI on …") instead of the
+            -- [YAI:uid] marker, so yantrai_uid is NULL on the pulled-back row —
+            -- but Tally DID keep our voucher number (e.g. JMK/2026-27/061).
+            -- The dedup logic below already treats a shared number as the same
+            -- voucher; Reco must use the SAME criterion or it contradicts the
+            -- dedup ("Synced" row that dedup hid the twin for, yet Reco said
+            -- "Not in Tally"). Number match is scoped to this company and only
+            -- to invoices that were actually pushed (ob.pushed_state) so a
+            -- coincidental Tally number can't false-match an unpushed draft.
             SELECT COUNT(*) AS tv_count,
                    MAX(amount) AS tv_amount,
                    MAX(discarded_at) AS tv_discarded_at,
@@ -3976,8 +4004,13 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                    MAX(sgst_amount) AS tv_sgst_amount,
                    MAX(igst_amount) AS tv_igst_amount
             FROM tally_vouchers tvi
-            WHERE tvi.yantrai_uid = i.id::text
-              AND tvi.company_name = i.company_name
+            WHERE tvi.company_name = i.company_name
+              AND (
+                    tvi.yantrai_uid = i.id::text
+                 OR (COALESCE(ob.pushed_state, FALSE)
+                     AND tvi.voucher_number IS NOT NULL
+                     AND tvi.voucher_number = i.invoice_number)
+              )
         ) tv ON TRUE
         WHERE {' AND '.join(inv_qualified_where)}
         ORDER BY i.created_at DESC
