@@ -134,8 +134,14 @@ DEFAULT_TALLY = "http://localhost:9000"
 
 # Server preset list — agent UI dropdown.
 # Cloud Run is FIRST so fresh installs default to the cloud, not localhost.
+# v0.19.4 — fixed Cloud Run URL: the project-number host
+# (yantrai-accounting-916641724782.asia-south1.run.app) returns Google's stock
+# 404 because that hostname format wasn't enabled for this service. The
+# canonical service URL from `gcloud run services describe` is the hash-format
+# one below. Symptom: agent showed "Could not reach server: The read operation
+# timed out" because POST to the wrong host hung instead of returning 404.
 SERVER_PRESETS = [
-    {"label": "Cloud Run",  "url": "https://yantrai-accounting-916641724782.asia-south1.run.app"},
+    {"label": "Cloud Run",  "url": "https://yantrai-accounting-xjmqiwvd2a-el.a.run.app"},
     {"label": "Localhost",  "url": "http://localhost:8000"},
 ]
 
@@ -872,7 +878,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.19.3"  # Sprint 44.3 — Alter + Delete now do a query-then-act: before building the envelope, agent fires a TDL collection query with $Narration CONTAINS "[YAI:<uid>]" to locate the real voucher in Tally, retrieves DATE + VOUCHERTYPENAME + VOUCHERNUMBER + MASTERID, and builds the Import envelope keyed on those Tally-native identifiers. Tally honors <MASTERID>N</MASTERID> + matching DATE/VCHTYPE/VCHNUMBER for Alter (silently ignored REMOTEID was the Sprint 44.2 failure mode). Delete uses the same lookup. On lookup miss the voucher is treated as "already gone in Tally" for Delete or falls through to a fresh Create for Alter. Sprint 44.2's REMOTEID-on-Create attribute kept as harmless tagging.
+AGENT_VERSION = "0.19.4"  # v0.19.4 — Cloud Run preset URL fix (project-number host returned Google 404; switched to hash-format canonical host). v0.19.3 — Sprint 44.3 query-then-act Alter/Delete via TDL collection on $Narration CONTAINS "[YAI:<uid>]" → keyed envelope on Tally-native MASTERID + DATE + VCHTYPE + VCHNUMBER; lookup-miss falls through to Create.
 
 
 def _post_json(url, body, timeout=15.0):

@@ -25,12 +25,12 @@ VSVersionInfo(
           [
             StringStruct(u'CompanyName', u'YantrAI Labs'),
             StringStruct(u'FileDescription', u'YantrAI Tally Bridge — Windows Agent'),
-            StringStruct(u'FileVersion', u'0.19.3.0'),
+            StringStruct(u'FileVersion', u'0.19.4.0'),
             StringStruct(u'InternalName', u'tally_bridge_agent'),
             StringStruct(u'LegalCopyright', u'Copyright (c) 2026 YantrAI Labs'),
             StringStruct(u'OriginalFilename', u'tally_bridge_agent.exe'),
             StringStruct(u'ProductName', u'YantrAI Tally Bridge'),
-            StringStruct(u'ProductVersion', u'0.19.3.0'),
+            StringStruct(u'ProductVersion', u'0.19.4.0'),
           ]
         )
       ]
