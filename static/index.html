@@ -1935,6 +1935,8 @@
 
                 <!-- Voucher table — scrolls internally so sticky controls stay pinned -->
                 <div class="card" style="margin-top: 14px; padding-top: 12px;">
+                    <!-- Sprint 39 — pager bar (top). Populated by _renderVoucherPager(). -->
+                    <div id="voucher-pager-top" style="border-bottom: 1px solid var(--border); margin-bottom: 6px;"></div>
                     <div style="overflow: auto; max-height: calc(100vh - 180px); border: 1px solid var(--border); border-radius: 8px;">
                         <table style="width: 100%; border-collapse: collapse; font-size: 0.82rem; text-align: left;">
                             <thead style="position: sticky; top: 0; background: #1e293b; z-index: 1;">
@@ -1956,6 +1958,8 @@
                             <tbody id="vouchers-tbody"></tbody>
                         </table>
                     </div>
+                    <!-- Sprint 39 — pager bar (bottom). Populated by _renderVoucherPager(). -->
+                    <div id="voucher-pager-bottom" style="border-top: 1px solid var(--border); margin-top: 6px;"></div>
                     <div id="vouchers-empty" style="display:none; text-align: center; padding: 60px 20px; color: #64748b;">
                         <div style="font-size: 3rem; margin-bottom: 16px;">📑</div>
                         <p style="font-size: 1rem; margin-bottom: 8px;">No vouchers yet</p>
@@ -5908,6 +5912,11 @@
         let allVouchers = [];
         let activeVoucherFilter = 'all';
         let _vouchersLoadedFor = null;   // company whose vouchers are loaded — skip redundant refetch on tab re-entry
+        // Sprint 39 — client-side pagination. Renders only the current page out of the
+        // already-loaded array, so 2 800 rows don't all hit the DOM. Page size persists
+        // per user; defaults to 100. Reset _voucherPage to 1 on any filter/sort change.
+        let _voucherPage = 1;
+        let _voucherPageSize = parseInt(localStorage.getItem('voucherPageSize')) || 100;
 
         async function loadVouchers(force = true) {
             const user = JSON.parse(localStorage.getItem('currentUser') || '{}');
@@ -5940,6 +5949,7 @@
                 if (typeof _refreshVoucherTypeButton === 'function') _refreshVoucherTypeButton();
                 if (typeof _populateVoucherPartyDatalist === 'function') _populateVoucherPartyDatalist();
                 if (typeof _updateColChevronIndicators === 'function') _updateColChevronIndicators();
+                _voucherPage = 1;   // Sprint 39 — fresh load (company switch / forced refresh) starts at page 1
                 renderVouchers();
             } catch(e) {
                 console.error('Failed to load vouchers:', e);
@@ -5966,11 +5976,64 @@
         }
         // Patch ONLY the AI-Flags column cells after suggestions load — avoids re-rendering
         // the whole (large) table just to add chips (removes the post-load flicker).
+        // Sprint 39 — scoped to currently-rendered page rows (skip rows not in the DOM)
+        // so the patch is cheap even when allVouchers is large.
         function _applyAiFlagsToRows() {
             (allVouchers || []).forEach(v => {
                 const cell = document.getElementById('aiflags-' + v.id);
                 if (cell) cell.innerHTML = _buildAiChips(v.id) || '<span style="color:#475569;">–</span>';
             });
+        }
+
+        // Sprint 39 — pagination helpers.
+        function _renderVoucherPager(total, page, totalPages) {
+            const size = _voucherPageSize;
+            const start = total === 0 ? 0 : (page - 1) * size + 1;
+            const end = Math.min(page * size, total);
+            const btn = (label, target, disabled) => {
+                const d = disabled ? 'disabled' : '';
+                const cur = disabled ? 'not-allowed' : 'pointer';
+                const op  = disabled ? 0.35 : 1;
+                return `<button onclick="_voucherGoToPage(${target})" ${d} style="padding:4px 9px; background:var(--bg-light); color:#cbd5e1; border:1px solid var(--border); border-radius:5px; font-size:0.75rem; cursor:${cur}; opacity:${op};">${label}</button>`;
+            };
+            const sizeOpts = [50, 100, 200].map(n =>
+                `<option value="${n}" ${size === n ? 'selected' : ''}>${n}</option>`).join('');
+            const html = `
+              <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 12px; font-size:0.78rem; color:#94a3b8; flex-wrap:wrap;">
+                <div style="white-space:nowrap;">Showing <strong style="color:#e2e8f0;">${start}-${end}</strong> of <strong style="color:#e2e8f0;">${total}</strong></div>
+                <div style="display:flex; align-items:center; gap:5px; flex-wrap:wrap;">
+                  ${btn('«', 1, page<=1)}
+                  ${btn('Prev', page-1, page<=1)}
+                  <span style="padding:0 8px; color:#cbd5e1; white-space:nowrap;">Page <input type="number" value="${page}" min="1" max="${totalPages}" onchange="_voucherGoToPage(parseInt(this.value)||1)" onkeydown="if(event.key==='Enter'){_voucherGoToPage(parseInt(this.value)||1)}" style="width:52px; padding:3px 5px; background:var(--bg-light); color:#fff; border:1px solid var(--border); border-radius:4px; font-size:0.78rem; text-align:center;" /> of <strong style="color:#e2e8f0;">${totalPages}</strong></span>
+                  ${btn('Next', page+1, page>=totalPages)}
+                  ${btn('»', totalPages, page>=totalPages)}
+                </div>
+                <div style="display:flex; align-items:center; gap:6px; white-space:nowrap;">
+                  <span>Rows per page:</span>
+                  <select onchange="_voucherSetPageSize(parseInt(this.value))" style="padding:3px 7px; background:var(--bg-light); color:#fff; border:1px solid var(--border); border-radius:4px; font-size:0.78rem;">${sizeOpts}</select>
+                </div>
+              </div>`;
+            ['voucher-pager-top', 'voucher-pager-bottom'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.innerHTML = html;
+            });
+        }
+
+        function _voucherGoToPage(n) {
+            if (!n || isNaN(n)) return;
+            _voucherPage = Math.max(1, parseInt(n));
+            renderVouchers();   // renderVouchers clamps to totalPages
+            const scrollEl = document.querySelector('#vouchers-tbody')?.closest('div[style*="overflow"]');
+            if (scrollEl) scrollEl.scrollTop = 0;
+        }
+
+        function _voucherSetPageSize(s) {
+            const v = parseInt(s);
+            if (!v || v < 1) return;
+            _voucherPageSize = v;
+            try { localStorage.setItem('voucherPageSize', String(v)); } catch (_) {}
+            _voucherPage = 1;
+            renderVouchers();
         }
 
         function renderVouchers() {
@@ -5985,15 +6048,28 @@
             if (!filtered.length) {
                 if (tbody) tbody.innerHTML = '';
                 if (emptyEl) emptyEl.style.display = 'block';
+                // Sprint 39 — reflect empty state in the pager too
+                _voucherPage = 1;
+                _renderVoucherPager(0, 1, 1);
                 return;
             }
             if (emptyEl) emptyEl.style.display = 'none';
 
             // Group duplicates
             const grouped = groupDuplicateInvoices(filtered);
+
+            // Sprint 39 — page-slice the grouped (visible-row) array. Stats strip still
+            // computes over the full allVouchers so totals reflect every voucher.
+            const _vTotalRows  = grouped.length;
+            const _vTotalPages = Math.max(1, Math.ceil(_vTotalRows / _voucherPageSize));
+            if (_voucherPage > _vTotalPages) _voucherPage = _vTotalPages;
+            if (_voucherPage < 1) _voucherPage = 1;
+            const _vStart = (_voucherPage - 1) * _voucherPageSize;
+            const pageRows = grouped.slice(_vStart, _vStart + _voucherPageSize);
+
             tbody.innerHTML = '';
 
-            grouped.forEach(group => {
+            pageRows.forEach(group => {
                 const v = group.primary;
                 const vType = v.voucher_type || v.category || v.type || 'Sales';
                 const amount = parseFloat(v.total_amount || v.amount || 0);
@@ -6176,6 +6252,9 @@
                     tbody.appendChild(subTr);
                 }
             });
+
+            // Sprint 39 — paint the pager bars with current page state.
+            _renderVoucherPager(_vTotalRows, _voucherPage, _vTotalPages);
         }
 
         // Legacy callers (deep links) — fold into new applyVoucherFilters() pipeline.
@@ -6235,6 +6314,7 @@
         // Sprint 21 — `_voucherFilters.types` is set directly by the type-popover handlers;
         // here we just read the other fields. (Native <select multiple> was unreadable in dark mode.)
         function applyVoucherFilters() {
+            _voucherPage = 1;   // Sprint 39 — any filter change jumps to page 1
             _voucherFilters.from_date   = document.getElementById('vf-from')?.value || '';
             _voucherFilters.to_date     = document.getElementById('vf-to')?.value || '';
             _voucherFilters.party       = document.getElementById('vf-party')?.value || '';
@@ -6544,6 +6624,7 @@
             });
         }
         function _setColSort(colKey, dir) {
+            _voucherPage = 1;   // Sprint 39 — re-sort → back to first page
             // Clear sort on other columns (single sort dimension)
             for (const k in _voucherFilters.columnFilters) {
                 if (k !== colKey && _voucherFilters.columnFilters[k]) _voucherFilters.columnFilters[k].sort = null;
@@ -6557,6 +6638,7 @@
             renderVouchers();
         }
         function _applyColFilter(colKey) {
+            _voucherPage = 1;   // Sprint 39 — column filter changed → first page
             const isNumeric = (colKey === 'debit' || colKey === 'credit');
             const cf = _voucherFilters.columnFilters[colKey] = _voucherFilters.columnFilters[colKey] || { values: [], sort: null };
             if (isNumeric) {
@@ -6581,6 +6663,7 @@
             closeVoucherColFilter();
         }
         function _clearColFilter(colKey) {
+            _voucherPage = 1;   // Sprint 39 — column filter cleared → first page
             delete _voucherFilters.columnFilters[colKey];
             _saveVoucherFilters();
             _updateColChevronIndicators();
@@ -6657,14 +6740,13 @@
                     window._aiSuggestionCounts = k.counts || {};
                     _refreshAiGapDropdown();
                 }
-                // Show the chips. If an AI-gap filter is active the visible row SET depends
-                // on the suggestions, so do a full re-render; otherwise just patch the
-                // AI-Flags cells (no whole-table re-render → no flicker).
-                if (_voucherFilters && _voucherFilters.ai_gap) {
-                    if (typeof renderVouchers === 'function') renderVouchers();
-                } else {
-                    _applyAiFlagsToRows();
-                }
+                // Sprint 39 — always patch the AI-Flags cells in place. The old code did a
+                // full renderVouchers() when an AI-gap filter was active (to recompute which
+                // rows pass the filter) but that caused the visible "table portion redraws on
+                // its own" flicker every time you entered the page. Suggestions are additive
+                // metadata; if the user has the AI-gap filter set they can re-press it to
+                // re-evaluate. Worth the trade-off to keep entry into Vouchers smooth.
+                _applyAiFlagsToRows();
             } catch (e) { console.warn('load AI suggestions failed', e); }
         }
 
