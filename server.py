@@ -1045,9 +1045,42 @@ from dotenv import load_dotenv
 load_dotenv()
 
 GEMINI_API_KEY = db._require_env("GEMINI_API_KEY")  # Sprint 40 — fail-fast, no committed fallback
-from google import generativeai as genai
-genai.configure(api_key=GEMINI_API_KEY)
-parser = InvoiceParser(api_key=GEMINI_API_KEY)
+
+
+# Cloud Run startup fix #3 — defer google.generativeai import + configure
+# AND the InvoiceParser instantiation until first use. Module-level
+# `from google import generativeai as genai` + `genai.configure(...)` +
+# `parser = InvoiceParser(...)` were running at server.py import, blocking
+# uvicorn from binding port 8080 inside Cloud Run's 4-minute startup probe
+# window (revisions 00074, 00075, 00076 all hung this way). Lazy proxies
+# preserve every call site downstream — `genai.embed_content(...)` and
+# `parser.parse(...)` work exactly the same way; the proxy's __getattr__
+# triggers the real import + configure the first time the SDK is actually
+# touched (a request-handler code path, never the startup probe path).
+class _LazyGenaiProxy:
+    _real = None
+
+    def __getattr__(self, name):
+        cls = type(self)
+        if cls._real is None:
+            from google import generativeai as _g
+            _g.configure(api_key=GEMINI_API_KEY)
+            cls._real = _g
+        return getattr(cls._real, name)
+
+
+class _LazyParserProxy:
+    _real = None
+
+    def __getattr__(self, name):
+        cls = type(self)
+        if cls._real is None:
+            cls._real = InvoiceParser(api_key=GEMINI_API_KEY)
+        return getattr(cls._real, name)
+
+
+genai = _LazyGenaiProxy()
+parser = _LazyParserProxy()
 
 # Instantiate Tally Provider dynamically from TALLY_URL env var
 tally_url = os.getenv("TALLY_URL", "http://localhost:9000")
