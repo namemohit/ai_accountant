@@ -8370,9 +8370,10 @@ def save_tally_vouchers(company_name, vouchers, source=None):
     Critical fix: previously did DELETE-then-INSERT which wiped all history every sync.
     Now incremental-safe — existing vouchers are updated, new ones appended.
 
-    `source` (e.g. 'tally_pull'): when set, log a per-voucher DOWNLOAD event into
-    voucher_sync_events (created/updated) so the Vouchers Event Log shows what came
-    in from Tally. Local create paths leave source=None (they have their own logging).
+    `source` (e.g. 'tally_pull') is retained for back-compat but no longer drives
+    per-voucher event logging — Phase 2 (Sprint 51) replaced that flood with ONE
+    'sync_batch' summary row written by the caller via log_tally_sync_batch, using
+    the {created, updated} counts returned here. Local create paths leave source=None.
     """
     if not vouchers:
         return {"upserted": 0, "skipped": 0, "created": 0, "updated": 0}
@@ -8382,7 +8383,6 @@ def save_tally_vouchers(company_name, vouchers, source=None):
     skipped = 0
     created = 0
     updated = 0
-    sync_events = []   # (voucher_number, tally_master_id, action, party, amount)
     try:
         for v in vouchers:
             date_raw = str(v.get("date", ""))
@@ -8494,23 +8494,14 @@ def save_tally_vouchers(company_name, vouchers, source=None):
                 updated += 1
             else:
                 created += 1
-            if source:
-                sync_events.append((v_num, tally_master_id,
-                                    "updated" if existing_id else "created", party, amount))
         conn.commit()
-        # Per-voucher DOWNLOAD events (only on a real Tally pull). Best-effort.
-        if source and sync_events:
-            try:
-                for vn, mid, act, pty, amt in sync_events:
-                    cursor.execute("""
-                        INSERT INTO voucher_sync_events
-                            (company_name, voucher_number, tally_master_id, direction,
-                             action, party, amount, detail)
-                        VALUES (%s,%s,%s,'download',%s,%s,%s,%s)
-                    """, (company_name, vn, mid, act, pty, amt, source))
-                conn.commit()
-            except Exception as _ee:
-                print(f"[voucher_sync_events] {_ee}"); conn.rollback()
+        # Phase 2 (Sprint 51) — per-voucher DOWNLOAD events REMOVED. A full sync
+        # of N vouchers used to write N voucher_sync_events rows, flooding the
+        # Event Log (2,849 "tally_updated" lines for JMK). The caller (ingest
+        # handler) now writes ONE 'sync_batch' summary row via log_tally_sync_batch
+        # using the created/updated counts returned below. Per-voucher state is
+        # already visible in the Vouchers list (Status + Reco), so the Event Log
+        # only needs the bulk-action summary.
     except Exception as e:
         print(f"Error saving tally vouchers: {e}")
         conn.rollback()
@@ -8648,17 +8639,51 @@ def reconcile_tally_deletions(company_name, entity, live_guids):
         cur.close(); conn.close()
 
 
-def list_voucher_sync_events(company_name, limit=50):
-    """Recent per-voucher sync events (the download side of the Event Log)."""
+def log_tally_sync_batch(company_name, detail):
+    """Phase 2 (Sprint 51) — write ONE summary row per Sync-from-Tally, instead of
+    one row per voucher. `detail` is the human summary, e.g.
+    "Full import — 149 new, 2,700 updated vouchers; 136 ledgers". Reuses the
+    voucher_sync_events table (action='sync_batch', no per-voucher fields)."""
+    if not company_name:
+        return
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""INSERT INTO voucher_sync_events
+            (company_name, voucher_number, tally_master_id, direction, action,
+             party, amount, detail)
+            VALUES (%s, NULL, NULL, 'download', 'sync_batch', NULL, NULL, %s)""",
+            (company_name, detail))
+        conn.commit()
+    except Exception as e:
+        print(f"[log_tally_sync_batch] {e}")
+        try: conn.rollback()
+        except Exception: pass
+    finally:
+        cur.close(); conn.close()
+
+
+def list_voucher_sync_events(company_name, limit=50, from_date=None, to_date=None):
+    """Sync-from-Tally summary events for the Event Log. Phase 2 (Sprint 51):
+    returns ONLY the new 'sync_batch' summary rows — the legacy per-voucher
+    download rows ('created'/'updated') are left in the table for audit but no
+    longer shown, so a 2,849-voucher pull is ONE line, not 2,849. Optional
+    from_date/to_date (inclusive, 'YYYY-MM-DD') bound the window."""
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        cur.execute("""
+        where = ["company_name = %s", "action = 'sync_batch'"]
+        params = [company_name]
+        if from_date:
+            where.append("created_at >= %s"); params.append(from_date)
+        if to_date:
+            where.append("created_at < (%s::date + INTERVAL '1 day')"); params.append(to_date)
+        params.append(limit)
+        cur.execute(f"""
             SELECT voucher_number, tally_master_id, direction, action, party,
                    amount, detail, created_at
             FROM voucher_sync_events
-            WHERE company_name = %s
+            WHERE {' AND '.join(where)}
             ORDER BY created_at DESC LIMIT %s
-        """, (company_name, limit))
+        """, params)
         rows = cur.fetchall()
         for r in rows:
             if r.get("amount") is not None: r["amount"] = float(r["amount"])

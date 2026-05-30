@@ -7479,29 +7479,40 @@
             document.getElementById('voucher-health-body').innerHTML = indicators.join('') + byTypeHtml + dupHtml;
         }
 
+        // Phase 2 (Sprint 51) — Event Log now fetches a date-bounded window from the
+        // server (default: most-recent, all dates) and paginates CLIENT-SIDE so
+        // switching pages / status filter never re-hits the network. Date pickers
+        // drive a re-fetch (server-side window). Tally pulls are ONE summary line.
+        window._voucherEventsAll = window._voucherEventsAll || [];
+        window._voucherEventPage = window._voucherEventPage || 1;
+        window._voucherEventPageSize = window._voucherEventPageSize || 50;
         async function loadVoucherEvents() {
             const co = _getActiveCo();
             if (!co.company_name) {
                 document.getElementById('voucher-events-body').innerHTML = '<span style="color:#94a3b8;">Select a company first.</span>';
                 return;
             }
+            const body = document.getElementById('voucher-events-body');
+            body.innerHTML = '<span style="color:#94a3b8;">⏳ Loading events…</span>';
             try {
-                const res = await fetch(`${API}/api/vouchers/events?company_name=${encodeURIComponent(co.company_name)}&limit=50`);
+                let url = `${API}/api/vouchers/events?company_name=${encodeURIComponent(co.company_name)}&limit=200`;
+                if (window._voucherEventFrom) url += `&from_date=${window._voucherEventFrom}`;
+                if (window._voucherEventTo)   url += `&to_date=${window._voucherEventTo}`;
+                const res = await fetch(url);
                 if (!res.ok) throw new Error('events load failed');
                 const j = await res.json();
-                renderVoucherEvents(j.data || []);
+                window._voucherEventsAll = j.data || [];
+                window._voucherEventPage = 1;
+                renderVoucherEvents();
             } catch (e) {
-                document.getElementById('voucher-events-body').innerHTML = `<span style="color:#ef4444;">Could not load: ${e.message}</span>`;
+                body.innerHTML = `<span style="color:#ef4444;">Could not load: ${e.message}</span>`;
             }
         }
         function renderVoucherEvents(rows) {
-            const countEl = document.getElementById('vtab-events-count');
-            if (countEl) countEl.innerText = rows.length > 0 ? `(${rows.length})` : '';
+            // Back-compat: if called with rows, adopt them as the working set.
+            if (rows !== undefined) { window._voucherEventsAll = rows; window._voucherEventPage = 1; }
+            const allRows = window._voucherEventsAll || [];
             const body = document.getElementById('voucher-events-body');
-            if (!rows.length) {
-                body.innerHTML = '<span style="color:#64748b;">No events recorded yet. Upload an invoice file or create a voucher to see history.</span>';
-                return;
-            }
             const statusMap = {
                 // voucher_drafts
                 'ready_for_review': { icon: '🧠', label: 'AI parsed', color: '#38bdf8' },
@@ -7520,24 +7531,58 @@
                 // Missing GST/system ledger the user must create in Tally Prime
                 'needs_ledger_create': { icon: '🏷️', label: 'Create ledger in Tally', color: '#f59e0b' },
                 'ledger_created':      { icon: '✅', label: 'Ledger created',           color: '#64748b' },
+                // Phase 2 — one summary line per Sync-from-Tally
+                'tally_sync_batch':  { icon: '🔄', label: 'Synced from Tally',  color: '#22d3ee' },
             };
+            const from = window._voucherEventFrom || '';
+            const to   = window._voucherEventTo || '';
+            // Date selector + status filter bar.
+            const dateBar = `<div style="display:flex; align-items:center; gap:8px; margin-bottom:10px; flex-wrap:wrap;">
+                <span style="color:#94a3b8; font-size:0.78rem;">🗓 From</span>
+                <input type="date" value="${from}" onchange="window._voucherEventFrom=this.value; loadVoucherEvents();"
+                       style="padding:4px 8px; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:6px; font-size:0.78rem;">
+                <span style="color:#94a3b8; font-size:0.78rem;">to</span>
+                <input type="date" value="${to}" onchange="window._voucherEventTo=this.value; loadVoucherEvents();"
+                       style="padding:4px 8px; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:6px; font-size:0.78rem;">
+                ${(from||to) ? `<a href="#" onclick="window._voucherEventFrom='';window._voucherEventTo='';loadVoucherEvents();return false;" style="color:#38bdf8; font-size:0.75rem;">✕ clear dates</a>` : ''}
+            </div>`;
+            if (!allRows.length) {
+                body.innerHTML = dateBar + '<span style="color:#64748b;">No events in this range. Clear the dates, or upload an invoice / sync from Tally to see history.</span>';
+                const ce = document.getElementById('vtab-events-count'); if (ce) ce.innerText = '';
+                return;
+            }
             // Sprint 33 — Filter dropdown ("folder") at the top of Event Logs.
             const filter = window._voucherEventFilter || '';
-            // Build available filter options from what's present in the stream
             const present = {};
-            rows.forEach(r => { present[r.status] = (present[r.status]||0)+1; });
-            const filterOptions = [['', `All events (${rows.length})`]]
+            allRows.forEach(r => { present[r.status] = (present[r.status]||0)+1; });
+            const filterOptions = [['', `All events (${allRows.length})`]]
                 .concat(Object.keys(present).sort().map(s => [s, `${statusMap[s]?.label || s} (${present[s]})`]));
             const filterBar = `<div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
                 <span style="color:#94a3b8; font-size:0.78rem;">📂 Filter:</span>
-                <select onchange="window._voucherEventFilter=this.value; loadVoucherEvents();"
+                <select onchange="window._voucherEventFilter=this.value; window._voucherEventPage=1; renderVoucherEvents();"
                         style="padding:5px 10px; background:var(--bg-light); color:white; border:1px solid var(--border); border-radius:6px; font-size:0.8rem;">
                     ${filterOptions.map(([v,l]) => `<option value="${v}" ${v===filter?'selected':''}>${l}</option>`).join('')}
                 </select>
-                ${filter ? `<a href="#" onclick="window._voucherEventFilter=''; loadVoucherEvents(); return false;" style="color:#38bdf8; font-size:0.75rem;">✕ clear</a>` : ''}
+                ${filter ? `<a href="#" onclick="window._voucherEventFilter=''; window._voucherEventPage=1; renderVoucherEvents(); return false;" style="color:#38bdf8; font-size:0.75rem;">✕ clear</a>` : ''}
             </div>`;
-            const visible = filter ? rows.filter(r => r.status === filter) : rows;
-            const filterChip = filterBar;
+            const visible = filter ? allRows.filter(r => r.status === filter) : allRows;
+            // Client-side pagination.
+            const pageSize = window._voucherEventPageSize || 50;
+            const totalPages = Math.max(1, Math.ceil(visible.length / pageSize));
+            let page = Math.min(Math.max(1, window._voucherEventPage || 1), totalPages);
+            window._voucherEventPage = page;
+            const start = (page - 1) * pageSize;
+            const pageRows = visible.slice(start, start + pageSize);
+            const countEl = document.getElementById('vtab-events-count');
+            if (countEl) countEl.innerText = visible.length > 0 ? `(${visible.length})` : '';
+            const pager = totalPages > 1 ? `<div style="display:flex; align-items:center; justify-content:flex-end; gap:10px; margin-top:10px; font-size:0.78rem; color:#94a3b8;">
+                <button onclick="window._voucherEventPage=${page-1}; renderVoucherEvents();" ${page<=1?'disabled':''}
+                        style="padding:4px 10px; background:var(--bg-light); color:${page<=1?'#475569':'#cbd5e1'}; border:1px solid var(--border); border-radius:6px; cursor:${page<=1?'default':'pointer'};">‹ Prev</button>
+                <span>Page ${page} of ${totalPages} · showing ${start+1}–${start+pageRows.length} of ${visible.length}</span>
+                <button onclick="window._voucherEventPage=${page+1}; renderVoucherEvents();" ${page>=totalPages?'disabled':''}
+                        style="padding:4px 10px; background:var(--bg-light); color:${page>=totalPages?'#475569':'#cbd5e1'}; border:1px solid var(--border); border-radius:6px; cursor:${page>=totalPages?'default':'pointer'};">Next ›</button>
+            </div>` : '';
+            const filterChip = dateBar + filterBar;
             const html = filterChip + `<table style="width:100%; font-size:0.78rem; border-collapse:collapse;">
                 <thead><tr style="color:#64748b;">
                     <th style="text-align:left; padding:4px 8px;">When</th>
@@ -7548,13 +7593,17 @@
                     <th style="text-align:right; padding:4px 8px;">Amount</th>
                     <th style="text-align:left; padding:4px 8px;">Detail</th>
                 </tr></thead>
-                <tbody>${visible.map(r => {
+                <tbody>${pageRows.map(r => {
                     const dt = new Date(r.updated_at || r.created_at);
                     const when = dt.toLocaleString('en-IN', {dateStyle: 'short', timeStyle: 'short'});
                     const s = statusMap[r.status] || { icon: '·', label: r.status, color: '#94a3b8' };
                     const payload = r.reviewed_payload || r.parsed_payload || {};
+                    const isBatch = (r.status === 'tally_sync_batch');
                     let detail = '';
-                    if (r.event_source === 'tally_cleanup') {
+                    if (isBatch) {
+                        detail = `<span style="color:#22d3ee;">${escapeHtml(payload.detail || r.source_file_name || 'Synced from Tally')}</span>`;
+                    }
+                    else if (r.event_source === 'tally_cleanup') {
                         if (r.status === 'needs_ledger_create') {
                             const msg = r.last_error || (`Create ledger '${r.ledger_name || ''}' in Tally Prime (Duties & Taxes), then it syncs on the next retry`);
                             detail = `<span style="color:#f59e0b;" title="${escapeHtml(r.last_error || '')}">${escapeHtml(msg)}</span>
@@ -7572,16 +7621,19 @@
                     else if (r.tally_voucher_guid) detail = `GUID ${escapeHtml(String(r.tally_voucher_guid))}`;
                     else if (r.last_error) detail = `<span style="color:#ef4444;" title="${escapeHtml(r.last_error)}">${escapeHtml(r.last_error.slice(0,80))}${r.last_error.length>80?'…':''}</span>`;
                     else if (r.attempts) detail = `attempt ${r.attempts}`;
+                    const fileCol = isBatch ? '🔄 Sync from Tally' : (r.source_file_name || '—');
+                    const amtCol = isBatch ? '—'
+                        : `₹${(payload.total_amount || payload.amount || 0).toLocaleString('en-IN')}`;
                     return `<tr style="color:#cbd5e1; border-top:1px solid rgba(255,255,255,0.04);">
-                        <td style="padding:4px 8px;">${when}</td>
+                        <td style="padding:4px 8px; white-space:nowrap;">${when}</td>
                         <td style="padding:4px 8px;"><span style="color:${s.color};">${s.icon} ${s.label}</span></td>
-                        <td style="padding:4px 8px;">${escapeHtml(r.source_file_name || '—')}</td>
-                        <td style="padding:4px 8px;">${escapeHtml(r.voucher_type || payload.voucher_type || '—')}</td>
-                        <td style="padding:4px 8px;">${escapeHtml(payload.billing_party_name || payload.party_name || payload.party || '—')}</td>
-                        <td style="padding:4px 8px; text-align:right;">₹${(payload.total_amount || payload.amount || 0).toLocaleString('en-IN')}</td>
+                        <td style="padding:4px 8px;">${escapeHtml(fileCol)}</td>
+                        <td style="padding:4px 8px;">${isBatch ? '—' : escapeHtml(r.voucher_type || payload.voucher_type || '—')}</td>
+                        <td style="padding:4px 8px;">${isBatch ? '—' : escapeHtml(payload.billing_party_name || payload.party_name || payload.party || '—')}</td>
+                        <td style="padding:4px 8px; text-align:right; white-space:nowrap;">${amtCol}</td>
                         <td style="padding:4px 8px;">${detail}</td>
                     </tr>`;
-                }).join('')}</tbody></table>`;
+                }).join('')}</tbody></table>` + pager;
             body.innerHTML = html;
         }
 

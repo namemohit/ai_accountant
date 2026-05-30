@@ -1029,7 +1029,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "244"
+APP_VERSION = "245"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -5459,10 +5459,17 @@ async def voucher_health_endpoint(company_name: str, company_id: str = None):
 
 
 @app.get("/api/vouchers/events")
-async def voucher_events_endpoint(company_name: str, company_id: str = None, limit: int = 50):
+async def voucher_events_endpoint(company_name: str, company_id: str = None,
+                                  limit: int = 100, from_date: str = None,
+                                  to_date: str = None):
     """Return recent voucher events — unified stream from voucher_drafts
     (parsed/edited/posted/discarded) AND tally_outbox (queued/pushing/pushed/
-    error). Sprint 33: outbox events make the end-to-end Tally sync visible."""
+    error). Sprint 33: outbox events make the end-to-end Tally sync visible.
+    Phase 2 (Sprint 51): optional from_date/to_date ('YYYY-MM-DD', inclusive)
+    bound the window in SQL so the per-source limit applies WITHIN the chosen
+    range (older in-range events stay reachable); Tally pulls now show ONE
+    'sync_batch' summary line, not one row per voucher. The client paginates
+    the returned window."""
     try:
         if not company_id and company_name:
             company_id = _resolve_company_id_by_name(company_name)
@@ -5471,15 +5478,25 @@ async def voucher_events_endpoint(company_name: str, company_id: str = None, lim
         conn = db.get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
+        # Build a reusable inclusive date clause for timestamp column `col`.
+        def _date_clause(col):
+            c, p = "", []
+            if from_date:
+                c += f" AND {col} >= %s::date"; p.append(from_date)
+            if to_date:
+                c += f" AND {col} < (%s::date + INTERVAL '1 day')"; p.append(to_date)
+            return c, p
+
         # Voucher drafts (file uploads + manual edits)
-        cur.execute("""
+        _dc, _dp = _date_clause("COALESCE(updated_at, created_at)")
+        cur.execute(f"""
             SELECT id, source_file_name, source_file_type, voucher_type, status,
                    ai_confidence, parsed_payload, reviewed_payload,
                    created_at, updated_at, created_by
             FROM voucher_drafts
-            WHERE company_id = %s
+            WHERE company_id = %s{_dc}
             ORDER BY updated_at DESC NULLS LAST, created_at DESC LIMIT %s
-        """, (company_id, limit))
+        """, (company_id, *_dp, limit))
         rows = []
         for r in cur.fetchall():
             for k in ("id",): r[k] = str(r[k]) if r.get(k) else None
@@ -5492,14 +5509,15 @@ async def voucher_events_endpoint(company_name: str, company_id: str = None, lim
 
         # Sprint 33 — Also surface the Tally outbox stream
         try:
-            cur.execute("""
+            _oc, _op = _date_clause("COALESCE(updated_at, enqueued_at)")
+            cur.execute(f"""
                 SELECT id, payload, state, attempts, last_error,
                        tally_voucher_guid, enqueued_at, pushed_at, updated_at, enqueued_by
                 FROM tally_outbox
-                WHERE company_name = %s
+                WHERE company_name = %s{_oc}
                 ORDER BY updated_at DESC NULLS LAST, enqueued_at DESC
                 LIMIT %s
-            """, (company_name, limit))
+            """, (company_name, *_op, limit))
             STATE_MAP = {
                 'pending': 'queued_for_tally',
                 'pushing': 'pushing_to_tally',
@@ -5559,26 +5577,44 @@ async def voucher_events_endpoint(company_name: str, company_id: str = None, lim
         except Exception as ce:
             print(f"[voucher_events] cleanup fetch failed: {ce}", flush=True)
 
-        # DOWNLOAD side — per-voucher events from Tally pulls (created/updated).
+        # DOWNLOAD side — Phase 2 (Sprint 51): ONE summary line per Sync-from-Tally
+        # ('sync_batch'), not one row per voucher. Detail carries the counts, e.g.
+        # "Full import — 149 new, 2,700 updated vouchers · 136 ledgers".
         try:
-            for ev in db.list_voucher_sync_events(company_name, limit=limit):
-                act = ev.get("action")
+            for ev in db.list_voucher_sync_events(company_name, limit=limit,
+                                                  from_date=from_date, to_date=to_date):
+                _detail = ev.get("detail") or "Synced from Tally"
                 rows.append({
                     "id": None,
                     "event_source": "tally_download",
-                    "status": f"tally_{act}",          # tally_created | tally_updated
+                    "status": "tally_sync_batch",
                     "direction": ev.get("direction"),
                     "voucher_type": None,
-                    "source_file_name": ev.get("voucher_number") or "(tally voucher)",
+                    "source_file_name": _detail,
                     "source_file_type": "tally_pull",
-                    "tally_voucher_guid": ev.get("tally_master_id"),
-                    "parsed_payload": {"party": ev.get("party"), "total_amount": ev.get("amount")},
-                    "reviewed_payload": {"party": ev.get("party"), "total_amount": ev.get("amount")},
+                    "last_error": None,
+                    "tally_voucher_guid": None,
+                    "parsed_payload": {"detail": _detail},
+                    "reviewed_payload": {"detail": _detail},
                     "created_at": ev.get("created_at"),
                     "updated_at": ev.get("created_at"),
                 })
         except Exception as de:
             print(f"[voucher_events] download fetch failed: {de}", flush=True)
+
+        # Phase 2 — apply the same date window to the Python-merged sources
+        # (tally_cleanup has no SQL date param) so the filter is consistent.
+        if from_date or to_date:
+            def _in_window(r):
+                d = (r.get("updated_at") or r.get("created_at") or "")[:10]
+                if not d:
+                    return False
+                if from_date and d < from_date:
+                    return False
+                if to_date and d > to_date:
+                    return False
+                return True
+            rows = [r for r in rows if _in_window(r)]
 
         # Sort merged stream by updated_at desc, cap at limit
         rows.sort(key=lambda x: (x.get("updated_at") or x.get("created_at") or ""), reverse=True)
@@ -6869,6 +6905,28 @@ async def ingest_tally_data(payload: dict):
                               len(vouchers)+len(rich_ledgers)+len(groups)+len(stock_items),
                               v_result.get('upserted',0)+ledger_count+group_count+stock_count,
                               'success')
+
+            # Phase 2 (Sprint 51) — ONE Event-Log summary line per sync (replaces
+            # the per-voucher flood that save_tally_vouchers used to write). Counts
+            # come straight from the upsert result + master counts. Mode-aware label.
+            try:
+                _created = int(v_result.get('created', 0))
+                _updated = int(v_result.get('updated', 0))
+                _parts = []
+                if _created or _updated or vouchers:
+                    _vparts = []
+                    if _created: _vparts.append(f"{_created:,} new")
+                    if _updated: _vparts.append(f"{_updated:,} updated")
+                    if not _vparts: _vparts.append("no changes")
+                    _parts.append(f"{', '.join(_vparts)} vouchers")
+                if ledger_count: _parts.append(f"{ledger_count:,} ledgers")
+                if group_count:  _parts.append(f"{group_count:,} groups")
+                if stock_count:  _parts.append(f"{stock_count:,} stock items")
+                _summary = ("Full import" if _do_full else "Incremental sync") + \
+                           (" — " + " · ".join(_parts) if _parts else " — no changes")
+                await _loop.run_in_executor(None, db.log_tally_sync_batch, tally_company, _summary)
+            except Exception as _sb_err:
+                print(f"[SEED BASELINE] sync-batch summary warning: {_sb_err}")
 
             # Sprint 40 — advance per-entity watermarks. Falls back to the legacy
             # single `max_alter_id` field (vouchers only) for old agents.
