@@ -3,10 +3,19 @@ from dotenv import load_dotenv
 load_dotenv()
 from typing import Dict, Any
 import base64
-from google import generativeai as genai
+
+# NOTE: google.generativeai is imported lazily inside the methods that use it,
+# NOT at module load. On Cloud Run's python:3.9-slim container the
+# module-level `from google import generativeai as genai` was the last log
+# line before a 4-minute startup-probe timeout (revisions 00074 + 00075,
+# 30-May-2026). The deprecated SDK's post-import init appears to do
+# something blocking under Cloud Run's restricted-network startup window.
+# Deferring the import means uvicorn can open port 8080 immediately; the
+# genai dependency only loads the first time someone actually parses a file.
 
 class InvoiceParser:
     def __init__(self, api_key: str):
+        from google import generativeai as genai  # lazy
         genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel('gemini-flash-latest')
 
