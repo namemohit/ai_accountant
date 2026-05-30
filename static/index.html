@@ -618,6 +618,7 @@
             <div class="nav-item" data-view="training" data-platform="1" onclick="showView('training')"><span>🔌</span> Connectors</div>
             <div class="nav-item" data-view="training-progress" data-platform="1" onclick="showView('training-progress')"><span>📚</span> Training</div>
             <div class="nav-item" data-view="leadgen" onclick="showView('leadgen')"><span>🎯</span> Lead Gen</div>
+            <div class="nav-item" data-view="voicecaller" onclick="showView('voicecaller')"><span>📞</span> Voice Caller</div>
             <!-- Network agent views (agent-scoped; shown only inside the Network app) -->
             <div class="nav-item" data-view="network-home" onclick="showView('network-home')"><span>🔗</span> Connect</div>
             <div class="nav-item" data-view="network-list" onclick="showView('network-list')"><span>👥</span> My Network</div>
@@ -1665,6 +1666,89 @@
                 <div id="leadgen-msg" style="font-size:0.82rem; margin-top:10px; color:#94a3b8;"></div>
             </div>
             <div id="leadgen-results" style="margin-top:18px; overflow-x:auto;"></div>
+        </div>
+
+        <!-- Voice Caller — outbound AI voice agent on the leads above. -->
+        <div id="voicecaller-view" class="dashboard-view" style="display: none;">
+            <header>
+                <h1>📞 Voice Caller</h1>
+                <p style="color:#94a3b8;">AI voice agent calls your leads — qualifies, books a follow-up, and syncs the outcome to each lead's CRM status.</p>
+            </header>
+
+            <!-- Step 1 — create campaign -->
+            <div id="vc-step1" style="margin-top:18px; border:1px solid var(--border); border-radius:14px; padding:18px; background:var(--card-bg);">
+                <div style="font-weight:700; color:#e2e8f0; margin-bottom:10px;">1 · New campaign</div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                    <div><label style="display:block; font-size:0.78rem; color:#94a3b8; margin-bottom:4px;">Name</label>
+                        <input id="vc-name" placeholder="May outreach" style="width:100%; box-sizing:border-box; padding:9px 11px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; font-size:0.88rem;"></div>
+                    <div><label style="display:block; font-size:0.78rem; color:#94a3b8; margin-bottom:4px;">Language</label>
+                        <select id="vc-lang" style="width:100%; padding:9px 11px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; font-size:0.88rem;">
+                            <option value="en-IN">English (India)</option><option value="hi-IN">Hindi</option>
+                            <option value="ta-IN">Tamil</option><option value="te-IN">Telugu</option>
+                            <option value="kn-IN">Kannada</option><option value="mr-IN">Marathi</option>
+                            <option value="bn-IN">Bengali</option>
+                        </select></div>
+                </div>
+                <label style="display:block; font-size:0.78rem; color:#94a3b8; margin-top:10px; margin-bottom:4px;">Call goal</label>
+                <input id="vc-goal" value="Qualify the lead and book a follow-up call." style="width:100%; box-sizing:border-box; padding:9px 11px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; font-size:0.88rem;">
+                <label style="display:block; font-size:0.78rem; color:#94a3b8; margin-top:10px; margin-bottom:4px;">Pitch / script guidance</label>
+                <textarea id="vc-script" rows="2" placeholder="e.g. We help SMBs automate Tally accounting…" style="width:100%; box-sizing:border-box; padding:9px 11px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; font-size:0.88rem; resize:vertical;"></textarea>
+                <div style="display:flex; gap:10px; align-items:center; margin-top:12px;">
+                    <button id="vc-create" onclick="createVoiceCampaign()" style="padding:10px 18px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:9px; font-weight:600; font-size:0.88rem; cursor:pointer;">Create campaign</button>
+                    <span id="vc-mode-badge" style="font-size:0.72rem; color:#64748b;"></span>
+                </div>
+            </div>
+
+            <!-- Step 2 — add leads -->
+            <div id="vc-step2" style="margin-top:14px; border:1px solid var(--border); border-radius:14px; padding:18px; background:var(--card-bg); opacity:0.5; pointer-events:none;">
+                <div style="font-weight:700; color:#e2e8f0; margin-bottom:10px;">2 · Add leads</div>
+                <div style="display:flex; gap:6px; margin-bottom:10px;">
+                    <button class="vc-tab vc-tab-active" data-t="platform" onclick="vcTab('platform')" style="padding:6px 12px; border-radius:8px; border:1px solid var(--border); background:var(--primary); color:#fff; font-size:0.8rem; font-weight:600; cursor:pointer;">From Lead Gen</button>
+                    <button class="vc-tab" data-t="csv" onclick="vcTab('csv')" style="padding:6px 12px; border-radius:8px; border:1px solid var(--border); background:var(--bg-light); color:#cbd5e1; font-size:0.8rem; font-weight:600; cursor:pointer;">CSV</button>
+                    <button class="vc-tab" data-t="manual" onclick="vcTab('manual')" style="padding:6px 12px; border-radius:8px; border:1px solid var(--border); background:var(--bg-light); color:#cbd5e1; font-size:0.8rem; font-weight:600; cursor:pointer;">Manual</button>
+                </div>
+                <div id="vc-t-platform">
+                    <label style="display:block; font-size:0.78rem; color:#94a3b8; margin-bottom:4px;">Lead batch</label>
+                    <select id="vc-batch" style="width:100%; padding:9px 11px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; font-size:0.88rem;"><option value="">All my leads</option></select>
+                    <button onclick="pullLeadsForVoice()" style="margin-top:10px; padding:9px 16px; background:var(--bg-light); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; font-weight:600; font-size:0.85rem; cursor:pointer;">Pull leads</button>
+                </div>
+                <div id="vc-t-csv" style="display:none;">
+                    <label style="display:block; font-size:0.78rem; color:#94a3b8; margin-bottom:4px;">CSV (columns: phone, name, business, why_fit)</label>
+                    <input type="file" id="vc-csv" accept=".csv" style="color:#cbd5e1;">
+                    <button onclick="uploadVoiceCsv()" style="margin-top:10px; padding:9px 16px; background:var(--bg-light); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; font-weight:600; font-size:0.85rem; cursor:pointer;">Upload</button>
+                </div>
+                <div id="vc-t-manual" style="display:none;">
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                        <div><label style="display:block; font-size:0.78rem; color:#94a3b8; margin-bottom:4px;">Name</label>
+                            <input id="vc-m-name" style="width:100%; box-sizing:border-box; padding:9px 11px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; font-size:0.88rem;"></div>
+                        <div><label style="display:block; font-size:0.78rem; color:#94a3b8; margin-bottom:4px;">Phone</label>
+                            <input id="vc-m-phone" placeholder="+91…" style="width:100%; box-sizing:border-box; padding:9px 11px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; font-size:0.88rem;"></div>
+                    </div>
+                    <label style="display:block; font-size:0.78rem; color:#94a3b8; margin-top:10px; margin-bottom:4px;">Business</label>
+                    <input id="vc-m-biz" style="width:100%; box-sizing:border-box; padding:9px 11px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; font-size:0.88rem;">
+                    <label style="display:block; font-size:0.78rem; color:#94a3b8; margin-top:10px; margin-bottom:4px;">Why a good fit</label>
+                    <input id="vc-m-why" style="width:100%; box-sizing:border-box; padding:9px 11px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; font-size:0.88rem;">
+                    <button onclick="addVoiceManual()" style="margin-top:10px; padding:9px 16px; background:var(--bg-light); color:#cbd5e1; border:1px solid var(--border); border-radius:8px; font-weight:600; font-size:0.85rem; cursor:pointer;">Add lead</button>
+                </div>
+                <div id="vc-add-msg" style="font-size:0.82rem; margin-top:10px; color:#94a3b8;"></div>
+            </div>
+
+            <!-- Step 3 — calls table + conversation panel -->
+            <div id="vc-calls-wrap" style="margin-top:14px; display:none;">
+                <div style="font-weight:700; color:#e2e8f0; margin:0 0 10px 4px;">3 · Calls</div>
+                <div id="vc-calls" style="overflow-x:auto; border:1px solid var(--border); border-radius:14px; background:var(--card-bg);"></div>
+            </div>
+
+            <div id="vc-conv" style="margin-top:14px; display:none; border:1px solid var(--border); border-radius:14px; padding:18px; background:var(--card-bg);">
+                <div style="font-weight:700; color:#e2e8f0; margin-bottom:8px;">Call · <span id="vc-conv-name"></span></div>
+                <div id="vc-conv-hint" style="font-size:0.78rem; color:#64748b; margin-bottom:8px;"></div>
+                <div id="vc-chat" style="background:var(--bg-light); border-radius:10px; padding:12px; max-height:300px; overflow:auto; display:flex; flex-direction:column; gap:6px;"></div>
+                <div id="vc-conv-input" style="margin-top:10px; display:flex; gap:8px;">
+                    <input id="vc-say" placeholder="Type the caller's reply…" onkeydown="if(event.key==='Enter')sendVoiceSay()" style="flex:1; padding:9px 11px; background:var(--bg-light); color:#e2e8f0; border:1px solid var(--border); border-radius:8px; font-size:0.88rem;">
+                    <button onclick="sendVoiceSay()" style="padding:9px 16px; background:linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%); color:#fff; border:none; border-radius:8px; font-weight:600; font-size:0.85rem; cursor:pointer;">Send</button>
+                </div>
+                <div id="vc-outcome" style="margin-top:10px; display:none;"></div>
+            </div>
         </div>
 
         <!-- Sprint 57 — Chat with YantrAI: task intake that builds a Problem Document -->
@@ -5669,6 +5753,11 @@
                 setTimeout(() => { if (typeof loadLeadGen === 'function') loadLeadGen(); }, 50);
             }
 
+            // Voice Caller
+            if (view === 'voicecaller') {
+                setTimeout(() => { if (typeof loadVoiceCaller === 'function') loadVoiceCaller(); }, 50);
+            }
+
             // Sprint 48 — Store view
             if (view === 'store') {
                 setTimeout(() => { if (typeof loadStore === 'function') loadStore(); }, 50);
@@ -7865,6 +7954,241 @@
             const params = new URLSearchParams({ username: window.__currentUsername || '' });
             if (_leadgenBatchId) params.append('batch_id', _leadgenBatchId);
             window.open(`${API}/api/leads/export?${params}`, '_blank');
+        }
+
+        // ── Voice Caller ────────────────────────────────────────────────
+        let _vcCampaignId = null, _vcActiveCallId = null, _vcInfoLoaded = false;
+
+        async function loadVoiceCaller() {
+            if (!_vcInfoLoaded) {
+                try {
+                    const j = await (await fetch(`${API}/api/voice/info`)).json();
+                    const badge = document.getElementById('vc-mode-badge');
+                    if (badge) badge.textContent = j.sarvam_configured
+                        ? 'Sarvam voice configured · simulation telephony'
+                        : 'Mock voice (no SARVAM_API_KEY) · simulation telephony';
+                    _vcInfoLoaded = true;
+                } catch (e) { /* badge stays empty */ }
+            }
+        }
+
+        function vcTab(t) {
+            ['platform', 'csv', 'manual'].forEach(x => {
+                const el = document.getElementById('vc-t-' + x);
+                if (el) el.style.display = x === t ? '' : 'none';
+            });
+            document.querySelectorAll('.vc-tab').forEach(b => {
+                const active = b.dataset.t === t;
+                b.style.background = active ? 'var(--primary)' : 'var(--bg-light)';
+                b.style.color = active ? '#fff' : '#cbd5e1';
+            });
+        }
+
+        async function createVoiceCampaign() {
+            const co = _getActiveCo();
+            const body = {
+                username: window.__currentUsername || '',
+                company_name: co.company_name || '',
+                name: document.getElementById('vc-name').value || 'Untitled campaign',
+                goal: document.getElementById('vc-goal').value,
+                script: document.getElementById('vc-script').value,
+                language: document.getElementById('vc-lang').value,
+            };
+            try {
+                const r = await fetch(`${API}/api/voice/campaigns`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const j = await r.json();
+                if (!r.ok) throw new Error(j.detail || 'create failed');
+                _vcCampaignId = j.campaign.id;
+                document.getElementById('vc-step2').style.opacity = '1';
+                document.getElementById('vc-step2').style.pointerEvents = 'auto';
+                document.getElementById('vc-calls-wrap').style.display = '';
+                loadVoiceBatches(); refreshVoiceCalls();
+            } catch (e) { alert('Create failed: ' + e.message); }
+        }
+
+        async function loadVoiceBatches() {
+            try {
+                const r = await fetch(`${API}/api/leads?username=${encodeURIComponent(window.__currentUsername || '')}`);
+                const j = await r.json();
+                const sel = document.getElementById('vc-batch');
+                sel.innerHTML = '<option value="">All my leads</option>'
+                    + (j.batches || []).map(b =>
+                        `<option value="${b.id}">${_leEsc((b.context_text || 'batch').slice(0, 40))} (${b.lead_count})</option>`
+                    ).join('');
+            } catch (e) { /* keep default */ }
+        }
+
+        async function pullLeadsForVoice() {
+            if (!_vcCampaignId) return;
+            const co = _getActiveCo();
+            const body = {
+                username: window.__currentUsername || '',
+                company_name: co.company_name || '',
+                batch_id: document.getElementById('vc-batch').value || null
+            };
+            const msg = document.getElementById('vc-add-msg');
+            try {
+                const r = await fetch(`${API}/api/voice/campaigns/${_vcCampaignId}/leads/pull`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const j = await r.json();
+                if (!r.ok) throw new Error(j.detail || 'pull failed');
+                msg.style.color = '#4ade80'; msg.textContent = `✅ Added ${j.added} lead(s).`;
+                refreshVoiceCalls();
+            } catch (e) {
+                msg.style.color = '#f87171'; msg.textContent = '⚠ ' + e.message;
+            }
+        }
+
+        async function uploadVoiceCsv() {
+            if (!_vcCampaignId) return;
+            const f = document.getElementById('vc-csv').files[0];
+            if (!f) return alert('Pick a CSV first');
+            const co = _getActiveCo();
+            const fd = new FormData();
+            fd.append('file', f);
+            fd.append('username', window.__currentUsername || '');
+            fd.append('company_name', co.company_name || '');
+            const msg = document.getElementById('vc-add-msg');
+            try {
+                const r = await fetch(`${API}/api/voice/campaigns/${_vcCampaignId}/leads/csv`, { method: 'POST', body: fd });
+                const j = await r.json();
+                if (!r.ok) throw new Error(j.detail || 'upload failed');
+                msg.style.color = '#4ade80'; msg.textContent = `✅ Added ${j.added} lead(s).`;
+                refreshVoiceCalls();
+            } catch (e) {
+                msg.style.color = '#f87171'; msg.textContent = '⚠ ' + e.message;
+            }
+        }
+
+        async function addVoiceManual() {
+            if (!_vcCampaignId) return;
+            const co = _getActiveCo();
+            const body = {
+                username: window.__currentUsername || '',
+                company_name: co.company_name || '',
+                name: document.getElementById('vc-m-name').value,
+                business_name: document.getElementById('vc-m-biz').value,
+                phone: document.getElementById('vc-m-phone').value,
+                why_fit: document.getElementById('vc-m-why').value,
+            };
+            const msg = document.getElementById('vc-add-msg');
+            try {
+                const r = await fetch(`${API}/api/voice/campaigns/${_vcCampaignId}/leads/manual`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const j = await r.json();
+                if (!r.ok) throw new Error(j.detail || 'add failed');
+                msg.style.color = '#4ade80'; msg.textContent = `✅ Added.`;
+                ['vc-m-name', 'vc-m-biz', 'vc-m-phone', 'vc-m-why'].forEach(id => document.getElementById(id).value = '');
+                refreshVoiceCalls();
+            } catch (e) {
+                msg.style.color = '#f87171'; msg.textContent = '⚠ ' + e.message;
+            }
+        }
+
+        async function refreshVoiceCalls() {
+            if (!_vcCampaignId) return;
+            const r = await fetch(`${API}/api/voice/calls?username=${encodeURIComponent(window.__currentUsername || '')}&campaign_id=${_vcCampaignId}`);
+            const j = await r.json();
+            const rows = (j.calls || []);
+            const wrap = document.getElementById('vc-calls');
+            if (!rows.length) {
+                wrap.innerHTML = '<div style="color:#64748b; font-size:0.85rem; padding:14px;">No leads added yet.</div>';
+                return;
+            }
+            const sBg = { queued: '#475569', in_progress: '#b45309', completed: '#15803d', failed: '#991b1b' };
+            const oBg = { booked: '#15803d', interested: '#1d4ed8', callback: '#92400e', not_interested: '#991b1b' };
+            wrap.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:0.85rem;">
+                <thead><tr style="text-align:left; color:#64748b; font-size:0.72rem; text-transform:uppercase; border-bottom:1px solid var(--border);">
+                    <th style="padding:8px 10px;">Lead</th><th style="padding:8px 10px;">Phone</th>
+                    <th style="padding:8px 10px;">Status</th><th style="padding:8px 10px;">Outcome</th><th></th>
+                </tr></thead><tbody>
+                ${rows.map(c => `<tr style="border-bottom:1px solid var(--border);">
+                    <td style="padding:8px 10px; color:#e2e8f0;">${_leEsc(c.business_name || c.name || '—')}</td>
+                    <td style="padding:8px 10px; color:#cbd5e1;">${_leEsc(c.phone || '')}</td>
+                    <td style="padding:8px 10px;"><span style="background:${sBg[c.status] || '#475569'}; color:#fff; font-size:0.7rem; padding:2px 8px; border-radius:999px; font-weight:600;">${c.status}</span></td>
+                    <td style="padding:8px 10px;">${c.outcome ? `<span style="background:${oBg[c.outcome] || '#475569'}; color:#fff; font-size:0.7rem; padding:2px 8px; border-radius:999px; font-weight:600;">${c.outcome}</span>` : '—'}</td>
+                    <td style="padding:8px 10px; text-align:right;">${c.status === 'queued' ? `<button onclick="startVoiceCall('${c.id}', ${JSON.stringify((c.business_name || c.name || '') + '').replace(/"/g, '&quot;')})" style="padding:5px 11px; background:var(--primary); color:#fff; border:none; border-radius:6px; font-size:0.78rem; font-weight:600; cursor:pointer;">▶ Call</button>` : ''}</td>
+                </tr>`).join('')}
+                </tbody></table>`;
+        }
+
+        async function startVoiceCall(callId, nameJson) {
+            _vcActiveCallId = callId;
+            const co = _getActiveCo();
+            document.getElementById('vc-conv').style.display = '';
+            document.getElementById('vc-chat').innerHTML = '';
+            document.getElementById('vc-outcome').style.display = 'none';
+            document.getElementById('vc-conv-input').style.display = '';
+            let displayName;
+            try { displayName = (typeof nameJson === 'string') ? nameJson : JSON.parse(nameJson); }
+            catch (e) { displayName = nameJson || 'Lead'; }
+            document.getElementById('vc-conv-name').textContent = displayName || 'Lead';
+            try {
+                const r = await fetch(`${API}/api/voice/calls/${callId}/start`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: window.__currentUsername || '', company_name: co.company_name || '' })
+                });
+                const j = await r.json();
+                if (!r.ok) throw new Error(j.detail || 'start failed');
+                document.getElementById('vc-conv-hint').textContent = j.live ? 'Live call placed.' : 'Simulation — type the caller’s replies below.';
+                _vcAddBubble('agent', j.reply); _vcPlayAudio(j.audio_b64);
+                if (j.ended) _vcEndConv(j.outcome);
+            } catch (e) { alert('Start failed: ' + e.message); }
+            refreshVoiceCalls();
+        }
+
+        async function sendVoiceSay() {
+            if (!_vcActiveCallId) return;
+            const t = (document.getElementById('vc-say').value || '').trim();
+            if (!t) return;
+            document.getElementById('vc-say').value = '';
+            _vcAddBubble('caller', t);
+            const co = _getActiveCo();
+            try {
+                const r = await fetch(`${API}/api/voice/calls/${_vcActiveCallId}/say`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: t, username: window.__currentUsername || '', company_name: co.company_name || '' })
+                });
+                const j = await r.json();
+                if (!r.ok) throw new Error(j.detail || 'say failed');
+                _vcAddBubble('agent', j.reply); _vcPlayAudio(j.audio_b64);
+                if (j.ended) _vcEndConv(j.outcome);
+            } catch (e) { alert(e.message); }
+            refreshVoiceCalls();
+        }
+
+        function _vcAddBubble(who, text) {
+            const chat = document.getElementById('vc-chat');
+            const d = document.createElement('div');
+            const me = who === 'agent';
+            d.style.cssText = `align-self:${me ? 'flex-start' : 'flex-end'}; max-width:85%; padding:8px 12px; border-radius:12px; font-size:0.86rem; background:${me ? 'var(--primary)' : 'var(--bg-light)'}; color:${me ? '#fff' : '#e2e8f0'};`;
+            d.textContent = text;
+            chat.appendChild(d);
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        function _vcPlayAudio(b64) {
+            if (!b64) return;
+            try { new Audio('data:audio/wav;base64,' + b64).play(); } catch (e) { /* non-blocking */ }
+        }
+
+        function _vcEndConv(o) {
+            document.getElementById('vc-conv-input').style.display = 'none';
+            const el = document.getElementById('vc-outcome');
+            const oBg = { booked: '#15803d', interested: '#1d4ed8', callback: '#92400e', not_interested: '#991b1b' };
+            el.style.display = '';
+            el.innerHTML = `<div style="font-size:0.78rem; color:#64748b; margin-bottom:6px;">Call ended</div>
+                <span style="background:${oBg[o.status] || '#475569'}; color:#fff; font-size:0.78rem; padding:3px 10px; border-radius:999px; font-weight:700;">${o.status}</span>
+                ${o.interest ? ` <span style="font-size:0.78rem; color:#cbd5e1;">interest: <strong>${_leEsc(o.interest)}</strong></span>` : ''}
+                ${o.callback ? ` <span style="font-size:0.78rem; color:#cbd5e1;">· callback: <strong>${_leEsc(o.callback)}</strong></span>` : ''}
+                <div style="margin-top:6px; font-size:0.76rem; color:#64748b;">Lead status synced to your CRM.</div>`;
         }
 
         async function upload2A2B(file) {

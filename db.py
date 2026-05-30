@@ -1696,6 +1696,10 @@ VOICE_OUTCOME_TO_LEAD_STATUS = {
 
 
 def _ensure_voice_schema():
+    # voice_calls.platform_lead_id FKs leads(id), so the leads table must
+    # exist first. Lead Gen creates it lazily on its own calls; guarantee it
+    # here so the voice agent works even when Lead Gen has never been used.
+    _ensure_leads_schema()
     try:
         conn = get_conn(); cur = conn.cursor()
         cur.execute("""
