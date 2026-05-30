@@ -745,7 +745,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "229"
+APP_VERSION = "230"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -6116,23 +6116,40 @@ async def ingest_tally_data(payload: dict):
         username = payload.get("username", "admin")
         conn_key = company_id or company
 
-        # Incremental download (Sprint — incremental): if we have a watermark AND a
-        # recent full sync (< 24h), ask the agent for only vouchers altered since the
-        # last AlterId. Otherwise do a full pull (also the periodic reconcile that
-        # catches deletions). Old agents ignore since_alter_id and return everything.
-        _do_full, _since = True, 0
+        # Sprint 40 — fully incremental sync. Read per-entity AlterId watermarks
+        # (vouchers, ledgers, groups, stock); send each separately so the agent's
+        # fetch_* functions can filter `$AlterId > N` per entity. A full pull is
+        # only forced when: no prior full sync, OR last full sync was > 7 days ago
+        # (the periodic deletion-reconcile cadence). The 24h fallback that the old
+        # code used is gone — masters were re-pulled in full every sync because of
+        # it; with per-entity AlterIds the incremental path now handles routine
+        # churn cleanly. Old agents that ignore the new fields fall back to the
+        # legacy single `since_alter_id` behaviour and still work.
+        _do_full = True
+        _since_v = _since_l = _since_g = _since_s = 0
         try:
             _wm = db.get_sync_watermark(company)
-            if _wm and _wm.get("last_full_sync_at") and _wm.get("last_voucher_alterid"):
+            if _wm and _wm.get("last_full_sync_at"):
                 import datetime as _dt
                 _age = (_dt.datetime.utcnow() - _wm["last_full_sync_at"]).total_seconds()
-                if 0 <= _age < 24 * 3600:
-                    _do_full, _since = False, int(_wm["last_voucher_alterid"] or 0)
+                if 0 <= _age < 7 * 24 * 3600:
+                    _do_full = False
+                    _since_v = int(_wm.get("last_voucher_alterid") or 0)
+                    _since_l = int(_wm.get("last_ledger_alterid") or 0)
+                    _since_g = int(_wm.get("last_group_alterid") or 0)
+                    _since_s = int(_wm.get("last_stock_alterid") or 0)
         except Exception as _we:
             print(f"[ingest] watermark check: {_we}")
 
-        ws_response = await dispatch_tally_command(
-            conn_key, "seed_baseline", {"since_alter_id": _since})
+        _cmd_payload = {
+            "since_alter_id": _since_v,                # legacy field — vouchers (back-compat)
+            "since_voucher_alterid": _since_v,
+            "since_ledger_alterid":  _since_l,
+            "since_group_alterid":   _since_g,
+            "since_stock_alterid":   _since_s,
+            "full": _do_full,                          # agent uses this to collect live-GUID lists for deletion reconcile
+        }
+        ws_response = await dispatch_tally_command(conn_key, "seed_baseline", _cmd_payload)
         
         if not ws_response or ws_response.get("status") != "success":
             # P0 FIX: never fabricate a customer's books. If the bridge gave us no
@@ -6298,11 +6315,33 @@ async def ingest_tally_data(payload: dict):
                               v_result.get('upserted',0)+ledger_count+group_count+stock_count,
                               'success')
 
-            # Advance the incremental-download watermark to the highest AlterId seen.
-            # Absent (old agents) -> skip, so behaviour stays full-pull (no regression).
-            _max_alter = ws_response.get("max_alter_id")
-            if _max_alter is not None:
-                await _loop.run_in_executor(None, db.set_sync_watermark, company, _max_alter, _do_full)
+            # Sprint 40 — advance per-entity watermarks. Falls back to the legacy
+            # single `max_alter_id` field (vouchers only) for old agents.
+            _mv = ws_response.get("max_voucher_alterid", ws_response.get("max_alter_id"))
+            _ml = ws_response.get("max_ledger_alterid")
+            _mg = ws_response.get("max_group_alterid")
+            _ms = ws_response.get("max_stock_alterid")
+            if any(x is not None for x in (_mv, _ml, _mg, _ms)):
+                await _loop.run_in_executor(
+                    None, db.set_sync_watermark, company,
+                    int(_mv or 0), int(_ml or 0), int(_mg or 0), int(_ms or 0), _do_full)
+
+            # Sprint 40 — deletion reconcile. Only run on a full pull, only when the
+            # agent returned the live-GUID lists (a new-agent field; old agents skip
+            # the dict and we don't soft-delete anything — safe by default). Soft-
+            # deletes rows whose GUID is no longer in Tally, so YantrAI reflects
+            # deletes too (not just adds/edits).
+            if _do_full:
+                live_guids = ws_response.get("live_guids") or {}
+                if isinstance(live_guids, dict) and live_guids:
+                    for _ent in ("ledgers", "groups", "stock_items"):
+                        if _ent in live_guids:
+                            try:
+                                await _loop.run_in_executor(
+                                    None, db.reconcile_tally_deletions,
+                                    tally_company, _ent, live_guids[_ent])
+                            except Exception as _re:
+                                print(f"[reconcile] {_ent}: {_re}", flush=True)
 
             # Phase B: backfill company_id on newly-inserted rows so multi-tenant queries work.
             # We only backfill when the agent gave us an authenticated company_id (skipped on legacy path).

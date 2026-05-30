@@ -723,6 +723,15 @@ def init_db():
     cursor.execute("ALTER TABLE tally_ledgers ADD COLUMN IF NOT EXISTS display_name TEXT")
     cursor.execute("ALTER TABLE tally_stock_items ADD COLUMN IF NOT EXISTS display_name TEXT")
 
+    # Sprint 40 — fully incremental sync. AlterId watermark per row + Tally GUID for
+    # dedup/upsert + discarded_at for soft-delete (parallel to tally_vouchers).
+    for _m in ("tally_ledgers", "tally_groups", "tally_stock_items"):
+        cursor.execute(f"ALTER TABLE {_m} ADD COLUMN IF NOT EXISTS alter_id BIGINT DEFAULT 0")
+        cursor.execute(f"ALTER TABLE {_m} ADD COLUMN IF NOT EXISTS tally_master_guid TEXT")
+        cursor.execute(f"ALTER TABLE {_m} ADD COLUMN IF NOT EXISTS discarded_at TIMESTAMP")
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{_m}_company_live ON {_m}(company_name) WHERE discarded_at IS NULL")
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS tally_groups (
         id UUID PRIMARY KEY,
@@ -7842,6 +7851,8 @@ _SYNC_STATE_READY = False
 
 
 def _ensure_sync_state(cur):
+    """Create tally_sync_state if missing, plus add Sprint-40 per-entity AlterId columns
+    via additive ALTERs (idempotent)."""
     global _SYNC_STATE_READY
     if _SYNC_STATE_READY:
         return
@@ -7852,17 +7863,22 @@ def _ensure_sync_state(cur):
             last_full_sync_at TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )""")
+    # Sprint 40 — per-entity watermarks so masters can be incremental too.
+    for _col in ("last_ledger_alterid", "last_group_alterid", "last_stock_alterid"):
+        cur.execute(f"ALTER TABLE tally_sync_state ADD COLUMN IF NOT EXISTS {_col} BIGINT DEFAULT 0")
     _SYNC_STATE_READY = True
 
 
 def get_sync_watermark(company_name):
-    """Incremental-download watermark for a company (or None)."""
+    """Incremental-download watermark for a company (or None). Returns dict with
+    per-entity AlterId watermarks + last_full_sync_at."""
     if not company_name:
         return None
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         _ensure_sync_state(cur)
-        cur.execute("""SELECT last_voucher_alterid, last_full_sync_at
+        cur.execute("""SELECT last_voucher_alterid, last_ledger_alterid,
+                              last_group_alterid, last_stock_alterid, last_full_sync_at
                        FROM tally_sync_state WHERE company_name=%s""", (company_name,))
         r = cur.fetchone(); conn.commit(); return r
     except Exception as e:
@@ -7871,33 +7887,90 @@ def get_sync_watermark(company_name):
         cur.close(); conn.close()
 
 
-def set_sync_watermark(company_name, max_alter_id, full=False):
-    """Advance the watermark to the highest AlterId seen. `full=True` also stamps
-    last_full_sync_at (used to schedule the periodic full reconcile for deletions)."""
+def set_sync_watermark(company_name, max_alter_id=0, max_ledger_alterid=0,
+                       max_group_alterid=0, max_stock_alterid=0, full=False):
+    """Advance the per-entity watermarks to the highest AlterId seen. `full=True`
+    also stamps last_full_sync_at (used to schedule the periodic full reconcile for
+    deletions). Each watermark is GREATEST()ed so we never go backwards."""
     if not company_name:
         return
     conn = get_conn(); cur = conn.cursor()
     try:
         _ensure_sync_state(cur)
+        params = (company_name, int(max_alter_id or 0), int(max_ledger_alterid or 0),
+                  int(max_group_alterid or 0), int(max_stock_alterid or 0))
         if full:
             cur.execute("""
-                INSERT INTO tally_sync_state (company_name, last_voucher_alterid, last_full_sync_at, updated_at)
-                VALUES (%s,%s,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+                INSERT INTO tally_sync_state (company_name, last_voucher_alterid,
+                    last_ledger_alterid, last_group_alterid, last_stock_alterid,
+                    last_full_sync_at, updated_at)
+                VALUES (%s,%s,%s,%s,%s,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
                 ON CONFLICT (company_name) DO UPDATE SET
                     last_voucher_alterid=GREATEST(tally_sync_state.last_voucher_alterid, EXCLUDED.last_voucher_alterid),
+                    last_ledger_alterid =GREATEST(tally_sync_state.last_ledger_alterid,  EXCLUDED.last_ledger_alterid),
+                    last_group_alterid  =GREATEST(tally_sync_state.last_group_alterid,   EXCLUDED.last_group_alterid),
+                    last_stock_alterid  =GREATEST(tally_sync_state.last_stock_alterid,   EXCLUDED.last_stock_alterid),
                     last_full_sync_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
-            """, (company_name, int(max_alter_id or 0)))
+            """, params)
         else:
             cur.execute("""
-                INSERT INTO tally_sync_state (company_name, last_voucher_alterid, updated_at)
-                VALUES (%s,%s,CURRENT_TIMESTAMP)
+                INSERT INTO tally_sync_state (company_name, last_voucher_alterid,
+                    last_ledger_alterid, last_group_alterid, last_stock_alterid, updated_at)
+                VALUES (%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
                 ON CONFLICT (company_name) DO UPDATE SET
                     last_voucher_alterid=GREATEST(tally_sync_state.last_voucher_alterid, EXCLUDED.last_voucher_alterid),
+                    last_ledger_alterid =GREATEST(tally_sync_state.last_ledger_alterid,  EXCLUDED.last_ledger_alterid),
+                    last_group_alterid  =GREATEST(tally_sync_state.last_group_alterid,   EXCLUDED.last_group_alterid),
+                    last_stock_alterid  =GREATEST(tally_sync_state.last_stock_alterid,   EXCLUDED.last_stock_alterid),
                     updated_at=CURRENT_TIMESTAMP
-            """, (company_name, int(max_alter_id or 0)))
+            """, params)
         conn.commit()
     except Exception as e:
         conn.rollback(); print(f"[set_sync_watermark] {e}")
+    finally:
+        cur.close(); conn.close()
+
+
+def reconcile_tally_deletions(company_name, entity, live_guids):
+    """Soft-delete master rows whose Tally GUID is NOT in `live_guids` — these were
+    deleted in Tally since the last sync. **Only call this when the agent reported a
+    COMPLETE full pull** (otherwise we'd delete rows the agent simply didn't fetch
+    because of an incremental filter). entity is 'ledgers', 'groups', or 'stock_items'
+    (maps to tally_ledgers/tally_groups/tally_stock_items). Returns the count
+    soft-deleted. Existing discarded_at rows are NOT touched (preserve first-delete
+    timestamp)."""
+    if not company_name or entity not in ("ledgers", "groups", "stock_items"):
+        return 0
+    if live_guids is None:
+        return 0
+    table = "tally_" + entity if entity == "ledgers" else (
+            "tally_" + entity if entity == "groups" else "tally_stock_items")
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        live = [g for g in live_guids if g]
+        # Soft-delete: rows in YantrAI that have a GUID, are not already discarded,
+        # and whose GUID isn't in the live set the agent just returned.
+        if live:
+            cur.execute(
+                f"""UPDATE {table} SET discarded_at=CURRENT_TIMESTAMP
+                    WHERE company_name=%s AND discarded_at IS NULL
+                      AND tally_master_guid IS NOT NULL AND tally_master_guid <> ''
+                      AND NOT (tally_master_guid = ANY(%s))""",
+                (company_name, live))
+        else:
+            # Empty live list = the company is genuinely empty for that entity.
+            cur.execute(
+                f"""UPDATE {table} SET discarded_at=CURRENT_TIMESTAMP
+                    WHERE company_name=%s AND discarded_at IS NULL
+                      AND tally_master_guid IS NOT NULL AND tally_master_guid <> ''""",
+                (company_name,))
+        n = cur.rowcount
+        conn.commit()
+        if n:
+            print(f"[reconcile_tally_deletions] {entity}: soft-deleted {n} row(s) for {company_name!r}", flush=True)
+        return n
+    except Exception as e:
+        conn.rollback(); print(f"[reconcile_tally_deletions] {e}"); return 0
     finally:
         cur.close(); conn.close()
 
@@ -8053,14 +8126,16 @@ def save_tally_ledgers(company_name, ledgers):
             name = (L.get("name") or "").strip()
             if not name:
                 continue
+            # Sprint 40 — also persist alter_id + tally_master_guid for incremental sync
+            # and deletion-reconcile. Clear discarded_at on re-appear (un-soft-delete).
             cursor.execute("""
                 INSERT INTO tally_ledgers
                     (id, company_name, tally_master_id, name, parent_group, group_path,
                      opening_balance, closing_balance, is_revenue, is_deemedpositive,
                      gstin, pan, address, bank_name, account_number, ifsc_code,
                      gst_registration_type, tds_applicable, ledger_type, place_of_supply,
-                     raw_data, updated_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
+                     raw_data, alter_id, tally_master_guid, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
                 ON CONFLICT (company_name, name)
                 DO UPDATE SET
                     tally_master_id = EXCLUDED.tally_master_id,
@@ -8079,6 +8154,9 @@ def save_tally_ledgers(company_name, ledgers):
                     ledger_type = EXCLUDED.ledger_type,
                     place_of_supply = EXCLUDED.place_of_supply,
                     raw_data = EXCLUDED.raw_data,
+                    alter_id = GREATEST(tally_ledgers.alter_id, EXCLUDED.alter_id),
+                    tally_master_guid = COALESCE(EXCLUDED.tally_master_guid, tally_ledgers.tally_master_guid),
+                    discarded_at = NULL,
                     updated_at = CURRENT_TIMESTAMP
             """, (
                 str(uuid.uuid4()), company_name,
@@ -8101,6 +8179,8 @@ def save_tally_ledgers(company_name, ledgers):
                 L.get("ledger_type"),
                 L.get("place_of_supply"),
                 json.dumps(L),
+                int(L.get("alter_id") or 0),
+                L.get("guid") or L.get("tally_master_id"),
             ))
             count += 1
         conn.commit()
@@ -8158,12 +8238,13 @@ def save_tally_stock_items(company_name, items):
             name = (s.get("name") or "").strip()
             if not name:
                 continue
+            # Sprint 40 — same incremental + soft-delete treatment as ledgers.
             cursor.execute("""
                 INSERT INTO tally_stock_items
                     (id, company_name, tally_master_id, name, parent_group, unit, hsn_code,
                      gst_rate, opening_qty, opening_value, closing_qty, closing_value,
-                     standard_rate, godown_breakup, raw_data, updated_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
+                     standard_rate, godown_breakup, raw_data, alter_id, tally_master_guid, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
                 ON CONFLICT (company_name, name)
                 DO UPDATE SET
                     parent_group = EXCLUDED.parent_group,
@@ -8175,6 +8256,9 @@ def save_tally_stock_items(company_name, items):
                     standard_rate = EXCLUDED.standard_rate,
                     godown_breakup = EXCLUDED.godown_breakup,
                     raw_data = EXCLUDED.raw_data,
+                    alter_id = GREATEST(tally_stock_items.alter_id, EXCLUDED.alter_id),
+                    tally_master_guid = COALESCE(EXCLUDED.tally_master_guid, tally_stock_items.tally_master_guid),
+                    discarded_at = NULL,
                     updated_at = CURRENT_TIMESTAMP
             """, (
                 str(uuid.uuid4()), company_name,
@@ -8191,6 +8275,8 @@ def save_tally_stock_items(company_name, items):
                 _to_float(s.get("standard_rate")),
                 json.dumps(s.get("godown_breakup") or []),
                 json.dumps(s),
+                int(s.get("alter_id") or 0),
+                s.get("guid") or s.get("tally_master_id"),
             ))
             count += 1
         conn.commit()
@@ -8216,17 +8302,23 @@ def save_tally_groups(company_name, groups):
             name = (g.get("name") or "").strip()
             if not name:
                 continue
+            # Sprint 40 — incremental + soft-delete columns.
             cursor.execute("""
-                INSERT INTO tally_groups (id, company_name, name, parent, is_revenue, is_deemedpositive, raw_data)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                INSERT INTO tally_groups (id, company_name, name, parent, is_revenue, is_deemedpositive,
+                                          raw_data, alter_id, tally_master_guid)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (company_name, name) DO UPDATE SET
                     parent = EXCLUDED.parent,
                     is_revenue = EXCLUDED.is_revenue,
                     is_deemedpositive = EXCLUDED.is_deemedpositive,
-                    raw_data = EXCLUDED.raw_data
+                    raw_data = EXCLUDED.raw_data,
+                    alter_id = GREATEST(tally_groups.alter_id, EXCLUDED.alter_id),
+                    tally_master_guid = COALESCE(EXCLUDED.tally_master_guid, tally_groups.tally_master_guid),
+                    discarded_at = NULL
             """, (str(uuid.uuid4()), company_name, name, g.get("parent"),
                   _to_bool(g.get("is_revenue")), _to_bool(g.get("is_deemedpositive")),
-                  json.dumps(g)))
+                  json.dumps(g), int(g.get("alter_id") or 0),
+                  g.get("guid") or g.get("tally_master_id")))
             count += 1
         conn.commit()
     except Exception as e:

@@ -230,9 +230,24 @@ def fetch_local_ledgers(tally_url):
     ledgers = re.findall(r'<LEDGER NAME="([^"]*)"', res)
     return ledgers if ledgers else ["Cash", "Sales Account", "Purchase Account", "Bank Account"]
 
-def fetch_rich_ledgers(tally_url):
-    """Fetch full ledger details: name, parent group, closing balance, bank details, GSTIN, PAN, email, phone."""
-    xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedgerCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="LedgerCol"><TYPE>Ledger</TYPE><FETCH>Name, Parent, ClosingBalance, OpeningBalance, BankingConfigBank, BankAccountNumber, IFSCCode, BankBranchName, GSTRegistrationType, PartyGSTIN, PANNo, Email, LedgerPhone, LedgerMobile, Address, CreditPeriod</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
+# Sprint 40 — TDL AlterId filter helper. When since>0, Tally returns only rows with
+# AlterId greater than the watermark — same pattern fetch_vouchers already uses.
+def _alter_id_filter(since_alter_id):
+    n = int(since_alter_id or 0)
+    if n <= 0:
+        return "", ""
+    return (
+        "<FILTER>AlterIdFilter</FILTER>",
+        f'<SYSTEM TYPE="Formula" NAME="AlterIdFilter">$AlterId &gt; {n}</SYSTEM>',
+    )
+
+
+def fetch_rich_ledgers(tally_url, since_alter_id=0):
+    """Fetch full ledger details: name, parent group, closing balance, bank details,
+    GSTIN, PAN, email, phone. Sprint 40 — also AlterId + Guid; supports incremental
+    pulls (`since_alter_id > 0` adds `$AlterId > N` TDL filter)."""
+    _use, _decl = _alter_id_filter(since_alter_id)
+    xml = f"""<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedgerCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="LedgerCol"><TYPE>Ledger</TYPE><FETCH>Name, Parent, ClosingBalance, OpeningBalance, BankingConfigBank, BankAccountNumber, IFSCCode, BankBranchName, GSTRegistrationType, PartyGSTIN, PANNo, Email, LedgerPhone, LedgerMobile, Address, CreditPeriod, AlterId, Guid</FETCH>{_use}</COLLECTION>{_decl}</TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
     res = query_local_tally(tally_url, xml, timeout=30.0)
     if not res:
         return [
@@ -273,15 +288,20 @@ def fetch_rich_ledgers(tally_url):
             "phone": extract("LEDGERPHONE"),
             "mobile": extract("LEDGERMOBILE"),
             "credit_period": extract("CREDITPERIOD"),
+            # Sprint 40 — incremental watermark + GUID for deletion-reconcile.
+            "alter_id": extract("ALTERID"),
+            "guid": extract("GUID"),
         }
         ledger["raw_xml"] = _lm.group(0)   # verbatim Tally ledger XML (first-hand data)
         # Only include non-empty extras (raw_xml is always present)
         results.append({k: v for k, v in ledger.items() if v})
     return results if results else [{"name": "Cash", "parent": "Cash-in-Hand", "closing_balance": "50000.00"}]
 
-def fetch_groups(tally_url):
-    """Fetch all account groups with parent + nature (revenue / capital / asset etc.)."""
-    xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>GroupCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="GroupCol"><TYPE>Group</TYPE><FETCH>Name, Parent, IsRevenue, IsDeemedPositive, IsSubLedger, ReservedName</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
+def fetch_groups(tally_url, since_alter_id=0):
+    """Fetch all account groups with parent + nature (revenue / capital / asset etc.).
+    Sprint 40 — supports incremental pulls + returns AlterId/Guid per row."""
+    _use, _decl = _alter_id_filter(since_alter_id)
+    xml = f"""<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>GroupCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="GroupCol"><TYPE>Group</TYPE><FETCH>Name, Parent, IsRevenue, IsDeemedPositive, IsSubLedger, ReservedName, AlterId, Guid</FETCH>{_use}</COLLECTION>{_decl}</TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
     res = query_local_tally(tally_url, xml, timeout=15.0)
     if not res:
         return [
@@ -306,6 +326,9 @@ def fetch_groups(tally_url):
             "is_revenue": is_rev,
             "is_deemedpositive": is_dp,
             "is_subledger": is_sub,
+            # Sprint 40 — incremental watermark + GUID.
+            "alter_id": gext("ALTERID"),
+            "guid": gext("GUID"),
             "raw_xml": _gm.group(0),   # verbatim Tally group XML (first-hand data)
         })
     return groups
@@ -479,11 +502,12 @@ def fetch_vouchers(tally_url, from_date="20000401", to_date=None, since_alter_id
         vouchers.append(voucher)
     return vouchers
 
-def fetch_stock_items(tally_url):
+def fetch_stock_items(tally_url, since_alter_id=0):
     """Fetch full stock-item master with HSN, GST rate, units, closing qty/value.
     Returns a list of dicts (one per item). Empty list if Tally has no inventory.
-    """
-    xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>StockItemCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="StockItemCol"><TYPE>StockItem</TYPE><FETCH>Name, Parent, BaseUnits, GSTApplicable, GSTTypeofSupply, HSNCode, GSTRate, OpeningBalance, OpeningValue, ClosingBalance, ClosingValue, StandardCost, StandardPrice, Description</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
+    Sprint 40 — incremental + AlterId/Guid per row."""
+    _use, _decl = _alter_id_filter(since_alter_id)
+    xml = f"""<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>StockItemCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="StockItemCol"><TYPE>StockItem</TYPE><FETCH>Name, Parent, BaseUnits, GSTApplicable, GSTTypeofSupply, HSNCode, GSTRate, OpeningBalance, OpeningValue, ClosingBalance, ClosingValue, StandardCost, StandardPrice, Description, AlterId, Guid</FETCH>{_use}</COLLECTION>{_decl}</TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
     res = query_local_tally(tally_url, xml, timeout=45.0)
     if not res:
         return []
@@ -508,6 +532,9 @@ def fetch_stock_items(tally_url):
             "standard_cost": sext("STANDARDCOST"),
             "standard_rate": sext("STANDARDPRICE"),
             "description": sext("DESCRIPTION"),
+            # Sprint 40 — incremental watermark + GUID.
+            "alter_id": sext("ALTERID"),
+            "guid": sext("GUID"),
         }
         # Drop empty extras but always keep name
         item = {k: v for k, v in item.items() if v or k == "name"}
@@ -718,7 +745,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.15.0"  # + DISABLE auto-baseline-sync on connect (the heavy 40s fetch_vouchers was crashing JMK's Tally with c0000005 + starving outbox pushes)
+AGENT_VERSION = "0.16.0"  # + per-entity incremental seed_baseline (vouchers/ledgers/groups/stock_items each get their own since_alterid + max_alterid + live_guids on full pulls); RE-ENABLE auto-baseline-sync on connect (gated by once-per-process + _sync_in_progress phase-separation Event so the outbox pusher pauses while the seed pull holds Tally's single-threaded HTTP server)
 
 
 def _post_json(url, body, timeout=15.0):
@@ -1085,6 +1112,13 @@ def _try_push_once(payload, tally_url, company_name):
 # once per voucher push rather than per ledger name.
 _LEDGER_SNAPSHOT_CACHE = {"server": None, "company": None, "names": None, "by_lc": None}
 
+# Sprint 41 — phase separation between baseline pull (seed_baseline) and outbox
+# push (push_voucher_to_tally). Tally's HTTP server is single-threaded; a 40 s
+# fetch_vouchers running concurrently with a write is what crashed JMK with
+# c0000005. The seed_baseline handler sets this Event while it's fetching;
+# outbox_poll_loop checks it and skips the claim+push for one cycle.
+_sync_in_progress = threading.Event()
+
 
 def _fetch_ledger_snapshot(server_url, company_name):
     """Fetch YantrAI's authoritative copy of Tally's chart of accounts for
@@ -1439,6 +1473,13 @@ def outbox_poll_loop(server_url, tally_url, company_name, stop_event, log_fn=Non
     def _tok():
         return token_provider() if callable(token_provider) else token_provider
     while not stop_event.is_set():
+        # Phase separation (Sprint 41): if a baseline seed is currently fetching
+        # from Tally, don't issue a competing write. Tally's HTTP server is
+        # single-threaded; a write during the 40 s fetch_vouchers is what
+        # crashed JMK with c0000005. Skip this cycle and recheck shortly.
+        if _sync_in_progress.is_set():
+            stop_event.wait(2)
+            continue
         try:
             session_token = _tok()
             _qs = f"company_name={urllib.parse.quote(company_name)}&limit=10"
@@ -2160,6 +2201,9 @@ class TallyBridgeApp:
         self.selected_company_id = None
         self.selected_company_name = None
         self.memberships = []
+        # Reset the once-per-session baseline-sync gate so a fresh login
+        # re-triggers a baseline pull (Sprint 41).
+        self._baseline_done = False
         # Keep last_username and last_server_url in config for convenience
         self.config.pop("token", None)
         self.config.pop("device_token", None)
@@ -2303,15 +2347,23 @@ class TallyBridgeApp:
                     self.set_status(True)
                     self.log(f"Secure tunnel active for {self.selected_company_name}. Ready for sync.", "success")
 
-                    # Sprint 36 — DO NOT auto-trigger baseline sync on connect. The 40s
-                    # fetch_vouchers (since=0, full history) acquires the global Tally HTTP
-                    # lock and on large/fragile Tally databases can crash Tally with c0000005
-                    # and/or starve concurrent outbox pushes — that's what crashed JMK's Tally
-                    # tonight. The agent connects ready to push the outbox; baseline sync is a
-                    # heavy operation the user can invoke explicitly when they want it (the
-                    # server still accepts /tally/ingest POSTs and seed_baseline commands —
-                    # we just don't fire it automatically on every reconnect).
-                    # (Previously: auto-fired _trigger_baseline_sync in a daemon thread.)
+                    # Sprint 41 — auto-baseline sync is RE-ENABLED, but safer this time:
+                    #   1. Only fires once per process lifetime (`_baseline_done`), so
+                    #      reconnects after a flaky tunnel don't keep re-triggering it.
+                    #   2. The server now decides full vs incremental from per-entity
+                    #      watermarks — within 7 days of a successful full sync it sends
+                    #      since_voucher_alterid > 0 and the fetch_vouchers TDL filter
+                    #      returns only changed rows (typically tens, not thousands).
+                    #   3. The pull runs under the `_sync_in_progress` Event so the
+                    #      outbox pusher pauses for the duration — no concurrent
+                    #      Tally writes (which is what crashed JMK in Sprint 36).
+                    if not getattr(self, "_baseline_done", False):
+                        self._baseline_done = True
+                        threading.Thread(
+                            target=self._trigger_baseline_sync,
+                            name="auto-baseline-sync",
+                            daemon=True,
+                        ).start()
 
                     while self.should_run:
                         msg_str = await ws.recv()
@@ -2347,30 +2399,64 @@ class TallyBridgeApp:
                             self.log(f"Transmitted Tally summary for '{tally_company}'.", "success")
 
                         elif cmd_type == "seed_baseline":
-                            # Incremental: server may pass since_alter_id to fetch only
-                            # vouchers changed since the last sync. 0 / absent = full pull.
-                            since = 0
-                            try:
-                                since = int((data or {}).get("since_alter_id") or 0)
-                            except Exception:
-                                since = 0
-                            mode = "incremental" if since > 0 else "full"
-                            self.log(f"Starting {mode} data pull from Tally"
-                                     + (f" (since AlterId {since})" if since else "") + "...", "info")
-                            info = fetch_tally_company_info(tally_url)
-                            tally_company = info.get("company_name") or self.selected_company_name or "Unknown"
-                            info["pan"] = info.get("pan") or ""
-                            self.log(f"Company: {tally_company} (PAN: {info['pan']})", "info")
+                            # Per-entity incremental sync (Sprint 41).
+                            # The server tracks 4 AlterId watermarks (vouchers, ledgers, groups,
+                            # stock_items) and a `last_full_sync_at` timestamp. On every
+                            # /tally/ingest it decides:
+                            #   • full pull  → since_* = 0 for every entity AND `full` = True
+                            #     (sent when the watermark is stale > 7 days or absent)
+                            #   • incremental → since_* = last-seen AlterId per entity, `full` = False
+                            # Legacy clients (server v < 230) only send `since_alter_id` — treat that
+                            # as the voucher since and leave master tables on full pull.
+                            _data = data or {}
+                            full_pull = bool(_data.get("full"))
+                            def _int_since(key, fallback=0):
+                                try:
+                                    return int(_data.get(key) or fallback)
+                                except Exception:
+                                    return fallback
+                            legacy_since = _int_since("since_alter_id", 0)
+                            since_v = _int_since("since_voucher_alterid", legacy_since)
+                            since_l = _int_since("since_ledger_alterid", 0)
+                            since_g = _int_since("since_group_alterid", 0)
+                            since_s = _int_since("since_stock_alterid", 0)
+                            # If server didn't say `full` explicitly, infer it from since values.
+                            if "full" not in _data:
+                                full_pull = (since_v == 0 and since_l == 0
+                                             and since_g == 0 and since_s == 0)
 
-                            rich_ledgers = fetch_rich_ledgers(tally_url)
-                            groups = fetch_groups(tally_url)
-                            vouchers = fetch_vouchers(tally_url, since_alter_id=since)
-                            stock_items = fetch_stock_items(tally_url)
+                            # Phase separation — don't let an outbox push race a baseline pull
+                            # for Tally's single-threaded HTTP server.
+                            _sync_in_progress.set()
+                            try:
+                                mode = "full" if full_pull else "incremental"
+                                self.log(
+                                    f"Starting {mode} data pull from Tally "
+                                    f"(voucher>{since_v}, ledger>{since_l}, "
+                                    f"group>{since_g}, stock>{since_s})...",
+                                    "info",
+                                )
+                                info = fetch_tally_company_info(tally_url)
+                                tally_company = info.get("company_name") or self.selected_company_name or "Unknown"
+                                info["pan"] = info.get("pan") or ""
+                                self.log(f"Company: {tally_company} (PAN: {info['pan']})", "info")
+
+                                rich_ledgers = fetch_rich_ledgers(tally_url, since_alter_id=since_l)
+                                groups = fetch_groups(tally_url, since_alter_id=since_g)
+                                vouchers = fetch_vouchers(tally_url, since_alter_id=since_v)
+                                stock_items = fetch_stock_items(tally_url, since_alter_id=since_s)
+                            finally:
+                                _sync_in_progress.clear()
+
                             self.log(f"Pulled {len(rich_ledgers)} ledgers, {len(groups)} groups, "
                                      f"{len(vouchers)} vouchers ({mode}), {len(stock_items)} stock items.", "info")
 
-                            max_alter = max((int(v.get("alterid") or 0) for v in vouchers),
-                                            default=since)
+                            # Per-entity max AlterIds → server advances each watermark independently.
+                            max_v = max((int(v.get("alterid") or 0) for v in vouchers), default=since_v)
+                            max_l = max((int(x.get("alter_id") or 0) for x in rich_ledgers), default=since_l)
+                            max_g = max((int(x.get("alter_id") or 0) for x in groups), default=since_g)
+                            max_s = max((int(x.get("alter_id") or 0) for x in stock_items), default=since_s)
+
                             response["tally_company_name"] = tally_company
                             response["pan"] = info["pan"]
                             response["ledgers"] = rich_ledgers
@@ -2381,9 +2467,31 @@ class TallyBridgeApp:
                             response["voucher_count"] = len(vouchers)
                             response["group_count"] = len(groups)
                             response["stock_count"] = len(stock_items)
-                            response["incremental"] = since > 0
-                            response["max_alter_id"] = max_alter   # server advances its watermark
-                            self.log(f"{mode.capitalize()} seed complete (max AlterId {max_alter}).", "success")
+                            response["incremental"] = not full_pull
+                            response["full"] = full_pull
+                            # Per-entity watermarks (new schema).
+                            response["max_voucher_alterid"] = max_v
+                            response["max_ledger_alterid"] = max_l
+                            response["max_group_alterid"] = max_g
+                            response["max_stock_alterid"] = max_s
+                            # Legacy single field kept for any older server build.
+                            response["max_alter_id"] = max_v
+
+                            # On a full pull collect live GUIDs per master entity so the server
+                            # can soft-delete rows that no longer exist in Tally. Skipped on
+                            # incrementals — a partial fetch cannot prove absence.
+                            if full_pull:
+                                response["live_guids"] = {
+                                    "ledgers":     [x.get("guid") for x in rich_ledgers if x.get("guid")],
+                                    "groups":      [x.get("guid") for x in groups       if x.get("guid")],
+                                    "stock_items": [x.get("guid") for x in stock_items  if x.get("guid")],
+                                }
+
+                            self.log(
+                                f"{mode.capitalize()} seed complete "
+                                f"(max AlterIds  v={max_v} l={max_l} g={max_g} s={max_s}).",
+                                "success",
+                            )
                             self.increment_synced()
 
                         elif cmd_type == "create_voucher":
