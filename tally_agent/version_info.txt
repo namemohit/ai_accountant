@@ -1,0 +1,40 @@
+# UTF-8
+#
+# Windows version-info resource for the YantrAI Tally Bridge agent.
+# Shown in File Explorer → Properties → Details.
+#
+# IMPORTANT: keep filevers / prodvers in sync with AGENT_VERSION in
+# tally_bridge_agent.py. The first three numbers must match (the 4th is build).
+#
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(0, 16, 0, 0),
+    prodvers=(0, 16, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0),
+  ),
+  kids=[
+    StringFileInfo(
+      [
+        StringTable(
+          u'040904B0',
+          [
+            StringStruct(u'CompanyName', u'YantrAI Labs'),
+            StringStruct(u'FileDescription', u'YantrAI Tally Bridge — Windows Agent'),
+            StringStruct(u'FileVersion', u'0.16.0.0'),
+            StringStruct(u'InternalName', u'tally_bridge_agent'),
+            StringStruct(u'LegalCopyright', u'Copyright (c) 2026 YantrAI Labs'),
+            StringStruct(u'OriginalFilename', u'tally_bridge_agent.exe'),
+            StringStruct(u'ProductName', u'YantrAI Tally Bridge'),
+            StringStruct(u'ProductVersion', u'0.16.0.0'),
+          ]
+        )
+      ]
+    ),
+    VarFileInfo([VarStruct(u'Translation', [0x0409, 1200])])
+  ]
+)
