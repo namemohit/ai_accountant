@@ -1836,6 +1836,12 @@ def push_voucher_to_tally(payload, tally_url, company_name, server_url=None,
         return False, f"Tally Prime not reachable on {tally_url} (open Tally and try again)"
 
     # Sprint 44 / 44.2 / 44.3 — Delete branch. Short-circuit everything else.
+    # Sprint 48 — DORMANT / UNREACHABLE: the server no longer enqueues Delete
+    # outbox rows (the /delete-from-tally + /vouchers/delete endpoints now
+    # return 410, and the UI delete buttons were removed) because Tally Prime's
+    # XML API can't reliably delete a pushed voucher. This branch + its helpers
+    # (_build_voucher_delete_xml, _find_voucher_by_yantrai_uid) are kept only to
+    # avoid an unnecessary .exe rebuild; delete them on the next agent rebuild.
     if (payload.get("tally_action") or "").strip().capitalize() == "Delete":
         master_id = (payload.get("tally_master_id") or "").strip()
         yuid = (payload.get("yantrai_uid") or "").strip()

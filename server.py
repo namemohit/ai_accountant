@@ -1029,7 +1029,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "241"
+APP_VERSION = "242"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -4779,52 +4779,18 @@ async def resync_voucher_endpoint(voucher_id: str):
 
 @app.post("/api/vouchers/{voucher_id}/delete-from-tally")
 async def delete_voucher_from_tally(voucher_id: str, payload: dict = None):
-    """Delete a voucher from BOTH Tally Prime and YantrAI. Requires the
-    voucher to have a tally_master_id (i.e. it was previously pushed to
-    Tally). For YantrAI-only invoices that were never pushed, use
-    POST /api/vouchers/delete instead.
-
-    Body: {company_name?: str, confirm?: bool}. confirm is informational —
-    the UI already shows a confirm modal."""
-    try:
-        body = payload or {}
-        company_name = body.get("company_name")
-        v = db.get_voucher_for_delete(voucher_id, company_name=company_name)
-        if not v:
-            raise HTTPException(status_code=404, detail="Voucher not found")
-        master_id = v.get("tally_master_id")
-        if not master_id:
-            raise HTTPException(
-                status_code=400,
-                detail=("This voucher was never pushed to Tally (no "
-                        "tally_master_id). Use POST /api/vouchers/delete for "
-                        "YantrAI-side removal."),
-            )
-
-        cn = company_name or v.get("company_name")
-        delete_payload = {
-            "tally_action":     "Delete",
-            "tally_master_id":  str(master_id),
-            "voucher_type":     v.get("voucher_type") or "Sales",
-            "voucher_number":   v.get("voucher_number") or "",
-            "party_name":       v.get("party"),
-            "company_name":     cn,
-            "yantrai_uid":      str(voucher_id),
-        }
-        q = db.enqueue_tally_push(
-            payload=delete_payload,
-            voucher_id=voucher_id if v.get("source") == "tally" else None,
-            invoice_id=voucher_id if v.get("source") == "invoice" else None,
-            company_name=cn,
-            enqueued_by="web-delete",
-        )
-        return {"status": "success", "outbox": q, "action": "Delete",
-                "tally_master_id": str(master_id)}
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+    """Sprint 48 — DISABLED. Tally Prime's XML Import API can't reliably delete
+    a pushed voucher (proven across Sprint 44.0-44.3: every identifier strategy
+    either created a duplicate or returned "Voucher does not exist"), so YantrAI
+    no longer offers voucher deletion. Returns 410 Gone with guidance. The UI's
+    delete button was removed in the same sprint; this guard stops a stale
+    cached page from triggering a delete."""
+    raise HTTPException(
+        status_code=410,
+        detail=("Voucher deletion is disabled. To remove a voucher from Tally, "
+                "delete it in Tally Prime and then Sync from Tally. To hide it "
+                "in YantrAI, use Archive."),
+    )
 
 
 @app.post("/api/vouchers/upload")
@@ -4929,97 +4895,19 @@ Return ONLY a JSON object."""
 
 @app.post("/api/vouchers/delete")
 async def delete_vouchers_endpoint(payload: dict):
-    """Sprint 33 — Delete selected vouchers from YantrAI's DB (test/sample/bad
-    rows). Body: {company_name, items:[{id, source}]}. Each item is deleted
-    from tally_vouchers (source='tally') or invoices (source='invoice'),
-    scoped to the company. Also clears any matching tally_outbox rows so the
-    Event Log stays consistent. Does NOT touch the customer's Tally Prime."""
-    try:
-        company_name = (payload or {}).get("company_name")
-        items = (payload or {}).get("items") or []
-        if not company_name or not items:
-            raise HTTPException(status_code=400, detail="company_name and items required")
-        from psycopg2.extras import RealDictCursor
-        company_id = _resolve_company_id_by_name(company_name)
-        conn = db.get_conn(); cur = conn.cursor()
-        dcur = conn.cursor(cursor_factory=RealDictCursor)
-        deleted = 0
-        outbox_cleared = 0
-        tally_cleanup = []   # Sprint 33 — tally-sourced rows the user must also remove in Tally Prime
-        failed = []          # Sprint 36 — per-item failures surfaced to the UI
-        for it in items:
-            vid = it.get("id"); src = (it.get("source") or "invoice").lower()
-            vnum = it.get("voucher_number")
-            if not vid:
-                continue
-            try:
-                if src == "tally":
-                    # Capture details BEFORE delete so we can guide manual Tally cleanup.
-                    dcur.execute("""SELECT voucher_number, voucher_type, ledger_name, amount, date
-                                    FROM tally_vouchers
-                                    WHERE id = %s AND (company_id = %s OR company_name = %s)""",
-                                 (vid, company_id, company_name))
-                    det = dcur.fetchone()
-                    if det:
-                        cleanup_item = {
-                            "voucher_number": det.get("voucher_number"),
-                            "voucher_type": det.get("voucher_type"),
-                            "party": det.get("ledger_name"),
-                            "amount": float(det["amount"]) if det.get("amount") is not None else None,
-                            "date": str(det.get("date")) if det.get("date") else None,
-                        }
-                        tally_cleanup.append(cleanup_item)
-                        # Sprint 33 — persist so the cleanup checklist survives
-                        # in Event Logs even after the voucher row is gone.
-                        try:
-                            db.add_tally_cleanup(
-                                company_name=company_name,
-                                voucher_number=cleanup_item["voucher_number"],
-                                voucher_type=cleanup_item["voucher_type"],
-                                party=cleanup_item["party"],
-                                amount=cleanup_item["amount"],
-                                voucher_date=cleanup_item["date"],
-                                reason="Deleted from YantrAI — remove from Tally Prime manually")
-                        except Exception as ce:
-                            print(f"[delete_vouchers] cleanup-log failed: {ce}", flush=True)
-                    cur.execute("DELETE FROM tally_vouchers WHERE id = %s AND (company_id = %s OR company_name = %s)",
-                                (vid, company_id, company_name))
-                else:
-                    # Sprint 36 — delete child line items first to satisfy the
-                    # items_invoice_id_fkey FK (otherwise the invoice delete
-                    # silently fails with a ForeignKeyViolation → deleted=0).
-                    cur.execute("DELETE FROM items WHERE invoice_id = %s", (vid,))
-                    cur.execute("DELETE FROM invoices WHERE id = %s AND company_name = %s",
-                                (vid, company_name))
-                row_deleted = cur.rowcount
-                deleted += row_deleted
-                # Clear matching outbox rows by invoice/voucher number
-                if vnum:
-                    cur.execute("DELETE FROM tally_outbox WHERE company_name = %s AND payload->>'invoice_number' = %s",
-                                (company_name, vnum))
-                    outbox_cleared += cur.rowcount
-                conn.commit()  # commit per item so one failure doesn't lose the rest
-                # Sprint 36 — if nothing matched, tell the user (e.g. wrong company / already gone)
-                if row_deleted == 0:
-                    failed.append({"id": vid, "voucher_number": vnum,
-                                   "reason": "Not found (already deleted or different company)."})
-            except Exception as ie:
-                print(f"[delete_vouchers] item {vid} ({src}) failed: {ie}", flush=True)
-                conn.rollback()
-                # Sprint 36 — surface a human-readable reason instead of silent deleted=0
-                msg = str(ie)
-                if "ForeignKeyViolation" in ie.__class__.__name__ or "foreign key" in msg.lower():
-                    msg = "Linked records still reference it (could not remove)."
-                failed.append({"id": vid, "voucher_number": vnum, "reason": msg[:160]})
-        cur.close(); dcur.close(); conn.close()
-        return {"status": "success", "deleted": deleted,
-                "outbox_cleared": outbox_cleared, "tally_cleanup": tally_cleanup,
-                "failed": failed}
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+    """Sprint 48 — DISABLED. Permanent voucher deletion (hard DELETE from
+    tally_vouchers / invoices / items) was a footgun — irreversible, and the
+    kind of thing that once leaked test data into a real firm's books. It is
+    no longer a product feature. Returns 410 Gone; use Archive (soft,
+    reversible) via POST /api/vouchers/archive instead. The UI's
+    "Delete permanently" button was removed in the same sprint; this guard
+    stops a stale cached page from hard-deleting rows."""
+    raise HTTPException(
+        status_code=410,
+        detail=("Voucher deletion is disabled. Use Archive to hide a voucher "
+                "(it stays on file and can be restored). To remove it from "
+                "Tally, delete it in Tally Prime and then Sync from Tally."),
+    )
 
 
 @app.post("/api/vouchers/archive")
