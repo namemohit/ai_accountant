@@ -878,7 +878,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.19.4"  # v0.19.4 — Cloud Run preset URL fix (project-number host returned Google 404; switched to hash-format canonical host). v0.19.3 — Sprint 44.3 query-then-act Alter/Delete via TDL collection on $Narration CONTAINS "[YAI:<uid>]" → keyed envelope on Tally-native MASTERID + DATE + VCHTYPE + VCHNUMBER; lookup-miss falls through to Create.
+AGENT_VERSION = "0.20.0"  # v0.20.0 — CRITICAL accounting fix: _build_voucher_xml AMOUNT sign was inverted (Dr=+, Cr=-), so every pushed Sales landed in Tally's CREDIT column (party credited not debited). Now Tally-correct: Dr=negative, Cr=positive (confirmed vs native vouchers). v0.19.4 — Cloud Run preset URL fix (project-number host returned Google 404; switched to hash-format canonical host). v0.19.3 — Sprint 44.3 query-then-act Alter/Delete via TDL collection on $Narration CONTAINS "[YAI:<uid>]" → keyed envelope on Tally-native MASTERID + DATE + VCHTYPE + VCHNUMBER; lookup-miss falls through to Create.
 
 
 def _post_json(url, body, timeout=15.0):
@@ -932,9 +932,11 @@ def _build_voucher_xml(payload, company_name):
     generic 2-leg journal entry if voucher_type is unrecognised.
 
     Tally's XML import schema accepts a `VOUCHER ACTION="Create"` block inside
-    an `IMPORTDATA` envelope. The party leg's amount is signed (negative for
-    Sales/Receipt because the party is credited; positive for Purchase/Payment
-    because the party is debited)."""
+    an `IMPORTDATA` envelope. AMOUNT sign convention (confirmed against native
+    Tally vouchers): a DEBIT leg = ISDEEMEDPOSITIVE=Yes + NEGATIVE amount; a
+    CREDIT leg = ISDEEMEDPOSITIVE=No + POSITIVE amount. So a Sales debits the
+    party (negative) and credits Sales+tax (positive); a Purchase credits the
+    party (positive) and debits Purchase+tax (negative)."""
     vt_raw = (payload.get("voucher_type") or payload.get("category") or "Sales").strip()
     vt = vt_raw.capitalize()
     # Map to Tally's canonical voucher type names
@@ -998,18 +1000,24 @@ def _build_voucher_xml(payload, company_name):
             if not nm: continue
             amt = float(e.get("amount") or 0)
             is_debit = bool(e.get("is_debit"))
-            # In Tally: Dr → ISDEEMEDPOSITIVE=Yes, Cr → No (party perspective)
-            legs.append((nm, abs(amt) if is_debit else -abs(amt), "Yes" if is_debit else "No"))
+            # In Tally: Dr → ISDEEMEDPOSITIVE=Yes + NEGATIVE amount; Cr → No + POSITIVE.
+            legs.append((nm, -abs(amt) if is_debit else abs(amt), "Yes" if is_debit else "No"))
     else:
-        # Tally voucher leg convention (verified against live Tally Prime):
-        # ISDEEMEDPOSITIVE=Yes  → Debit  (Dr) leg
-        # ISDEEMEDPOSITIVE=No   → Credit (Cr) leg
-        # AMOUNT sign: Cr legs use negative amount; Dr legs use positive.
+        # Tally voucher leg AMOUNT convention — CONFIRMED against this firm's NATIVE
+        # vouchers (e.g. JMK/2026-27/042: party "Hindustan Unilever" Dr =
+        # ISDEEMEDPOSITIVE=Yes, AMOUNT=-226605.75; "Sale" Cr = No, AMOUNT=+215815)
+        # AND the build_voucher_xml sibling above:
+        #   DEBIT  (Dr) leg → ISDEEMEDPOSITIVE=Yes, AMOUNT **NEGATIVE**
+        #   CREDIT (Cr) leg → ISDEEMEDPOSITIVE=No,  AMOUNT **POSITIVE**
+        # Sprint 53.1 FIX: the prior code emitted the OPPOSITE amount sign (Dr=+,
+        # Cr=-), so every pushed Sales landed in Tally's CREDIT column (party
+        # credited instead of debited). ISDEEMEDPOSITIVE was already correct; only
+        # the AMOUNT sign was inverted. Signs below are now Tally-correct.
         #
-        # Sales voucher  (cash IN):  Dr Party (debtor) + Cr Sales + Cr CGST Output + Cr SGST Output
-        # Purchase       (cash OUT): Cr Party (creditor) + Dr Purchase + Dr CGST Input + Dr SGST Input
-        # Payment        (cash OUT): Dr Party + Cr Cash/Bank
-        # Receipt        (cash IN):  Dr Cash/Bank + Cr Party
+        # Sales voucher  (cash IN):  Dr Party (debtor) + Cr Sales + Cr CGST/SGST/IGST Output
+        # Purchase       (cash OUT): Cr Party (creditor) + Dr Purchase + Dr CGST/SGST/IGST Input
+        # Payment        (cash OUT): Dr Party/Expense + Cr Cash/Bank
+        # Receipt        (cash IN):  Dr Cash/Bank + Cr Party/Income
         # Sprint 32 — Force Dr=Cr exactly. Party leg = sum of other legs so
         # 0.08-rupee rounding mismatches between taxable_value and total_amount
         # don't trigger Tally's silent EXCEPTIONS=1 rejection.
@@ -1022,38 +1030,38 @@ def _build_voucher_xml(payload, company_name):
             # mistakenly set counter_ledger=Cash). Fall back to the party.
             if not dr_name or dr_name.strip().lower() == cr_name.strip().lower():
                 dr_name = party if party.strip().lower() != cr_name.strip().lower() else (counter_ledger_in or party)
-            legs.append((dr_name, gross, "Yes"))    # Dr
-            legs.append((cr_name, -gross, "No"))    # Cr
+            legs.append((dr_name, -gross, "Yes"))   # Dr → negative
+            legs.append((cr_name, gross, "No"))     # Cr → positive
         elif vt_tally == "Receipt":
             # Sprint 33 — Receipt (money IN): Dr Cash/Bank, Cr Party/Income.
             dr_name = payment_mode or "Cash"
             cr_name = counter_ledger_in or party
             if not cr_name or cr_name.strip().lower() == dr_name.strip().lower():
                 cr_name = party if party.strip().lower() != dr_name.strip().lower() else (counter_ledger_in or party)
-            legs.append((dr_name, gross, "Yes"))    # Dr
-            legs.append((cr_name, -gross, "No"))    # Cr
+            legs.append((dr_name, -gross, "Yes"))   # Dr → negative
+            legs.append((cr_name, gross, "No"))     # Cr → positive
         elif is_outflow:
-            # Purchase: party is Cr, counter+tax are Dr
-            legs.append((party, -gross, "No"))
+            # Purchase: party is Cr (+), counter+tax are Dr (-)
+            legs.append((party, gross, "No"))
             if taxable > 0:
-                legs.append((counter_default, taxable, "Yes"))
+                legs.append((counter_default, -taxable, "Yes"))
             # Tax ledgers: prefer the customer's REAL ledger names resolved server-side
             # from their Tally dump (payload.*_ledger). Hard-coded names are only a
             # fallback when the server couldn't resolve one.
-            if cgst > 0: legs.append((payload.get("cgst_ledger") or "CGST Input", cgst, "Yes"))
-            if sgst > 0: legs.append((payload.get("sgst_ledger") or "SGST Input", sgst, "Yes"))
-            if igst > 0: legs.append((payload.get("igst_ledger") or "IGST Input", igst, "Yes"))
+            if cgst > 0: legs.append((payload.get("cgst_ledger") or "CGST Input", -cgst, "Yes"))
+            if sgst > 0: legs.append((payload.get("sgst_ledger") or "SGST Input", -sgst, "Yes"))
+            if igst > 0: legs.append((payload.get("igst_ledger") or "IGST Input", -igst, "Yes"))
         else:
-            # Sales: party is Dr, counter+tax are Cr
-            legs.append((party, gross, "Yes"))
+            # Sales: party is Dr (-), counter+tax are Cr (+)
+            legs.append((party, -gross, "Yes"))
             if taxable > 0:
-                legs.append((counter_default, -taxable, "No"))
+                legs.append((counter_default, taxable, "No"))
             # Tax ledgers: prefer the customer's REAL ledger names resolved server-side
             # from their Tally dump (payload.*_ledger). Hard-coded names are only a
             # fallback when the server couldn't resolve one.
-            if cgst > 0: legs.append((payload.get("cgst_ledger") or "CGST Output", -cgst, "No"))
-            if sgst > 0: legs.append((payload.get("sgst_ledger") or "SGST Output", -sgst, "No"))
-            if igst > 0: legs.append((payload.get("igst_ledger") or "IGST Output", -igst, "No"))
+            if cgst > 0: legs.append((payload.get("cgst_ledger") or "CGST Output", cgst, "No"))
+            if sgst > 0: legs.append((payload.get("sgst_ledger") or "SGST Output", sgst, "No"))
+            if igst > 0: legs.append((payload.get("igst_ledger") or "IGST Output", igst, "No"))
 
     legs_xml = "".join([
         f"<ALLLEDGERENTRIES.LIST>"
