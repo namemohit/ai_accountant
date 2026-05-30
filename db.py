@@ -11507,18 +11507,33 @@ def mark_sensitive_ledgers(company_id=None):
     return count
 
 
-# Initialize on start
-try:
-    init_db()
-    seeded = seed_builtin_recon_templates()
+# Cloud Run startup fix #5 (the LAST actual root cause): defer init_db().
+# The 111 CREATE/ALTER TABLE statements in init_db() + the seed_* calls
+# below run network round-trips against Supabase Pooler. On Cloud Run cold
+# start that batch can exceed the 4-minute startup probe window, so port
+# 8080 never opens. Moving the work to a daemon thread lets db.py import
+# return immediately — uvicorn binds the port within seconds, the schema
+# migrations run concurrently. Because every statement is idempotent
+# (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`), the
+# established prod schema is essentially a no-op pass; the seed calls
+# are upsert-style. Requests that arrive during the background init
+# already work because the schema is provisioned from prior deploys.
+def _init_db_in_background():
     try:
-        _seed_agents()  # ensure first-party catalog + core auto-installs (incl. Network)
-    except Exception as _se:
-        print(f"[startup _seed_agents] {_se}")
-    try:
-        _ensure_network_schema()  # create Network tables once at boot (avoids per-request DDL locks)
-    except Exception as _ne:
-        print(f"[startup _ensure_network_schema] {_ne}")
-    print(f"Cloud Database Initialized Successfully. ({seeded} recon templates loaded)")
-except Exception as e:
-    print(f"Cloud DB Error: {e}")
+        init_db()
+        seeded = seed_builtin_recon_templates()
+        try:
+            _seed_agents()  # ensure first-party catalog + core auto-installs (incl. Network)
+        except Exception as _se:
+            print(f"[startup _seed_agents] {_se}")
+        try:
+            _ensure_network_schema()  # create Network tables once at boot (avoids per-request DDL locks)
+        except Exception as _ne:
+            print(f"[startup _ensure_network_schema] {_ne}")
+        print(f"Cloud Database Initialized Successfully. ({seeded} recon templates loaded)")
+    except Exception as e:
+        print(f"Cloud DB Error: {e}")
+
+
+import threading as _threading
+_threading.Thread(target=_init_db_in_background, name="db-init", daemon=True).start()
