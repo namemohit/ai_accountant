@@ -1676,6 +1676,197 @@ def update_lead_status(lead_id, user_id, status=None, action=None):
         cur.close(); conn.close()
 
 
+# ── Voice Caller — campaigns + calls. Embedded L2 agent mirroring the Lead Gen
+#   schema above so call outcomes can write back onto the same leads.id row.
+#   See yantrai_platform/voice_caller/ for the in-process provider + conversation
+#   modules; routes live in server.py under /api/voice/*.
+VOICE_CALL_STATUSES = ("queued", "in_progress", "completed", "failed", "no_answer")
+VOICE_OUTCOMES = ("booked", "interested", "not_interested", "callback", "no_answer", "unknown")
+
+# Map from a voice-call outcome to the platform lead CRM status that should be
+# written back via update_lead_status. Mirrors the LEAD_STATUSES constraint.
+VOICE_OUTCOME_TO_LEAD_STATUS = {
+    "booked": "qualified",
+    "interested": "contacted",
+    "callback": "contacted",
+    "not_interested": "lost",
+    "no_answer": "contacted",
+    "unknown": "contacted",
+}
+
+
+def _ensure_voice_schema():
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS voice_campaigns (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id TEXT,
+                company_name TEXT,
+                name TEXT,
+                goal TEXT,
+                script TEXT,
+                language TEXT,
+                voice TEXT,
+                telephony TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );""")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS voice_calls (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                campaign_id UUID REFERENCES voice_campaigns(id) ON DELETE CASCADE,
+                user_id TEXT,
+                company_name TEXT,
+                platform_lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
+                name TEXT,
+                business_name TEXT,
+                phone TEXT,
+                why_fit TEXT,
+                lead_source TEXT,
+                status TEXT DEFAULT 'queued',
+                outcome TEXT,
+                interest TEXT,
+                callback_at TEXT,
+                notes TEXT,
+                transcript JSONB DEFAULT '[]',
+                provider_call_id TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_voice_calls_user ON voice_calls(user_id, created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_voice_calls_campaign ON voice_calls(campaign_id)")
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f"[_ensure_voice_schema] {e}")
+
+
+def create_voice_campaign(user_id, company_name, name, goal, script,
+                          language, voice, telephony):
+    _ensure_voice_schema()
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""INSERT INTO voice_campaigns
+                         (user_id, company_name, name, goal, script,
+                          language, voice, telephony)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                       RETURNING id, user_id, company_name, name, goal, script,
+                                 language, voice, telephony, created_at""",
+                    (user_id, company_name, name, goal, script,
+                     language, voice, telephony))
+        row = cur.fetchone(); conn.commit(); return row
+    except Exception as e:
+        conn.rollback(); print(f"[create_voice_campaign] {e}"); return None
+    finally:
+        cur.close(); conn.close()
+
+
+def get_voice_campaign(campaign_id):
+    _ensure_voice_schema()
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT * FROM voice_campaigns WHERE id=%s", (campaign_id,))
+        return cur.fetchone()
+    finally:
+        cur.close(); conn.close()
+
+
+def list_voice_campaigns(user_id, limit=100):
+    _ensure_voice_schema()
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""SELECT id, name, goal, language, voice, telephony, created_at
+                       FROM voice_campaigns WHERE user_id=%s
+                       ORDER BY created_at DESC LIMIT %s""", (user_id, limit))
+        return cur.fetchall()
+    finally:
+        cur.close(); conn.close()
+
+
+def add_voice_calls(campaign_id, user_id, company_name, leads, source):
+    """Bulk-insert normalized lead dicts as queued calls. Returns persisted rows."""
+    _ensure_voice_schema()
+    if not leads:
+        return []
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        out = []
+        for l in leads:
+            phone = (l.get("phone") or "").strip()
+            if not phone:
+                continue
+            cur.execute("""INSERT INTO voice_calls
+                             (campaign_id, user_id, company_name, platform_lead_id,
+                              name, business_name, phone, why_fit, lead_source)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                           RETURNING id, campaign_id, platform_lead_id, name,
+                                     business_name, phone, why_fit, lead_source,
+                                     status, outcome, interest, callback_at,
+                                     notes, transcript, created_at""",
+                        (campaign_id, user_id, company_name, l.get("id"),
+                         l.get("name"), l.get("business_name"), phone,
+                         l.get("why_fit"), source))
+            out.append(cur.fetchone())
+        conn.commit(); return out
+    except Exception as e:
+        conn.rollback(); print(f"[add_voice_calls] {e}"); return []
+    finally:
+        cur.close(); conn.close()
+
+
+def get_voice_call(call_id):
+    _ensure_voice_schema()
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT * FROM voice_calls WHERE id=%s", (call_id,))
+        return cur.fetchone()
+    finally:
+        cur.close(); conn.close()
+
+
+def list_voice_calls(user_id, campaign_id=None, limit=500):
+    _ensure_voice_schema()
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        if campaign_id:
+            cur.execute("""SELECT id, campaign_id, platform_lead_id, name, business_name,
+                                  phone, why_fit, lead_source, status, outcome, interest,
+                                  callback_at, notes, transcript, created_at, updated_at
+                           FROM voice_calls WHERE user_id=%s AND campaign_id=%s
+                           ORDER BY created_at DESC LIMIT %s""",
+                        (user_id, campaign_id, limit))
+        else:
+            cur.execute("""SELECT id, campaign_id, platform_lead_id, name, business_name,
+                                  phone, why_fit, lead_source, status, outcome, interest,
+                                  callback_at, notes, transcript, created_at, updated_at
+                           FROM voice_calls WHERE user_id=%s
+                           ORDER BY created_at DESC LIMIT %s""", (user_id, limit))
+        return cur.fetchall()
+    finally:
+        cur.close(); conn.close()
+
+
+def update_voice_call(call_id, **fields):
+    """Patch arbitrary columns; `transcript` is JSON-encoded automatically.
+    Returns the updated row."""
+    if not fields:
+        return get_voice_call(call_id)
+    if "transcript" in fields and not isinstance(fields["transcript"], str):
+        fields["transcript"] = json.dumps(fields["transcript"])
+    _ensure_voice_schema()
+    cols = ", ".join(f"{k}=%s" for k in fields)
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute(
+            f"UPDATE voice_calls SET {cols}, updated_at=CURRENT_TIMESTAMP "
+            f"WHERE id=%s RETURNING *",
+            (*fields.values(), call_id))
+        row = cur.fetchone(); conn.commit(); return row
+    except Exception as e:
+        conn.rollback(); print(f"[update_voice_call] {e}"); return None
+    finally:
+        cur.close(); conn.close()
+
+
 def rename_company_file(file_id, company_name, new_name):
     """Sprint 55b — rename a file's display name (original_name); the stored
     file on disk is untouched, so existing links keep working."""
@@ -2167,6 +2358,18 @@ AGENT_SEED = [
                   "nav_groups": [{"label": "Lead Gen", "items": [
                       {"view": "leadgen", "label": "Lead Gen", "icon": "🎯"}]}]},
      "sort_order": 15},
+    {"slug": "voice-caller", "name": "Voice Caller",
+     "tagline": "AI voice agent calls your leads — in Indian voice.",
+     "description": "Calls the leads you generate (or upload), qualifies interest "
+                    "in a natural Indian voice, books a follow-up time, and syncs "
+                    "the outcome back to each lead's CRM status.",
+     "icon": "📞", "category": "sales", "status": "published", "publisher": "first-party",
+     "token_policy": {"chargeable": True},
+     "manifest": {"version": 1, "agent_kind": "inapp",
+                  "api_prefixes": ["/api/voice"],
+                  "nav_groups": [{"label": "Voice Caller", "items": [
+                      {"view": "voicecaller", "label": "Voice Caller", "icon": "📞"}]}]},
+     "sort_order": 17},
     {"slug": "payroll", "name": "Payroll",
      "tagline": "Salaries, PF/ESI & payslips — coming soon.",
      "description": "Run payroll: salary structures, statutory deductions (PF/ESI/PT), "
@@ -8283,7 +8486,8 @@ def get_tally_voucher(voucher_id):
                    place_of_supply, party_gstin, currency,
                    taxable_value, cgst_amount, sgst_amount, igst_amount,
                    tally_master_id, COALESCE(needs_resync, FALSE) AS needs_resync,
-                   last_edited_at, last_edited_by
+                   last_edited_at, last_edited_by,
+                   yantrai_uid
             FROM tally_vouchers WHERE id = %s
         """, (voucher_id,))
         r = cur.fetchone()

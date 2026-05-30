@@ -872,7 +872,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.19.2"  # Sprint 44.2 — every CREATE now stamps REMOTEID="<yantrai_uid>" on the <VOUCHER> tag. Tally indexes by REMOTEID, so post-hoc Alter/Delete by yantrai_uid resolves cleanly even after a server restart, a Sync from Tally, or weeks later. Alter + Delete builders prefer yantrai_uid over tally_master_id. Tally Prime's REMOTEID-based ops only work for vouchers ORIGINALLY created with that REMOTEID — by making this ours-controlled we never depend on Tally-side LASTVCHID/GUID drift again. Sprint 44.1's fallback branching (numeric LASTVCHID → <MASTERID>; GUID → REMOTEID-from-tally_master_id) stays for vouchers that pre-date 0.19.2 (legacy + Tally-originated rows).
+AGENT_VERSION = "0.19.3"  # Sprint 44.3 — Alter + Delete now do a query-then-act: before building the envelope, agent fires a TDL collection query with $Narration CONTAINS "[YAI:<uid>]" to locate the real voucher in Tally, retrieves DATE + VOUCHERTYPENAME + VOUCHERNUMBER + MASTERID, and builds the Import envelope keyed on those Tally-native identifiers. Tally honors <MASTERID>N</MASTERID> + matching DATE/VCHTYPE/VCHNUMBER for Alter (silently ignored REMOTEID was the Sprint 44.2 failure mode). Delete uses the same lookup. On lookup miss the voucher is treated as "already gone in Tally" for Delete or falls through to a fresh Create for Alter. Sprint 44.2's REMOTEID-on-Create attribute kept as harmless tagging.
 
 
 def _post_json(url, body, timeout=15.0):
@@ -1076,19 +1076,24 @@ def _build_voucher_xml(payload, company_name):
     master_id = payload.get("tally_master_id")
     masterid_node = ""
     remoteid_attr = ""
-    if _yuid:
-        # New canonical path. Every CREATE stamps REMOTEID; every ALTER targets
-        # by the same REMOTEID. No more "Voucher does not exist" or duplicate
-        # creates because we don't depend on Tally-side identifiers at all.
+    # Sprint 44.3 — preferred Alter targeting: numeric MASTERID via the
+    # <MASTERID> element (Tally honors this; REMOTEID attr is ignored as
+    # we proved in Sprint 44.2). push_voucher_to_tally's Alter pre-flight
+    # runs the [YAI:<uid>] narration lookup against Tally and populates
+    # tally_master_id with the numeric Tally MASTERID — so this branch is
+    # the one that actually fires for YantrAI-originated vouchers.
+    if action == "Alter" and master_id and str(master_id).strip().isdigit():
+        masterid_node = f"<MASTERID>{_xml_escape(str(master_id).strip())}</MASTERID>"
+    elif _yuid:
+        # Sprint 44.2 harmless tagging — on Create this stamps a REMOTEID
+        # Tally discards but is still useful as a fingerprint if we ever
+        # write a custom-TDL lookup. On Alter for vouchers that pre-date
+        # 44.3 this is also our only signal (still ignored by Tally).
         remoteid_attr = f' REMOTEID="{_xml_escape(_yuid)}"'
     elif action == "Alter" and master_id:
-        # Legacy fallback for vouchers that pre-date Sprint 44.2 (no
-        # yantrai_uid stamped on Create) — Sprint 44.1 branching.
-        mid_s = str(master_id).strip()
-        if mid_s.isdigit():
-            masterid_node = f"<MASTERID>{_xml_escape(mid_s)}</MASTERID>"
-        else:
-            remoteid_attr = f' REMOTEID="{_xml_escape(mid_s)}"'
+        # Sprint 44.1 fallback for GUID-shape master_id without a yantrai_uid.
+        # Tally still won't honor it, but it's the least-wrong option.
+        remoteid_attr = f' REMOTEID="{_xml_escape(str(master_id).strip())}"'
 
     envelope = (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -1122,8 +1127,71 @@ def _build_voucher_xml(payload, company_name):
     return envelope
 
 
+def _find_voucher_by_yantrai_uid(tally_url, yantrai_uid, timeout=10.0):
+    """Sprint 44.3 — query Tally for a voucher whose narration contains the
+    `[YAI:<uid>]` marker we stamp on every Create push. Returns a dict with
+    {date, voucher_type, voucher_number, master_id, guid} or None if no
+    matching voucher exists (likely because the user deleted it in Tally
+    manually, or it was never pushed).
+
+    Uses Tally's TDL `CONTAINS` filter on `$Narration`. Single round-trip;
+    paced by the global Tally HTTP lock like every other query."""
+    if not yantrai_uid:
+        return None
+    needle = f"[YAI:{yantrai_uid}]"
+    # CDATA-safe substring inside the formula. Tally TDL's CONTAINS is
+    # case-sensitive; our stamp is lowercase UUIDs.
+    needle_xml = needle.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    xml = (
+        '<ENVELOPE>'
+          '<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST>'
+            '<TYPE>Collection</TYPE><ID>YaiVchLookup</ID></HEADER>'
+          '<BODY><DESC>'
+            '<STATICVARIABLES>'
+              '<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>'
+              '<SVFROMDATE TYPE="Date">20000401</SVFROMDATE>'
+              '<SVTODATE TYPE="Date">20991231</SVTODATE>'
+            '</STATICVARIABLES>'
+            '<TDL><TDLMESSAGE>'
+              '<COLLECTION NAME="YaiVchLookup">'
+                '<TYPE>Voucher</TYPE>'
+                '<FETCH>Date, VoucherTypeName, VoucherNumber, MasterId, GUID, Narration</FETCH>'
+                '<FILTER>YaiNarrationFilter</FILTER>'
+              '</COLLECTION>'
+              f'<SYSTEM TYPE="Formula" NAME="YaiNarrationFilter">'
+                f'$Narration CONTAINS "{needle_xml}"'
+              f'</SYSTEM>'
+            '</TDLMESSAGE></TDL>'
+          '</DESC></BODY>'
+        '</ENVELOPE>'
+    )
+    res = query_local_tally(tally_url, xml, timeout=timeout)
+    if not res:
+        return None
+    # Parse the first real voucher block. Tally's reply also contains a stats
+    # element `<VOUCHER>16</VOUCHER>` inside CMPINFO (counting vouchers in the
+    # company) — require at least one attribute on the opening tag to skip it.
+    m = re.search(r"<VOUCHER\s+[^>]+>(.*?)</VOUCHER>", res, re.DOTALL)
+    if not m:
+        return None
+    blk = m.group(1)
+
+    def _ext(tag):
+        mm = re.search(rf"<{tag}[^>]*>(.*?)</{tag}>", blk, re.DOTALL | re.IGNORECASE)
+        return _clean(mm.group(1)) if mm else ""
+
+    return {
+        "date":           _ext("DATE"),               # "20260515"
+        "voucher_type":   _ext("VOUCHERTYPENAME"),    # "Sales"
+        "voucher_number": _ext("VOUCHERNUMBER"),      # Tally's own number (often "5", "8", ...)
+        "master_id":      _ext("MASTERID"),           # numeric "8"
+        "guid":           _ext("GUID"),               # full GUID
+    }
+
+
 def _build_voucher_delete_xml(tally_master_id, voucher_type, company_name,
-                              yantrai_uid=None):
+                              yantrai_uid=None,
+                              tally_native=None):
     """Sprint 44 / 44.1 / 44.2 — Build a Tally Import-Data envelope that
     DELETES one voucher.
 
@@ -1132,15 +1200,39 @@ def _build_voucher_delete_xml(tally_master_id, voucher_type, company_name,
     Delete by that REMOTEID. Tally always resolves it correctly because we
     set it ourselves.
 
-    Sprint 44.1 (legacy fallback): for older vouchers without a yantrai_uid
-    REMOTEID, branch by tally_master_id shape — numeric LASTVCHID →
-    <MASTERID>2</MASTERID>; UUID-shape → REMOTEID="<guid>" attribute (this
-    path silently fails for vouchers we didn't originally create with a
-    REMOTEID — there's no fix for that case from the Tally API side).
+    Sprint 44.3 (preferred): if tally_native is provided, build the delete
+    envelope keyed on Tally's own DATE + VOUCHERTYPENAME + VOUCHERNUMBER —
+    the standard TDL way to identify an existing voucher for ALTER/DELETE.
+    Tally resolves these reliably; REMOTEID supplied by us doesn't.
+
+    Sprint 44.1 (legacy fallback): for older vouchers where we haven't done
+    the lookup, branch by tally_master_id shape — numeric LASTVCHID →
+    <MASTERID>2</MASTERID>; UUID-shape → REMOTEID="<guid>" attribute.
 
     Tally responds with <DELETED>1</DELETED> on success."""
     vt_tally = (voucher_type or "Sales").strip().capitalize()
-    if yantrai_uid and str(yantrai_uid).strip():
+    if isinstance(tally_native, dict) and tally_native.get("voucher_number"):
+        # Sprint 44.3 happy path — delete by Tally-native identifiers.
+        # Tally's delete prefers REMOTEID="<full-GUID>" on the <VOUCHER> tag
+        # PLUS DATE / VOUCHERTYPENAME / VOUCHERNUMBER in the body (belt + braces).
+        nat_vt = (tally_native.get("voucher_type") or vt_tally).strip().capitalize()
+        nat_dt = (tally_native.get("date") or "").strip()
+        nat_vn = (tally_native.get("voucher_number") or "").strip()
+        nat_mid = (tally_native.get("master_id") or "").strip()
+        nat_guid = (tally_native.get("guid") or "").strip()
+        ident_attr = (f' REMOTEID="{_xml_escape(nat_guid)}"' if nat_guid else "")
+        ident_node = (
+            f"<DATE>{_xml_escape(nat_dt)}</DATE>"
+            f"<VOUCHERTYPENAME>{_xml_escape(nat_vt)}</VOUCHERTYPENAME>"
+            f"<VOUCHERNUMBER>{_xml_escape(nat_vn)}</VOUCHERNUMBER>"
+        )
+        if nat_mid.isdigit():
+            ident_node += f"<MASTERID>{_xml_escape(nat_mid)}</MASTERID>"
+        vt_tally = nat_vt
+    elif yantrai_uid and str(yantrai_uid).strip():
+        # Pre-Sprint-44.3 path kept as belt-and-braces; Tally ignores
+        # user-supplied REMOTEID so this almost never resolves, but doesn't
+        # actively harm anything if the lookup is skipped.
         ident_attr = f' REMOTEID="{_xml_escape(str(yantrai_uid).strip())}"'
         ident_node = ""
     else:
@@ -1737,9 +1829,7 @@ def push_voucher_to_tally(payload, tally_url, company_name, server_url=None,
     if not check_tally_alive(tally_url):
         return False, f"Tally Prime not reachable on {tally_url} (open Tally and try again)"
 
-    # Sprint 44 / 44.2 — Delete branch. Short-circuit everything else.
-    # Identifier preference: yantrai_uid (works for vouchers created on/after
-    # v0.19.2) → tally_master_id (legacy fallback). At least ONE must be set.
+    # Sprint 44 / 44.2 / 44.3 — Delete branch. Short-circuit everything else.
     if (payload.get("tally_action") or "").strip().capitalize() == "Delete":
         master_id = (payload.get("tally_master_id") or "").strip()
         yuid = (payload.get("yantrai_uid") or "").strip()
@@ -1748,17 +1838,70 @@ def push_voucher_to_tally(payload, tally_url, company_name, server_url=None,
                            "nor yantrai_uid. Remove from YantrAI via the YantrAI-"
                            "side delete path instead.")
         vt = payload.get("voucher_type") or payload.get("category") or "Sales"
+
+        # Sprint 44.3 — find the voucher in Tally by the [YAI:<uid>] narration
+        # marker so we can target it by its Tally-native DATE + VOUCHERTYPENAME
+        # + VOUCHERNUMBER. The legacy identifier-shape fallbacks remain inside
+        # _build_voucher_delete_xml but are nearly always wrong, so we prefer
+        # this query-then-act path whenever yuid is available.
+        tally_native = None
+        if yuid:
+            try:
+                tally_native = _find_voucher_by_yantrai_uid(tally_url, yuid)
+            except Exception as _ne:
+                print(f"[push_voucher_to_tally] yantrai_uid lookup failed: {_ne}",
+                      flush=True)
+                tally_native = None
+            if tally_native is None:
+                # No matching voucher in Tally — treat as "already gone".
+                # The server's ack handler will still soft-delete the YantrAI
+                # mirror so the row renders "Deleted (synced)" in the UI.
+                return True, "deleted"
+
         xml = _build_voucher_delete_xml(master_id, vt, company_name,
-                                         yantrai_uid=yuid or None)
+                                         yantrai_uid=yuid or None,
+                                         tally_native=tally_native)
         resp = query_local_tally(tally_url, xml, timeout=30.0)
         ok, info = _parse_tally_push_response(resp or "")
         if ok:
-            # Sprint 44 — agent /ack accepts an opaque info string; we pass
-            # "deleted" so the server's ack-handler can distinguish a delete
-            # from a normal push when picking the soft-delete branch.
             return True, "deleted"
-        ident_for_log = yuid or master_id
+        ident_for_log = (tally_native and tally_native.get("voucher_number")) \
+                         or yuid or master_id
         return False, f"Tally rejected delete of voucher {ident_for_log}: {info}"
+
+    # Sprint 44.3 — Alter pre-flight. If this is an Alter and we have a
+    # yantrai_uid, look up the real Tally voucher first and overwrite the
+    # identifier fields in the payload (date, voucher_type, voucher_number)
+    # with Tally-native values BEFORE _build_voucher_xml runs. _build_voucher_xml
+    # will then naturally emit the right DATE + VOUCHERTYPENAME + VOUCHERNUMBER
+    # in the envelope — the standard TDL way for Tally to recognise an
+    # existing voucher for ALTER.
+    if (payload.get("tally_action") or "").strip().capitalize() == "Alter" \
+            and (payload.get("yantrai_uid") or "").strip():
+        try:
+            _native = _find_voucher_by_yantrai_uid(
+                tally_url, payload["yantrai_uid"].strip())
+        except Exception as _ne:
+            print(f"[push_voucher_to_tally] alter yantrai_uid lookup failed: {_ne}",
+                  flush=True)
+            _native = None
+        if _native and _native.get("voucher_number"):
+            payload = dict(payload)  # copy — don't mutate the caller's dict
+            payload["date"] = _native.get("date") or payload.get("date")
+            payload["voucher_type"] = (
+                _native.get("voucher_type") or payload.get("voucher_type"))
+            payload["voucher_number"] = _native.get("voucher_number")
+            # Promote the numeric MASTERID so _build_voucher_xml's Sprint 44.1
+            # branching emits <MASTERID>N</MASTERID> alongside the DATE +
+            # VCHTYPE + VCHNUMBER (extra-belt-and-braces voucher identification).
+            payload["tally_master_id"] = (
+                _native.get("master_id") or payload.get("tally_master_id"))
+        elif _native is None:
+            # Voucher isn't in Tally (probably deleted manually). Fall through
+            # to a Create — the agent's next ack will stamp a fresh GUID.
+            payload = dict(payload)
+            payload["tally_action"] = "Create"
+            payload.pop("tally_master_id", None)
 
     # Sprint 43 — pre-create user-approved ledgers FIRST. The 2.5 s settle is
     # the same proven cadence Sprint 32's party auto-create has been using since

@@ -980,7 +980,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "233"
+APP_VERSION = "234"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -1546,6 +1546,271 @@ async def patch_lead(lead_id: str, request: Request):
 @app.get("/api/leads/sources")
 async def lead_sources():
     return {"status": "success", "sources": lead_registry.list_sources()}
+
+
+# ─────────────────────────────────────────────────────────────
+# Voice Caller — outbound AI voice agent that calls the leads above, runs a
+# qualify+book conversation in an Indian voice (Sarvam by default), and writes
+# the outcome back onto the same leads row. Embedded L2 (Lead Gen shape):
+# pluggable providers live in yantrai_platform/voice_caller/, schema +
+# CRUD live in db.py (voice_campaigns + voice_calls).
+# ─────────────────────────────────────────────────────────────
+from voice_caller.providers.voice import registry as voice_registry
+from voice_caller.providers.voice.base import VoiceProviderUnavailable
+from voice_caller.providers.telephony import registry as voice_tel_registry
+from voice_caller.providers.telephony.base import TelephonyUnavailable
+from voice_caller.services import conversation as voice_conv
+from voice_caller.services import lead_source as voice_lead_source
+
+VOICE_CHARGE_PER_CALL = int(os.getenv("VOICE_CHARGE_PER_CALL", "2000"))
+
+
+def _resolve_voice_user(username):
+    """Resolve `username` → uid the same way Lead Gen does. Returns (uid|None)."""
+    u = db.get_user_by_username(username) if username else None
+    return (u or {}).get("users_id")
+
+
+def _charge_voice_call(username, company_name):
+    """Flat per-completed-call credit charge. Best-effort, never breaks the
+    call flow. Mirrors _charge_ai but uses a fixed amount because the per-turn
+    LLM/TTS token counts are spread across many provider calls."""
+    try:
+        org_id, (uid, _) = _billing_org_id(username, company_name)
+        if org_id is None or VOICE_CHARGE_PER_CALL <= 0:
+            return
+        db.debit_tokens(org_id, VOICE_CHARGE_PER_CALL, action="voice_call",
+                        model="voice-caller", user_id=uid,
+                        company_name=company_name, prompt_tokens=0,
+                        output_tokens=0, total_tokens=VOICE_CHARGE_PER_CALL,
+                        agent_slug="voice-caller")
+    except Exception as e:
+        print(f"[_charge_voice_call] {e}")
+
+
+def _tts_b64(campaign, reply):
+    """Best-effort TTS of an agent line. Returns base64 wav, or None if voice
+    isn't configured (the call still works as text-only in that case)."""
+    import base64 as _b64
+    try:
+        voice = voice_registry.get_voice(campaign.get("voice"))
+        audio = voice.synthesize(reply, language=campaign.get("language"))
+        if audio:
+            return _b64.b64encode(audio).decode()
+    except VoiceProviderUnavailable:
+        return None
+    return None
+
+
+async def _finalize_voice_call(call, campaign, outcome, username, company_name):
+    """Persist outcome, write CRM status back to the originating lead, charge."""
+    status = (outcome or {}).get("status", "unknown")
+    callback = (outcome or {}).get("callback")
+    interest = (outcome or {}).get("interest")
+    notes = (f"Voice call outcome: {status}"
+             + (f"; callback {callback}" if callback else ""))
+    db.update_voice_call(call["id"], status="completed", outcome=status,
+                         interest=interest, callback_at=callback, notes=notes)
+    if call.get("platform_lead_id"):
+        uid = _resolve_voice_user(username)
+        if uid:
+            lead_status = db.VOICE_OUTCOME_TO_LEAD_STATUS.get(status, "contacted")
+            db.update_lead_status(call["platform_lead_id"], uid,
+                                  status=lead_status,
+                                  action={"voice_call": {"outcome": status,
+                                                          "interest": interest,
+                                                          "callback": callback,
+                                                          "notes": notes}})
+    _charge_voice_call(username, company_name)
+
+
+@app.get("/api/voice/info")
+async def voice_info():
+    return {"status": "success",
+            "voice_providers": voice_registry.list_voices(),
+            "telephony_providers": voice_tel_registry.list_providers(),
+            "sarvam_configured": bool(os.getenv("SARVAM_API_KEY", "").strip())}
+
+
+@app.post("/api/voice/campaigns")
+async def voice_create_campaign(request: Request):
+    body = await request.json()
+    uid = _resolve_voice_user(body.get("username"))
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unknown user")
+    camp = db.create_voice_campaign(
+        user_id=uid,
+        company_name=body.get("company_name"),
+        name=body.get("name") or "Untitled campaign",
+        goal=body.get("goal") or "Qualify the lead and book a follow-up call.",
+        script=body.get("script") or "",
+        language=body.get("language") or "en-IN",
+        voice=body.get("voice") or voice_registry.DEFAULT_VOICE,
+        telephony=body.get("telephony") or voice_tel_registry.DEFAULT_PROVIDER,
+    )
+    return {"status": "success", "campaign": camp}
+
+
+@app.get("/api/voice/campaigns")
+async def voice_list_campaigns(username: str = None):
+    uid = _resolve_voice_user(username)
+    if not uid:
+        return {"status": "success", "campaigns": []}
+    return {"status": "success", "campaigns": db.list_voice_campaigns(uid)}
+
+
+@app.get("/api/voice/campaigns/{campaign_id}")
+async def voice_get_campaign(campaign_id: str, username: str = None):
+    uid = _resolve_voice_user(username)
+    camp = db.get_voice_campaign(campaign_id)
+    if not camp:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    calls = db.list_voice_calls(uid, campaign_id=campaign_id) if uid else []
+    return {"status": "success", "campaign": camp, "calls": calls}
+
+
+@app.post("/api/voice/campaigns/{campaign_id}/leads/pull")
+async def voice_pull_leads(campaign_id: str, request: Request):
+    """Pull leads in-process from the L1 Lead Gen agent's leads table."""
+    body = await request.json()
+    uid = _resolve_voice_user(body.get("username"))
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unknown user")
+    rows = db.list_leads(uid, batch_id=body.get("batch_id"))
+    leads = voice_lead_source.from_platform_leads(rows)
+    added = db.add_voice_calls(campaign_id, uid, body.get("company_name"),
+                                leads, source="platform")
+    return {"status": "success", "added": len(added), "calls": added}
+
+
+@app.post("/api/voice/campaigns/{campaign_id}/leads/csv")
+async def voice_upload_csv(campaign_id: str,
+                            file: UploadFile = File(...),
+                            username: str = Form(None),
+                            company_name: str = Form(None)):
+    uid = _resolve_voice_user(username)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unknown user")
+    leads = voice_lead_source.from_csv(await file.read())
+    added = db.add_voice_calls(campaign_id, uid, company_name, leads, source="csv")
+    return {"status": "success", "added": len(added), "calls": added}
+
+
+@app.post("/api/voice/campaigns/{campaign_id}/leads/manual")
+async def voice_add_manual(campaign_id: str, request: Request):
+    body = await request.json()
+    uid = _resolve_voice_user(body.get("username"))
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unknown user")
+    leads = voice_lead_source.from_manual(
+        name=body.get("name"), business_name=body.get("business_name"),
+        phone=body.get("phone"), why_fit=body.get("why_fit"))
+    added = db.add_voice_calls(campaign_id, uid, body.get("company_name"),
+                                leads, source="manual")
+    if not added:
+        raise HTTPException(status_code=400, detail="Need a phone number")
+    return {"status": "success", "added": len(added), "calls": added}
+
+
+@app.get("/api/voice/calls")
+async def voice_list_calls(username: str = None, campaign_id: str = None):
+    uid = _resolve_voice_user(username)
+    if not uid:
+        return {"status": "success", "calls": []}
+    return {"status": "success",
+            "calls": db.list_voice_calls(uid, campaign_id=campaign_id)}
+
+
+@app.get("/api/voice/calls/{call_id}")
+async def voice_get_call(call_id: str):
+    call = db.get_voice_call(call_id)
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    return {"status": "success", "call": call}
+
+
+@app.post("/api/voice/calls/{call_id}/start")
+async def voice_start_call(call_id: str, request: Request):
+    body = await request.json() if request.headers.get("content-length") else {}
+    username = body.get("username")
+    company_name = body.get("company_name")
+    call = db.get_voice_call(call_id)
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    campaign = db.get_voice_campaign(call["campaign_id"])
+
+    # Place the call through the configured telephony provider.
+    provider = voice_tel_registry.get_provider(campaign.get("telephony"))
+    webhook_base = str(request.base_url).rstrip("/")
+    try:
+        provider_call_id = provider.place_call(call["phone"], call_id, webhook_base)
+    except TelephonyUnavailable as e:
+        db.update_voice_call(call_id, status="failed", notes=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Agent opens the conversation.
+    brain = voice_registry.get_brain(None)
+    try:
+        turn = voice_conv.next_turn(brain, campaign, call, [], caller_said=None)
+    except VoiceProviderUnavailable as e:
+        db.update_voice_call(call_id, status="failed", notes=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+
+    db.update_voice_call(call_id, status="in_progress",
+                          provider_call_id=provider_call_id,
+                          transcript=turn["transcript"])
+    out = {"status": "success", "reply": turn["reply"], "ended": turn["ended"],
+           "audio_b64": _tts_b64(campaign, turn["reply"]), "live": provider.is_live}
+    if turn["ended"]:
+        await _finalize_voice_call(db.get_voice_call(call_id), campaign,
+                                    turn["outcome"], username, company_name)
+        out["outcome"] = turn["outcome"]
+    return out
+
+
+@app.post("/api/voice/calls/{call_id}/say")
+async def voice_say(call_id: str, request: Request):
+    """Caller utterance in (text for simulation, or audio_b64 for real)
+    → agent's next line out. Finalises when the brain emits an outcome marker."""
+    import base64 as _b64
+    body = await request.json()
+    username = body.get("username")
+    company_name = body.get("company_name")
+    call = db.get_voice_call(call_id)
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    if call["status"] == "completed":
+        raise HTTPException(status_code=400, detail="Call already completed")
+    campaign = db.get_voice_campaign(call["campaign_id"])
+
+    caller_said = (body.get("text") or "").strip()
+    if not caller_said and body.get("audio_b64"):
+        try:
+            voice = voice_registry.get_voice(campaign.get("voice"))
+            caller_said = voice.transcribe(_b64.b64decode(body["audio_b64"]),
+                                           language=campaign.get("language"))
+        except VoiceProviderUnavailable as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    if not caller_said:
+        raise HTTPException(status_code=400, detail="Provide caller 'text' or 'audio_b64'.")
+
+    brain = voice_registry.get_brain(None)
+    try:
+        transcript = call.get("transcript") or []
+        if isinstance(transcript, str):
+            transcript = json.loads(transcript)
+        turn = voice_conv.next_turn(brain, campaign, call, transcript, caller_said)
+    except VoiceProviderUnavailable as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    db.update_voice_call(call_id, transcript=turn["transcript"])
+    out = {"status": "success", "reply": turn["reply"], "ended": turn["ended"],
+           "audio_b64": _tts_b64(campaign, turn["reply"])}
+    if turn["ended"]:
+        await _finalize_voice_call(db.get_voice_call(call_id), campaign,
+                                    turn["outcome"], username, company_name)
+        out["outcome"] = turn["outcome"]
+    return out
 
 
 def _ai_chat_title(text):
