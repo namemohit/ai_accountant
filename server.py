@@ -424,6 +424,74 @@ async def tally_queue_fail(outbox_id: str, payload: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Sprint 43 — Per-voucher ledger-create approval flow ──────────────────────
+# Agent: when push pre-flight finds Tally is missing ledgers, instead of
+# silently auto-creating (Sprint 32 behaviour) it builds a bundle of proposed
+# ledgers and POSTs to /needs_approval here. The voucher row flips to
+# 'pending_approval'. The UI shows a banner with the bundle; user clicks
+# Approve or Reject; the row state is updated accordingly and the agent
+# either creates the approved ones + pushes, or skips entirely.
+
+@app.post("/api/tally/queue/{outbox_id}/needs_approval")
+async def tally_queue_needs_approval(outbox_id: str, payload: dict):
+    """Agent → server. Body: {bundle: [{name, kind, group, tax_head, gstin, blocks_voucher}, ...],
+    session_token?: str}. Flips the outbox row to 'pending_approval' and stores
+    the bundle. The agent should then move on to the next row this poll."""
+    try:
+        st = (payload or {}).get("session_token")
+        if st and not validate_agent_session(st):
+            raise HTTPException(status_code=401, detail="Session expired.")
+        bundle = (payload or {}).get("bundle") or []
+        if not isinstance(bundle, list):
+            raise HTTPException(status_code=400, detail="bundle must be a list")
+        row = db.mark_outbox_needs_approval(outbox_id, bundle)
+        if not row:
+            raise HTTPException(status_code=404, detail="Outbox row not found")
+        return {"status": "success", "id": str(row["id"]), "state": row["state"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/tally/queue/{outbox_id}/approve_ledgers")
+async def tally_queue_approve_ledgers(outbox_id: str, payload: dict):
+    """UI → server. Body: {approved: [name1, name2, ...]}. Flips the outbox
+    row back to 'pending' and stores the approved subset; the agent's next
+    poll will create exactly these ledgers + push the voucher."""
+    try:
+        approved = (payload or {}).get("approved") or []
+        if not isinstance(approved, list):
+            raise HTTPException(status_code=400, detail="approved must be a list")
+        # Strip empty / non-string entries defensively.
+        approved = [s.strip() for s in approved if isinstance(s, str) and s.strip()]
+        row = db.approve_outbox_ledgers(outbox_id, approved)
+        if not row:
+            raise HTTPException(status_code=404, detail=(
+                "Outbox row not found OR not in 'pending_approval' state"))
+        return {"status": "success", "id": str(row["id"]), "state": row["state"],
+                "approved": approved}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/tally/queue/{outbox_id}/reject_ledgers")
+async def tally_queue_reject_ledgers(outbox_id: str, payload: dict):
+    """UI → server. Marks the outbox row 'rejected'. The voucher stays in
+    YantrAI books but is NOT pushed to Tally."""
+    try:
+        row = db.reject_outbox_ledgers(outbox_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Outbox row not found")
+        return {"status": "success", "id": str(row["id"]), "state": row["state"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/tally/heartbeat")
 async def tally_heartbeat(payload: dict):
     """Bridge agent calls this every ~30s to mark itself as alive."""
@@ -453,7 +521,10 @@ async def tally_status_endpoint(company_name: str):
 
 @app.get("/api/tally/outbox/{invoice_id}")
 async def tally_outbox_invoice_status(invoice_id: str):
-    """UI polls this for the latest state of a specific invoice's push."""
+    """UI polls this for the latest state of a specific invoice's push.
+    Sprint 43 — also returns the proposed `needs_approval` bundle when the
+    row is 'pending_approval', so the Vouchers row can render an inline
+    approve/reject banner."""
     try:
         row = db.tally_outbox_status_for_invoice(invoice_id)
         if not row:
@@ -461,6 +532,8 @@ async def tally_outbox_invoice_status(invoice_id: str):
         # Stringify for JSON
         for k in ("id","enqueued_at","pushed_at","updated_at"):
             if row.get(k) is not None: row[k] = str(row[k])
+        # needs_approval / approved_ledgers come back as Python dict/list from
+        # psycopg2 (JSONB column) — pass through verbatim.
         return {"status": "success", "data": row}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -864,7 +937,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "231"
+APP_VERSION = "232"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -2677,6 +2750,12 @@ async def push_to_tally(data: dict, background_tasks: BackgroundTasks = None):
         # usage, so stale simulator stubs lose) and inject it into the push payload. If a
         # head has NO ledger at all in their chart, warn BEFORE queuing (+ log a 'create
         # ledger' to-do) instead of letting the push fail later at Sync time.
+        # Sprint 43 — INSTEAD of the old hard-stop "missing_gst_ledger" warn that
+        # forced the user to create ledgers manually before queueing, we DEFAULT
+        # the GST ledger names to canonical strings and enqueue anyway. The agent
+        # will live-pre-flight against Tally and, if any of these don't exist yet,
+        # surface a per-voucher approval bundle ("Tally needs N new ledgers to
+        # push this voucher — approve?"). The user opts in before any write.
         try:
             _vt_raw = (data.get("voucher_type") or data.get("category") or "Sales").strip()
             _vt = {"Sale": "Sales", "Sales": "Sales", "Purchase": "Purchase"}.get(
@@ -2686,36 +2765,26 @@ async def push_to_tally(data: dict, background_tasks: BackgroundTasks = None):
                 _sgst = float(data.get("sgst_amount") or 0)
                 _igst = float(data.get("igst_amount") or 0)
                 if _cgst > 0 or _sgst > 0 or _igst > 0:
-                    _gl = db.resolve_gst_ledgers(data.get("company_name"))
+                    _gl = {}
+                    try:
+                        _gl = db.resolve_gst_ledgers(data.get("company_name")) or {}
+                    except Exception:
+                        _gl = {}
                     _suffix = "in" if _vt == "Purchase" else "out"
                     _io = "Input" if _vt == "Purchase" else "Output"
-                    _missing = []
+                    # Canonical defaults are the SAME names the agent's system-
+                    # ledger classifier recognises. Real customer-specific names
+                    # take precedence if their chart already has them.
+                    _defaults = {
+                        "igst": f"IGST {_io}",
+                        "cgst": f"CGST {_io}",
+                        "sgst": f"SGST {_io}",
+                    }
                     for _head, _amt in (("igst", _igst), ("cgst", _cgst), ("sgst", _sgst)):
                         if _amt <= 0:
                             continue
-                        _name = _gl.get(f"{_head}_{_suffix}")
-                        if _name:
-                            data[f"{_head}_ledger"] = _name      # agent uses this verbatim
-                        else:
-                            _missing.append(_head.upper())
-                    if _missing and not data.get("force"):
-                        # Don't silently queue a push Tally will reject. Tell the user to
-                        # create the ledger first (same to-do flow as a missing system ledger).
-                        for _h in _missing:
-                            try:
-                                db.add_tally_cleanup(
-                                    company_name=data.get("company_name"),
-                                    voucher_number=(data.get("invoice_number")
-                                                    or data.get("voucher_number") or ""),
-                                    kind="create_ledger",
-                                    ledger_name=f"{_h} {_io}")
-                            except Exception as _ce:
-                                print(f"[push_to_tally] create_ledger to-do failed: {_ce}", flush=True)
-                        return {"status": "warn", "warn": "missing_gst_ledger",
-                                "missing": _missing, "voucher_type": _vt, "io": _io,
-                                "message": (f"Your Tally chart has no {_io} ledger for "
-                                            f"{', '.join(_missing)}. Create it in Tally Prime, "
-                                            f"then Sync this voucher again.")}
+                        _name = _gl.get(f"{_head}_{_suffix}") or _defaults[_head]
+                        data[f"{_head}_ledger"] = _name      # agent uses this verbatim
         except Exception as _ge:
             print(f"[push_to_tally] gst-ledger resolve skipped: {_ge}", flush=True)
 

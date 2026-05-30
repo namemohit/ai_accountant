@@ -16001,8 +16001,117 @@
         setInterval(refreshTallyBridgeStatus, 15000);
         document.addEventListener('visibilitychange', () => { if (!document.hidden) { try { refreshTallyBridgeStatus(); } catch (_) {} } });
 
+        // ── Sprint 43 — render the per-voucher approval banner ────────────────
+        // When the outbox row is 'pending_approval', the agent has detected that
+        // Tally is missing one or more ledgers and is asking the user whether to
+        // create them. We render the bundle inline above the badge with a small
+        // table + Reject/Approve buttons.
+        window.renderTallyApprovalBanner = function(outboxData, badgeEl) {
+            const oid = outboxData.id;
+            const bundle = outboxData.needs_approval || [];
+            if (!Array.isArray(bundle) || !bundle.length) return;
+            // Mount banner just BEFORE the badge inside its parent.
+            const host = badgeEl.parentElement || badgeEl;
+            let banner = host.querySelector(`[data-tally-approval="${oid}"]`);
+            if (banner) return;   // already rendered for this row
+            banner = document.createElement('div');
+            banner.setAttribute('data-tally-approval', oid);
+            const esc = (s) => String(s == null ? '' : s).replace(/[<>&"]/g, c =>
+                ({ '<':'&lt;', '>':'&gt;', '&':'&amp;', '"':'&quot;' }[c]));
+            const rowsHtml = bundle.map((e, i) => {
+                const sub = [e.group || '', e.tax_head ? ' · ' + e.tax_head : '',
+                              e.gstin ? ' · GSTIN ' + e.gstin : ''].join('');
+                return `<tr>
+                    <td style="padding:5px 8px;"><input type="checkbox" class="tac-bundle-cb"
+                          data-name="${esc(e.name)}" checked
+                          style="cursor:pointer; transform:scale(1.1);"></td>
+                    <td style="padding:5px 8px; color:#f5f1ec;">${esc(e.name)}</td>
+                    <td style="padding:5px 8px; color:#94a3b8; font-size:0.78rem;">${esc(sub)}</td>
+                </tr>`;
+            }).join('');
+            banner.innerHTML = `
+              <div style="background:#1e1b18; border:1px solid #f59e0b; border-radius:8px;
+                          padding:12px 14px; margin:8px 0; font-size:0.85rem;">
+                <div style="color:#fbbf24; font-weight:600; margin-bottom:6px;">
+                  ⚠ Tally needs ${bundle.length} new ledger(s) to push this voucher
+                </div>
+                <div style="color:#94a3b8; font-size:0.78rem; margin-bottom:8px;">
+                  Untick anything you'd rather create manually in Tally. Approved
+                  ledgers will be created in Tally Prime before the voucher is pushed.
+                </div>
+                <table style="width:100%; border-collapse:collapse; margin-bottom:10px;">
+                  <thead>
+                    <tr style="border-bottom:1px solid #3a3530; color:#64748b; font-size:0.72rem; text-align:left;">
+                      <th style="padding:4px 8px; width:32px;"></th>
+                      <th style="padding:4px 8px;">Ledger name</th>
+                      <th style="padding:4px 8px;">Where in Tally</th>
+                    </tr>
+                  </thead>
+                  <tbody>${rowsHtml}</tbody>
+                </table>
+                <div style="display:flex; gap:8px; justify-content:flex-end;">
+                  <button class="tac-reject-btn" data-oid="${oid}"
+                          style="background:transparent; color:#94a3b8;
+                                 border:1px solid #3a3530; padding:6px 14px;
+                                 border-radius:5px; cursor:pointer; font-size:0.82rem;">
+                    Reject
+                  </button>
+                  <button class="tac-approve-btn" data-oid="${oid}"
+                          style="background:linear-gradient(135deg, #da7756 0%, #e8a87c 100%);
+                                 color:#1e1b18; font-weight:700; padding:6px 16px;
+                                 border-radius:5px; border:none; cursor:pointer; font-size:0.82rem;">
+                    Approve & create selected
+                  </button>
+                </div>
+              </div>`;
+            // Insert before the badge.
+            host.insertBefore(banner, badgeEl);
+            // Wire button handlers.
+            banner.querySelector('.tac-approve-btn').addEventListener('click', async (e) => {
+                const btn = e.currentTarget;
+                btn.disabled = true; btn.innerText = 'Sending…';
+                const approved = Array.from(banner.querySelectorAll('.tac-bundle-cb'))
+                    .filter(cb => cb.checked).map(cb => cb.getAttribute('data-name'));
+                try {
+                    const res = await fetch(`${API}/api/tally/queue/${encodeURIComponent(oid)}/approve_ledgers`,
+                        { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ approved }) });
+                    const d = await res.json().catch(() => ({}));
+                    if (!res.ok || d.status !== 'success') throw new Error(d.detail || d.message || 'approve failed');
+                    banner.innerHTML = `<div style="background:#1e1b18; border:1px solid #38bdf8;
+                          color:#7dd3fc; padding:10px 14px; border-radius:6px; font-size:0.84rem;">
+                          ⏳ Queued. The agent will create ${approved.length} ledger(s)
+                          in Tally Prime and push this voucher on the next poll (within ~15 s).
+                        </div>`;
+                } catch (err) {
+                    btn.disabled = false; btn.innerText = 'Approve & create selected';
+                    alert(err.message || 'Approve failed');
+                }
+            });
+            banner.querySelector('.tac-reject-btn').addEventListener('click', async (e) => {
+                if (!confirm('Reject this voucher? It will stay in YantrAI books but won\'t be pushed to Tally.')) return;
+                const btn = e.currentTarget;
+                btn.disabled = true;
+                try {
+                    const res = await fetch(`${API}/api/tally/queue/${encodeURIComponent(oid)}/reject_ledgers`,
+                        { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({}) });
+                    const d = await res.json().catch(() => ({}));
+                    if (!res.ok || d.status !== 'success') throw new Error(d.detail || d.message || 'reject failed');
+                    banner.innerHTML = `<div style="background:#1e1b18; border:1px solid #94a3b8;
+                          color:#94a3b8; padding:10px 14px; border-radius:6px; font-size:0.84rem;">
+                          ⊘ Rejected. The voucher stays in YantrAI but is not pushed to Tally.
+                        </div>`;
+                } catch (err) {
+                    btn.disabled = false;
+                    alert(err.message || 'Reject failed');
+                }
+            });
+        };
+
         // Poll outbox state for one invoice and update the badge through transitions.
-        // States: pending → pushing → pushed (✅) | error (❌). Gives up after 120s.
+        // States: pending → pushing → pushed (✅) | error (❌) | pending_approval (⚠) | rejected (⊘).
+        // Gives up after 120s.
         window.pollTallyOutboxStatus = function(invoiceId, badgeEl) {
             if (!invoiceId || !badgeEl) return;
             let elapsed = 0;
@@ -16027,6 +16136,22 @@
                             if (d.state === 'pushing') {
                                 badgeEl.innerHTML = `<i class="fas fa-sync fa-spin" style="color:#38bdf8; font-size:0.95rem;"></i> Pushing to Tally…`;
                                 badgeEl.style.color = '#38bdf8';
+                            }
+                            if (d.state === 'pending_approval') {
+                                // Sprint 43 — render the inline approval banner with
+                                // the proposed ledger bundle + Approve/Reject buttons.
+                                badgeEl.innerHTML = `<i class="fas fa-clock" style="color:#f59e0b; font-size:0.95rem;"></i> Waiting on your approval (see banner above)`;
+                                badgeEl.style.color = '#f59e0b';
+                                if (typeof window.renderTallyApprovalBanner === 'function') {
+                                    try { window.renderTallyApprovalBanner(d, badgeEl); } catch (_) {}
+                                }
+                                // Continue polling — when the user approves, the state flips back
+                                // to 'pending' → 'pushing' → 'pushed' and we'll update again.
+                            }
+                            if (d.state === 'rejected') {
+                                badgeEl.innerHTML = `<i class="fas fa-ban" style="color:#94a3b8; font-size:0.95rem;"></i> Rejected · not pushed to Tally`;
+                                badgeEl.style.color = '#94a3b8';
+                                return;
                             }
                             // 'pending' or 'cancelled' → keep current text
                         }

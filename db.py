@@ -5886,6 +5886,119 @@ def bulk_accept_master_ai_suggestions(company_name, master_type=None, gap_type=N
 # SPRINT 28 — Tally outbox: real two-way sync contract with bridge agent
 # ════════════════════════════════════════════════════════════════════
 
+_TALLY_OUTBOX_APPROVAL_READY = False
+
+
+def _ensure_tally_outbox_approval(cur):
+    """Sprint 43 — per-voucher ledger-create approval flow. Idempotent ALTERs.
+
+    Adds two JSONB columns to tally_outbox:
+      • needs_approval     — bundle of ledgers the agent proposes to create
+                              (set by agent when state -> 'pending_approval').
+      • approved_ledgers   — subset the user OKed (set by UI when state goes
+                              back to 'pending'). Agent reads this on the
+                              next poll and creates exactly these before
+                              pushing the voucher.
+
+    Also enables two new states for tally_outbox.state:
+      • 'pending_approval' — waiting on the user to approve / reject.
+      • 'rejected'         — user said no; voucher stays in YantrAI but
+                              is NOT pushed to Tally.
+    (state is a free-text TEXT column, so no enum migration needed.)
+    """
+    global _TALLY_OUTBOX_APPROVAL_READY
+    if _TALLY_OUTBOX_APPROVAL_READY:
+        return
+    cur.execute("ALTER TABLE tally_outbox "
+                "ADD COLUMN IF NOT EXISTS needs_approval JSONB")
+    cur.execute("ALTER TABLE tally_outbox "
+                "ADD COLUMN IF NOT EXISTS approved_ledgers JSONB")
+    _TALLY_OUTBOX_APPROVAL_READY = True
+
+
+def mark_outbox_needs_approval(outbox_id, bundle):
+    """Agent calls this when it can't push because Tally is missing one or more
+    ledgers. Flips the row to 'pending_approval' and stores the proposed
+    create-bundle so the UI can render it for user opt-in."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_tally_outbox_approval(cur)
+        cur.execute("""
+            UPDATE tally_outbox
+            SET state = 'pending_approval',
+                needs_approval = %s::jsonb,
+                approved_ledgers = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            RETURNING id, state
+        """, (json.dumps(bundle or []), outbox_id))
+        row = cur.fetchone()
+        conn.commit()
+        return row
+    finally:
+        cur.close(); conn.close()
+
+
+def approve_outbox_ledgers(outbox_id, approved_names):
+    """UI calls this when the user clicks Approve. Flips the row back to
+    'pending' and stores the approved subset so the agent's next poll
+    can create exactly those, then push the voucher."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_tally_outbox_approval(cur)
+        cur.execute("""
+            UPDATE tally_outbox
+            SET state = 'pending',
+                approved_ledgers = %s::jsonb,
+                updated_at = CURRENT_TIMESTAMP,
+                attempts = 0          -- reset so the row is claimable again
+            WHERE id = %s
+              AND state = 'pending_approval'
+            RETURNING id, state
+        """, (json.dumps(list(approved_names or [])), outbox_id))
+        row = cur.fetchone()
+        conn.commit()
+        return row
+    finally:
+        cur.close(); conn.close()
+
+
+def reject_outbox_ledgers(outbox_id):
+    """UI calls this when the user clicks Reject. The voucher stays in
+    YantrAI books but won't be pushed to Tally."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_tally_outbox_approval(cur)
+        cur.execute("""
+            UPDATE tally_outbox
+            SET state = 'rejected', updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+              AND state IN ('pending_approval', 'pending')
+            RETURNING id, state
+        """, (outbox_id,))
+        row = cur.fetchone()
+        conn.commit()
+        return row
+    finally:
+        cur.close(); conn.close()
+
+
+def get_outbox_approval_state(outbox_id):
+    """Helper: read an outbox row's approval-related fields (used by the
+    UI to render the banner)."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_tally_outbox_approval(cur)
+        cur.execute("""
+            SELECT id, state, needs_approval, approved_ledgers, last_error
+            FROM tally_outbox WHERE id = %s
+        """, (outbox_id,))
+        row = cur.fetchone()
+        return row
+    finally:
+        cur.close(); conn.close()
+
+
 def enqueue_tally_push(payload, invoice_id=None, voucher_id=None,
                        company_name=None, enqueued_by=None):
     """Append a row to tally_outbox in state='pending'. The bridge agent
@@ -5920,6 +6033,8 @@ def enqueue_tally_push(payload, invoice_id=None, voucher_id=None,
         print(f"[enqueue_tally_push] gst-ledger resolve skipped: {_ge}")
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
+        # Sprint 43 — ensure approval columns exist before any insert/update.
+        _ensure_tally_outbox_approval(cur)
         # Idempotency: if a non-terminal push for this invoice is already queued (pending or
         # pushing), UPDATE it in place instead of inserting a second one. This prevents a
         # duplicate Tally voucher when the user clicks Confirm & Sync again before the first
@@ -5928,7 +6043,7 @@ def enqueue_tally_push(payload, invoice_id=None, voucher_id=None,
         if invoice_id:
             cur.execute("""SELECT id FROM tally_outbox
                            WHERE company_name = %s AND invoice_id = %s
-                             AND state IN ('pending','pushing')
+                             AND state IN ('pending','pushing','pending_approval')
                            ORDER BY enqueued_at DESC LIMIT 1""", (company_name, invoice_id))
             ex = cur.fetchone()
             if ex:
@@ -5953,9 +6068,16 @@ def enqueue_tally_push(payload, invoice_id=None, voucher_id=None,
 
 def claim_tally_outbox(company_name, limit=10, agent_id=None):
     """Bridge agent calls this to atomically grab the next N pending rows
-    and flip them to state='pushing'. Returns the payloads."""
+    and flip them to state='pushing'. Returns the payloads.
+
+    Sprint 43 — `approved_ledgers` is exposed alongside the payload so the
+    agent knows on this poll whether the user has already approved a
+    ledger-create bundle for this voucher. When set, the agent creates the
+    listed ledgers (via _build_ledger_master_xml / _build_system_ledger_xml)
+    before pushing the voucher in the same iteration."""
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
+        _ensure_tally_outbox_approval(cur)
         cur.execute("""
             UPDATE tally_outbox
             SET state = 'pushing', attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP
@@ -5973,7 +6095,8 @@ def claim_tally_outbox(company_name, limit=10, agent_id=None):
                 LIMIT %s
                 FOR UPDATE SKIP LOCKED
             )
-            RETURNING id, invoice_id, voucher_id, payload, enqueued_at, attempts
+            RETURNING id, invoice_id, voucher_id, payload, enqueued_at, attempts,
+                      approved_ledgers
         """, (company_name, limit))
         rows = cur.fetchall()
         conn.commit()
@@ -6192,12 +6315,16 @@ def upsert_tally_heartbeat(company_name, agent_version=None, ip=None):
 
 
 def tally_outbox_status_for_invoice(invoice_id):
-    """For the UI to poll: returns the latest outbox state for one invoice."""
+    """For the UI to poll: returns the latest outbox state for one invoice.
+    Sprint 43 — also returns needs_approval (the proposed ledger bundle) +
+    approved_ledgers so the Vouchers row can render the approval banner."""
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
+        _ensure_tally_outbox_approval(cur)
         cur.execute("""
             SELECT id, state, attempts, last_error, tally_voucher_guid,
-                   enqueued_at, pushed_at, updated_at
+                   enqueued_at, pushed_at, updated_at,
+                   needs_approval, approved_ledgers
             FROM tally_outbox
             WHERE invoice_id = %s
             ORDER BY enqueued_at DESC LIMIT 1

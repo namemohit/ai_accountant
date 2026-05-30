@@ -872,7 +872,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.17.0"  # + create_company command (Sprint 42): build_create_company_xml() + parse_create_company_response() + new _tunnel_loop branch — one-shot Import Data envelope to create a fresh Tally Prime company from the YantrAI "Agent" sandbox UI. Runs under _sync_in_progress so the outbox pusher pauses for the heavy write. No outbox involvement.
+AGENT_VERSION = "0.18.0"  # + propose-then-create ledger flow (Sprint 43): every Tally master write is now gated on per-voucher user approval. _build_system_ledger_xml() handles GST output/input + Sales/Purchase + Round Off; _classify_missing_ledger() whitelists what we know how to create; _propose_create_bundle() builds the UI-facing approval JSON; outbox_poll_loop forwards NEEDS_APPROVAL bundles to /needs_approval, treats it as a soft ack (NOT a failure), and on the next poll picks the row back up with approved_ledgers populated to actually create + push. Removes the silent Sprint 32 party auto-create — same envelope, but now opt-in.
 
 
 def _post_json(url, body, timeout=15.0):
@@ -1148,6 +1148,223 @@ def _build_ledger_master_xml(name, parent_group, company_name, gstin=None, pan=N
     )
 
 
+# ── Sprint 43 — system ledger XML builder + classification ──────────────────
+# Used by the "propose-then-create" flow: the agent never silently creates
+# Tally masters. Instead it builds an approval bundle, posts it to the server,
+# the UI shows the user, and ONLY on approval do these builders run.
+
+def _build_system_ledger_xml(name, kind, company_name):
+    """Build a Tally Import-Data envelope that CREATES one system ledger
+    (GST output/input, Sales/Purchase Account, or Round Off). Reuses the
+    same proven IMPORTDATA wrapper as `_build_ledger_master_xml` — only the
+    inner classification fields differ per kind.
+
+    `kind` is one of:
+       cgst_out, sgst_out, igst_out    → Duties & Taxes, Central|State|Integrated Tax
+       cgst_in,  sgst_in,  igst_in     → Duties & Taxes, Central|State|Integrated Tax
+       sales_account                   → Sales Accounts (revenue)
+       purchase_account                → Purchase Accounts (expense)
+       round_off                       → Indirect Expenses
+    """
+    name_x = _xml_escape(name)
+    company_x = _xml_escape(company_name)
+
+    # Map kind → (parent_group, tax_head, is_deemed_positive, is_billwise)
+    GST_HEAD = {
+        "cgst_out": "Central Tax", "cgst_in": "Central Tax",
+        "sgst_out": "State Tax",   "sgst_in": "State Tax",
+        "igst_out": "Integrated Tax", "igst_in": "Integrated Tax",
+    }
+    KIND_META = {
+        "cgst_out": ("Duties & Taxes", "No",  "No"),
+        "sgst_out": ("Duties & Taxes", "No",  "No"),
+        "igst_out": ("Duties & Taxes", "No",  "No"),
+        "cgst_in":  ("Duties & Taxes", "Yes", "No"),
+        "sgst_in":  ("Duties & Taxes", "Yes", "No"),
+        "igst_in":  ("Duties & Taxes", "Yes", "No"),
+        "sales_account":    ("Sales Accounts",     "No",  "No"),
+        "purchase_account": ("Purchase Accounts",  "Yes", "No"),
+        "round_off":        ("Indirect Expenses",  "No",  "No"),
+    }
+    parent, deemed_pos, billwise = KIND_META.get(kind, ("Sundry Debtors", "Yes", "Yes"))
+    parent_x = _xml_escape(parent)
+
+    # GST-specific classification: only for cgst_*/sgst_*/igst_*
+    gst_nodes = ""
+    if kind in GST_HEAD:
+        head = GST_HEAD[kind]
+        gst_nodes = (
+            "<TAXTYPE>GST</TAXTYPE>"
+            f"<GSTDUTYHEAD>{head}</GSTDUTYHEAD>"
+            "<ROUNDINGMETHOD/>"
+        )
+
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<ENVELOPE>'
+          '<HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>'
+          '<BODY><IMPORTDATA>'
+            '<REQUESTDESC>'
+              '<REPORTNAME>All Masters</REPORTNAME>'
+              '<STATICVARIABLES>'
+                f'<SVCURRENTCOMPANY>{company_x}</SVCURRENTCOMPANY>'
+              '</STATICVARIABLES>'
+            '</REQUESTDESC>'
+            '<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">'
+              f'<LEDGER NAME="{name_x}" ACTION="Create">'
+                f'<NAME.LIST><NAME>{name_x}</NAME></NAME.LIST>'
+                f'<PARENT>{parent_x}</PARENT>'
+                f'{gst_nodes}'
+                f'<ISDEEMEDPOSITIVE>{deemed_pos}</ISDEEMEDPOSITIVE>'
+                f'<ISBILLWISEON>{billwise}</ISBILLWISEON>'
+                '<ISCOSTCENTRESON>No</ISCOSTCENTRESON>'
+              '</LEDGER>'
+            '</TALLYMESSAGE></REQUESTDATA>'
+          '</IMPORTDATA></BODY>'
+        '</ENVELOPE>'
+    )
+
+
+def _classify_missing_ledger(name):
+    """Map a missing ledger name → a 'kind' string the system-ledger builder
+    understands, or None when the agent can't safely classify it. Conservative
+    whitelist; anything unrecognised goes to the UI bundle as kind='unknown'
+    so the user is told to create it manually."""
+    if not name:
+        return None
+    n = (name or "").strip().lower()
+    # GST tax ledgers — require an explicit Output/Input cue.
+    is_out = any(w in n for w in (" output", " out", "output", "payable"))
+    is_in  = any(w in n for w in (" input",  " in",  "input",  "receivable"))
+    if "cgst" in n:
+        if is_out: return "cgst_out"
+        if is_in:  return "cgst_in"
+    if "sgst" in n:
+        if is_out: return "sgst_out"
+        if is_in:  return "sgst_in"
+    if "igst" in n:
+        if is_out: return "igst_out"
+        if is_in:  return "igst_in"
+    # Revenue / cost heads
+    if re.search(r"\bsales\b.*\baccount\b|\bsales a/c\b", n):
+        return "sales_account"
+    if re.search(r"\bpurchase\b.*\baccount\b|\bpurchase a/c\b", n):
+        return "purchase_account"
+    if re.search(r"round[\s-]*off|rounding", n):
+        return "round_off"
+    return None  # caller treats as party (Sundry Debtors/Creditors) or 'unknown'
+
+
+def _propose_create_bundle(missing_names, payload):
+    """Build the JSON bundle the agent POSTs to /needs_approval.
+    Each entry tells the UI exactly what would be created in Tally.
+
+    Bundle entry shape:
+       {name, kind, group, tax_head, gstin, blocks_voucher}
+    """
+    vt = (payload.get("voucher_type") or payload.get("category") or "Sales").strip()
+    is_purchase = vt.lower() in ("purchase", "payment")
+    voucher_num = (payload.get("invoice_number") or payload.get("voucher_number") or "").strip()
+    party_gstin = (payload.get("billed_to_party_gstin") or payload.get("billing_party_gstin")
+                   or payload.get("party_gstin") or "")
+
+    bundle = []
+    for name in missing_names:
+        kind = _classify_missing_ledger(name)
+        if kind:
+            # Mirror the constants in _build_system_ledger_xml for the UI's display.
+            group_map = {
+                "cgst_out": "Duties & Taxes", "cgst_in": "Duties & Taxes",
+                "sgst_out": "Duties & Taxes", "sgst_in": "Duties & Taxes",
+                "igst_out": "Duties & Taxes", "igst_in": "Duties & Taxes",
+                "sales_account":    "Sales Accounts",
+                "purchase_account": "Purchase Accounts",
+                "round_off":        "Indirect Expenses",
+            }
+            head_map = {
+                "cgst_out": "Central Tax", "cgst_in": "Central Tax",
+                "sgst_out": "State Tax",   "sgst_in": "State Tax",
+                "igst_out": "Integrated Tax", "igst_in": "Integrated Tax",
+            }
+            bundle.append({
+                "name": name, "kind": kind,
+                "group": group_map.get(kind, ""),
+                "tax_head": head_map.get(kind, ""),
+                "gstin": "",
+                "blocks_voucher": voucher_num,
+            })
+            continue
+        # Party — Sundry Debtors for Sales/Receipt, Sundry Creditors otherwise.
+        party_group = "Sundry Creditors" if is_purchase else "Sundry Debtors"
+        # Attach the invoice's party GSTIN if this missing name matches the
+        # billed-to/billing party (one of the two extremes).
+        party_name = (payload.get("billed_to_party_name") or payload.get("billing_party_name")
+                      or payload.get("party_name") or payload.get("party") or "")
+        gstin_for_this = party_gstin if (name.strip().lower() == party_name.strip().lower()) else ""
+        bundle.append({
+            "name": name, "kind": "party",
+            "group": party_group, "tax_head": "",
+            "gstin": gstin_for_this,
+            "blocks_voucher": voucher_num,
+        })
+    return bundle
+
+
+def _create_one_approved_ledger(entry_or_name, payload, tally_url, company_name):
+    """Create ONE ledger in Tally based on an approved-bundle entry.
+
+    `entry_or_name` is either a dict from the bundle (preferred — has kind +
+    group + gstin already classified) OR a bare string. We re-classify the
+    string case defensively, so the function works whether the UI sent us the
+    full bundle entries or just the names.
+
+    Returns (ok: bool, info: str). Treats "ledger already exists" as success
+    (idempotency: a second poll after an approval shouldn't fail just because
+    the create has already landed)."""
+    if isinstance(entry_or_name, dict):
+        name = (entry_or_name.get("name") or "").strip()
+        kind = (entry_or_name.get("kind") or "").strip()
+        bundle_gstin = (entry_or_name.get("gstin") or "").strip()
+    else:
+        name = (entry_or_name or "").strip()
+        kind = _classify_missing_ledger(name) or "party"
+        bundle_gstin = ""
+    if not name:
+        return False, "empty ledger name"
+
+    # Idempotency: if Tally already has this ledger, skip the CREATE (Tally
+    # returns 'already exists' for a duplicate ACTION="Create"). We check the
+    # live chart cheaply — fetch_local_ledgers is one HTTP call, paced by the
+    # global lock, vs. another import write that would only fail anyway.
+    try:
+        live = fetch_local_ledgers(tally_url) or []
+        if name.strip().lower() in {n.strip().lower() for n in live}:
+            return True, f"already exists ({name})"
+    except Exception:
+        pass  # fall through to a normal create attempt
+
+    try:
+        if kind and kind != "party" and kind != "unknown":
+            xml = _build_system_ledger_xml(name, kind, company_name)
+        else:
+            # Party — fall back to existing party builder.
+            parent = _guess_parent_group(name, payload)
+            gstin = bundle_gstin or (payload.get("billing_party_gstin")
+                                     or payload.get("party_gstin") or "")
+            pan = payload.get("pan") or payload.get("party_pan")
+            xml = _build_ledger_master_xml(name, parent, company_name,
+                                            gstin=gstin or None, pan=pan)
+        resp = query_local_tally(tally_url, xml, timeout=15.0)
+        ok, info = _parse_tally_push_response(resp or "")
+        # Belt-and-braces: if Tally still reports the ledger as already
+        # existing (race against our pre-check), accept it.
+        if not ok and isinstance(info, str) and "already exist" in info.lower():
+            return True, f"already exists ({name})"
+        return ok, info
+    except Exception as e:
+        return False, f"Auto-create master failed: {e}"
+
+
 # Patterns of common Tally "this ledger doesn't exist" error messages.
 # Real Tally returns several variants depending on context.
 _MISSING_LEDGER_PATTERNS = [
@@ -1376,52 +1593,13 @@ def _ensure_ledgers_exist(payload, tally_url, company_name, server_url=None):
         if n not in seen:
             seen.add(n); ordered.append(n)
 
-    created = []
-    errors = []
-    missing_system = []
-    for nm in ordered:
-        # Trust the snapshot — if it's there, Tally has it.
-        if snapshot_names and _resolve_ledger_in_snapshot(nm, snapshot_names, by_lc):
-            continue
-        # Snapshot says it's missing. If no snapshot, fall back to Tally probe.
-        if not snapshot_names and _check_ledger_exists(tally_url, company_name, nm):
-            continue
-        # Sprint 32 — Refuse to auto-create system ledgers. Their proper setup
-        # (GST classification, percentage, opening balance) only the accountant
-        # can configure inside Tally. Surface an actionable error instead.
-        if _is_system_ledger(nm):
-            missing_system.append(nm)
-            continue
-        parent = _guess_parent_group(nm, payload)
-        gstin = payload.get("billing_party_gstin") or payload.get("party_gstin")
-        pan = payload.get("pan") or payload.get("party_pan")
-        try:
-            create_xml = _build_ledger_master_xml(nm, parent, company_name,
-                                                   gstin=gstin,
-                                                   pan=pan)
-            resp = query_local_tally(tally_url, create_xml, timeout=15.0)
-            ok, info = _parse_tally_push_response(resp or "")
-        except Exception as e:
-            ok, info = False, str(e)
-        if ok:
-            created.append(f"{nm} ({parent})")
-            # Sprint 32 — Tally needs extra settling time after a master ALTER
-            # before it can safely handle another import. Without this Tally
-            # crashes (c0000005) under back-to-back master creates.
-            time.sleep(2.5)
-        else:
-            errors.append(f"{nm}: {info}")
-    # Final cooldown before the voucher push that follows.
-    if created:
-        time.sleep(2.0)
-    # If user-required system ledgers are missing, return a single actionable
-    # error rather than letting Tally crash on a bad voucher push.
-    if missing_system:
-        errors.append(
-            "Please create these ledgers in Tally Prime first with correct GST "
-            "setup, then retry: " + ", ".join(missing_system)
-        )
-    return payload, created, errors
+    # Sprint 43 — This pre-flight no longer creates anything. Returns the
+    # (rewritten) payload plus empty `created` + `errors` lists. The actual
+    # missing-ledger detection + propose-then-create flow lives in
+    # push_voucher_to_tally (live pre-flight → NEEDS_APPROVAL bundle).
+    # We keep this function in the call graph because the rewrite logic above
+    # still maps payload names → canonical company-specific names.
+    return payload, [], []
 
 
 def _collect_payload_ledger_refs(payload, company_name):
@@ -1443,15 +1621,39 @@ def _collect_payload_ledger_refs(payload, company_name):
     return out
 
 
-def push_voucher_to_tally(payload, tally_url, company_name, server_url=None):
-    """Sprint 31 + 32 + 36 — Pre-flight against LIVE Tally first (cheap, authoritative).
-    If every referenced ledger exists in live Tally, skip the flakier snapshot-based
-    pre-flight (which can fail with SVCurrentCompany on Tally state issues) and push
-    straight away. Only fall back to the snapshot path when something looks missing.
+def push_voucher_to_tally(payload, tally_url, company_name, server_url=None,
+                          approved_ledgers=None):
+    """Sprint 31 + 32 + 36 + 43 — Pre-flight against LIVE Tally first (cheap,
+    authoritative). If every referenced ledger exists in live Tally, skip the
+    flakier snapshot-based pre-flight (which can fail with SVCurrentCompany on
+    Tally state issues) and push straight away. Only fall back to the snapshot
+    path when something looks missing.
+
+    Sprint 43 — `approved_ledgers` (list of name strings OR bundle dicts) is the
+    user-approved subset of a previous propose-then-create bundle. If provided,
+    those ledgers are created in Tally BEFORE pre-flight (with 2.5 s settle
+    between each), then we fall through to the normal push. If pre-flight STILL
+    reports missing ledgers, return `NEEDS_APPROVAL|<bundle_json>|<message>` so
+    the outbox-poll caller can POST the new bundle to /needs_approval and the UI
+    can ask the user again.
 
     Returns (ok, guid_or_error)."""
     if not check_tally_alive(tally_url):
         return False, f"Tally Prime not reachable on {tally_url} (open Tally and try again)"
+
+    # Sprint 43 — pre-create user-approved ledgers FIRST. The 2.5 s settle is
+    # the same proven cadence Sprint 32's party auto-create has been using since
+    # the c0000005 crash class was diagnosed.
+    if approved_ledgers:
+        for entry in approved_ledgers:
+            ok, info = _create_one_approved_ledger(entry, payload, tally_url, company_name)
+            if not ok:
+                _nm = entry.get("name") if isinstance(entry, dict) else entry
+                return False, (f"Tally rejected create of approved ledger '{_nm}'. "
+                               f"Tally said: {info}")
+            time.sleep(2.5)
+        # Settle a touch more before the voucher push.
+        time.sleep(2.0)
 
     # Sprint 36 — LIVE-Tally pre-flight runs FIRST. The snapshot-based pre-flight below
     # has been observed failing on "Could not set SVCurrentCompany" even when the
@@ -1473,93 +1675,52 @@ def push_voucher_to_tally(payload, tally_url, company_name, server_url=None):
                     # snapshot pre-flight. This is the happy path.
                     skip_snapshot_preflight = True
                 else:
-                    m = missing_refs[0]
-                    if _is_system_ledger(m):
-                        nl = _gst_ledger_meta(m, payload)
-                    else:
-                        nl = {"ledger_name": m,
-                              "group": _guess_parent_group(m, payload),
-                              "gst_head": "", "io": "",
-                              "voucher_number": payload.get("invoice_number") or ""}
-                    human = (f"Tally is missing ledger '{m}'. Create it in Tally Prime, then retry. "
-                             f"(Pre-flight blocked the push so Tally wouldn't crash on a malformed import.)")
-                    return False, "NEEDS_LEDGER|" + json.dumps(nl) + "|" + human
+                    # Sprint 43 — propose-then-create. The agent does NOT write
+                    # anything to Tally yet. It bundles up everything that's
+                    # missing, hands the bundle off to the server, and lets the
+                    # UI ask the user for explicit approval. No silent creates,
+                    # including for parties.
+                    bundle = _propose_create_bundle(missing_refs, payload)
+                    human = (f"Tally is missing {len(missing_refs)} ledger(s) for "
+                             f"this voucher. Awaiting your approval to create them.")
+                    return False, ("NEEDS_APPROVAL|" + json.dumps(bundle) + "|" + human)
     except Exception as _e:
         print(f"[push_voucher_to_tally] live pre-flight skipped: {_e}", flush=True)
 
-    # Snapshot-based pre-flight — only run when the live check didn't already clear us.
-    # The function may also rewrite party/ledger names in `payload` so they match the
-    # company's actual ledger names (e.g. "SUN PHARMA LTD" → "SUN PHARMACEUTICAL INDUSTRIES LTD.- HL").
+    # Snapshot-based pre-flight — only rewrites payload names to match the company's
+    # actual ledger names (e.g. "SUN PHARMA LTD" → "SUN PHARMACEUTICAL INDUSTRIES LTD.- HL").
+    # In Sprint 43 it no longer silently creates anything; if names are still missing
+    # after the rewrite, the post-rewrite live pre-flight on the retry loop will
+    # raise NEEDS_APPROVAL.
     if not skip_snapshot_preflight:
         payload, created, errs = _ensure_ledgers_exist(payload, tally_url, company_name,
                                                         server_url=server_url)
-        if errs:
-            return False, "Pre-flight failed: " + "; ".join(errs)
+        # Sprint 43 — ignore `errs` from the snapshot pre-flight; the live check
+        # above (and the retry loop below) are the authoritative gates.
 
-    # Sprint 32 — Loop: each failed attempt may surface ONE missing ledger.
-    # Auto-create it, retry, repeat. Up to 5 iterations to cover the
-    # typical "party + Sales Account + CGST + SGST + IGST" worst case.
-    created_ledgers = []
-    last_info = None
-    for attempt in range(5):
-        ok, info = _try_push_once(payload, tally_url, company_name)
-        if ok:
-            if created_ledgers:
-                tag = f" (auto-created: {', '.join(created_ledgers)})"
-                return True, (info or "ok") + tag
-            return True, info
-        last_info = info
-        missing = _extract_missing_ledger(info) if isinstance(info, str) else None
-        # Fallback for opaque EXCEPTIONS=1 responses — guess party
-        if not missing and isinstance(info, str) and re.search(r"<EXCEPTIONS>[^<]*[1-9]", info):
-            cand = (payload.get("billing_party_name") or payload.get("party_name")
-                     or payload.get("party") or "").strip()
-            if cand and cand not in created_ledgers:
-                missing = cand
-        if not missing or missing in created_ledgers:
-            break  # Either Tally's error isn't a missing-ledger one, or we already tried this
-        if _is_system_ledger(missing):
-            # Only ask the user to CREATE it when it's TRULY absent in the LIVE Tally —
-            # our server-side ledger dump can be stale, so verify against Tally right now.
-            try:
-                live = fetch_local_ledgers(tally_url) or []
-            except Exception:
-                live = []
-            live_lc = {n.strip().lower() for n in live}
-            if live and missing.strip().lower() in live_lc:
-                # False alarm — the ledger exists live; don't nag the user to create it.
-                return False, (f"Tally rejected the push but ledger '{missing}' already exists in "
-                               f"Tally — check its GST classification or the voucher. "
-                               f"Details: {str(last_info)[:300]}")
-            if not live:
-                # Couldn't read the live chart of accounts — don't fabricate a 'create ledger' to-do.
-                return False, (f"Tally is missing system ledger '{missing}'. Please create it in "
-                               f"Tally Prime with the correct GST classification, then retry.")
-            # Truly missing in live Tally → structured 'create this ledger' to-do for the user.
-            nl = _gst_ledger_meta(missing, payload)
-            human = (f"Tally is missing system ledger '{missing}'. Create it in Tally Prime "
-                     f"(group {nl['group']}"
-                     + (f" · {nl['gst_head']}" if nl['gst_head'] else "")
-                     + (f" ({nl['io']})" if nl['io'] else "")
-                     + "), then it will sync on the next retry.")
-            return False, "NEEDS_LEDGER|" + json.dumps(nl) + "|" + human
-        parent = _guess_parent_group(missing, payload)
-        gstin = payload.get("billing_party_gstin") or payload.get("party_gstin")
-        pan = payload.get("pan") or payload.get("party_pan")
-        try:
-            create_xml = _build_ledger_master_xml(missing, parent, company_name,
-                                                   gstin=gstin, pan=pan)
-            create_resp = query_local_tally(tally_url, create_xml, timeout=15.0)
-            create_ok, create_info = _parse_tally_push_response(create_resp or "")
-        except Exception as e:
-            create_ok, create_info = False, f"Auto-create master failed: {e}"
-        if not create_ok:
-            return False, f"Tried to auto-create ledger '{missing}' — Tally said: {create_info}"
-        created_ledgers.append(f"{missing} ({parent})")
-        # Sprint 32 — settling time after a master ALTER, before next push retry.
-        time.sleep(2.5)
+    # Sprint 43 — try the push ONCE. If Tally still complains about a missing
+    # ledger we couldn't see in the live pre-flight (rare race; e.g. user
+    # deleted a ledger after we read the chart), surface a fresh NEEDS_APPROVAL
+    # bundle for whatever Tally just named. No silent creates here.
+    ok, info = _try_push_once(payload, tally_url, company_name)
+    if ok:
+        return True, info
 
-    return False, last_info or "Push failed after 5 auto-create attempts"
+    # If Tally named a missing ledger, build a single-entry bundle and ask.
+    missing = _extract_missing_ledger(info) if isinstance(info, str) else None
+    if not missing and isinstance(info, str) and re.search(r"<EXCEPTIONS>[^<]*[1-9]", info):
+        # Opaque EXCEPTIONS=1 — best-guess the party as the culprit.
+        cand = (payload.get("billing_party_name") or payload.get("party_name")
+                 or payload.get("party") or "").strip()
+        if cand:
+            missing = cand
+    if missing:
+        bundle = _propose_create_bundle([missing], payload)
+        human = (f"Tally reported missing ledger '{missing}' after the push. "
+                 f"Awaiting your approval to create it and retry.")
+        return False, ("NEEDS_APPROVAL|" + json.dumps(bundle) + "|" + human)
+
+    return False, info or "Push failed (Tally returned no actionable error)"
 
 
 def heartbeat_loop(server_url, company_name, stop_event, token_provider=None, refresh_fn=None):
@@ -1627,30 +1788,58 @@ def outbox_poll_loop(server_url, tally_url, company_name, stop_event, log_fn=Non
             for row in rows:
                 oid = row.get("id")
                 payload = row.get("payload") or {}
+                approved_ledgers = row.get("approved_ledgers")
                 if not oid:
                     continue
                 try:
                     # Clear the per-push ledger snapshot cache so each row
                     # re-fetches a fresh chart (in case a sibling push just
-                    # auto-created a party).
+                    # created a master).
                     _LEDGER_SNAPSHOT_CACHE.update({"server": None, "company": None,
                                                     "names": None, "by_lc": None})
                     ok, info = push_voucher_to_tally(payload, tally_url, company_name,
-                                                      server_url=server_url)
+                                                      server_url=server_url,
+                                                      approved_ledgers=approved_ledgers)
                 except Exception as e:
                     ok, info = False, f"Unexpected agent error: {e}"
+
+                # Sprint 43 — NEEDS_APPROVAL is NOT a hard fail. It means the
+                # agent needs explicit user opt-in to create one or more
+                # missing Tally ledgers before it can push the voucher. We
+                # forward the proposed bundle to the server (which flips the
+                # outbox row to 'pending_approval') and move on — the next
+                # poll will re-claim the row only after the user has approved.
+                if (not ok) and isinstance(info, str) and info.startswith("NEEDS_APPROVAL|"):
+                    try:
+                        _, _bj, _human = info.split("|", 2)
+                        bundle = json.loads(_bj)
+                    except Exception:
+                        bundle = []
+                        _human = info
+                    log(f"  ?? Outbox row {oid[:8]}... needs user approval for "
+                        f"{len(bundle)} ledger(s).")
+                    try:
+                        _post_json(
+                            f"{server_url}/api/tally/queue/{oid}/needs_approval",
+                            {"bundle": bundle, "session_token": session_token},
+                            timeout=10.0,
+                        )
+                    except Exception as _ne:
+                        log(f"  ?? needs_approval POST failed: {_ne}")
+                    continue   # do NOT call /ack or /fail
+
                 if ok:
-                    log(f"  ✓ Pushed outbox row {oid[:8]}… — Tally GUID {info[:20] if info else 'ok'}")
+                    log(f"  OK Pushed outbox row {oid[:8]}... -- Tally GUID {info[:20] if info else 'ok'}")
                     _post_json(f"{server_url}/api/tally/queue/{oid}/ack",
                                {"tally_voucher_guid": info, "session_token": session_token},
                                timeout=10.0)
                 else:
-                    log(f"  ✗ Failed outbox row {oid[:8]}… — {info}")
+                    log(f"  XX Failed outbox row {oid[:8]}... -- {info}")
                     fail_body = {"error": str(info)[:1000], "session_token": session_token,
                                  "company_name": company_name}
-                    # When a GST/system ledger is truly missing in the live Tally, the push
-                    # returns a structured "NEEDS_LEDGER|{json}|message" so the server logs a
-                    # 'create this ledger in Tally Prime' to-do for the user.
+                    # Legacy NEEDS_LEDGER pathway (Sprint 32) — kept as a fallback
+                    # signal but no longer produced by Sprint 43's push. Server
+                    # still handles it via add_tally_cleanup if it ever shows up.
                     if isinstance(info, str) and info.startswith("NEEDS_LEDGER|"):
                         try:
                             _, _j, _human = info.split("|", 2)
