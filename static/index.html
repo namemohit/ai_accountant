@@ -6635,9 +6635,17 @@
         // Single predicate combining all 3 layers. Returns true if row should be visible.
         function _voucherFilterMatch(v) {
             const f = _voucherFilters;
-            // Status / lifecycle filter (YantrAI → Tally direction). "Status: any" shows
-            // ALL lines incl. archived; picking a specific status narrows to it.
-            if (f.status && _vRowStatus(v) !== f.status) return false;
+            // Status / lifecycle filter (YantrAI → Tally direction). Sprint 49 —
+            // the DEFAULT view (Status: any) now HIDES archived rows, so archiving
+            // actually removes a voucher from the working list (+ from the headline
+            // metrics, which compute over this same filtered set). Archived rows
+            // reappear ONLY when the user picks Status = "Archived". Other statuses
+            // narrow as before.
+            if (!f.status) {
+                if (_vRowStatus(v) === 'Archived') return false;
+            } else if (_vRowStatus(v) !== f.status) {
+                return false;
+            }
             // Sprint 45 — Reco filter (Tally → YantrAI direction). AND-combined with
             // Status so a power-user can do "Status=Synced AND Reco=Amount mismatch"
             // to surface synced-but-drifted vouchers. The 'needs_attention' composite
@@ -11771,6 +11779,14 @@
                 if (typeof showChatToast === 'function')
                     showChatToast(`🗄️ Archived ${j.archived||0} voucher(s). Filter Status → "Archived" to view/restore.`);
                 refreshVouchers();
+                // Sprint 49 — if any archived voucher exists in Tally, show the
+                // "Also delete these in Tally Prime" checklist (Day Book → Alt+D).
+                // YantrAI never deletes inside Tally; this is the explicit
+                // remove-from-Tally trigger. Same items are logged to Event Logs.
+                if (Array.isArray(j.tally_cleanup) && j.tally_cleanup.length
+                    && typeof showTallyCleanupModal === 'function') {
+                    showTallyCleanupModal(j.tally_cleanup);
+                }
             } catch (e) { alert('Archive failed: ' + e.message); }
         };
         window.restoreVouchers = async (ids) => {

@@ -6554,6 +6554,8 @@ def archive_vouchers(company_name, ids, archived_by=None):
         return {"archived": 0}
     conn = get_conn(); cur = conn.cursor()
     n = 0
+    cleanup = []   # Sprint 49 — Tally-present items the user must remove in Tally Prime;
+                   # returned so the UI can show the showTallyCleanupModal checklist.
     _reason = "Archived in YantrAI — void/remove in Tally Prime"
     def _log(vnum, vtype, party, amt, vdate):
         try:
@@ -6563,6 +6565,17 @@ def archive_vouchers(company_name, ids, archived_by=None):
                 (company_name, vnum, vtype, party, amt, vdate or None, _reason))
         except Exception as ce:
             print(f"archive cleanup-log warn: {ce}")
+        # Same fields showTallyCleanupModal expects (voucher_number/voucher_type/party/amount/date).
+        try:
+            cleanup.append({
+                "voucher_number": vnum,
+                "voucher_type": vtype,
+                "party": party,
+                "amount": float(amt) if amt is not None else None,
+                "date": str(vdate) if vdate else None,
+            })
+        except Exception:
+            pass
     try:
         for vid in ids:
             cur.execute("""UPDATE tally_vouchers SET archived_at = CURRENT_TIMESTAMP
@@ -6585,10 +6598,10 @@ def archive_vouchers(company_name, ids, archived_by=None):
                 if (inv[5] or '') == 'synced':   # already in Tally → needs manual void there
                     _log(inv[0], inv[1], inv[2], inv[3], inv[4])
         conn.commit()
-        return {"archived": n}
+        return {"archived": n, "tally_cleanup": cleanup}
     except Exception as e:
         conn.rollback(); print(f"archive_vouchers error: {e}")
-        return {"archived": n, "error": str(e)}
+        return {"archived": n, "tally_cleanup": cleanup, "error": str(e)}
     finally:
         cur.close(); conn.close()
 
