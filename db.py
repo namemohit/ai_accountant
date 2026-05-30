@@ -3763,12 +3763,76 @@ def get_history(company_name=None):
     return rows
 
 
+# ─── Sprint 45 — Tally-side reconciliation flag ────────────────────────────
+# Each voucher row in get_all_vouchers gets a `reco_flag` describing what we
+# see on the Tally side. Status (client-side _vRowStatus) is the YantrAI →
+# Tally direction; reco_flag is the Tally → YantrAI direction. Together they
+# give the user an honest two-axis view of every voucher's sync state. See
+# plan: the-reconciled-by-creates-jaunty-dijkstra.md
+_RECO_GST_TOL = 0.50   # ₹0.50 paise tolerance for GST split comparison
+
+
+def _gst_split_differs(row):
+    """True if the Tally twin's GST split disagrees with the YantrAI invoice's
+    split. Compares CGST / SGST / IGST amounts directly (both tables carry the
+    breakdown columns since Sprint 27/35). Tolerance absorbs paise rounding."""
+    def _close(a, b):
+        try:
+            return abs(float(a or 0) - float(b or 0)) <= _RECO_GST_TOL
+        except (TypeError, ValueError):
+            return True   # treat unparseable as no-difference; don't false-flag
+    if not _close(row.get('cgst_amount'), row.get('tv_cgst_amount')): return True
+    if not _close(row.get('sgst_amount'), row.get('tv_sgst_amount')): return True
+    if not _close(row.get('igst_amount'), row.get('tv_igst_amount')): return True
+    return False
+
+
+def _derive_reco_flag(row):
+    """Compute the Reco-column flag for one merged voucher row. Priority:
+    Deleted > Duplicate > Amount mismatch > GST mismatch > Not in Tally > Matched.
+    Pure-Tally rows (no YantrAI source) are 'matched' (Tally IS source-of-truth
+    for them) unless their own discarded_at is set."""
+    # Tally-source rows: the row IS YantrAI's mirror of what's in Tally.
+    if row.get('source') != 'invoice':
+        if row.get('discarded_at'):
+            return 'deleted_in_tally'
+        return 'matched'
+    # Invoice-source rows: compare against Tally twin from LATERAL lookup.
+    if row.get('tv_discarded_at'):
+        return 'deleted_in_tally'
+    try:
+        count = int(row.get('tv_count') or 0)
+    except (TypeError, ValueError):
+        count = 0
+    if count == 0:
+        return 'not_in_tally'
+    if count > 1:
+        return 'duplicate_in_tally'
+    # count == 1 — total + GST comparison
+    try:
+        inv_amt = abs(float(row.get('amount') or 0))     # invoice SELECT aliases total_amount → amount
+        tv_amt  = abs(float(row.get('tv_amount') or 0))
+    except (TypeError, ValueError):
+        inv_amt = tv_amt = 0
+    if abs(inv_amt - tv_amt) > 0.01:
+        return 'amount_mismatch'
+    if _gst_split_differs(row):
+        return 'gst_mismatch'
+    return 'matched'
+
+
+_RECO_SCRATCH_KEYS = (
+    'tv_count', 'tv_amount', 'tv_discarded_at',
+    'tv_cgst_amount', 'tv_sgst_amount', 'tv_igst_amount',
+)
+
+
 def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limit=500, offset=0):
     """Return merged vouchers from tally_vouchers + invoices, sorted by date desc.
 
     Each row is normalized to a common shape for the frontend:
       id, date, voucher_number, voucher_type, party_name, amount,
-      narration, source ('tally'|'invoice'), ledger_entries, ...
+      narration, source ('tally'|'invoice'), ledger_entries, reco_flag, ...
     """
     conn = pget()   # warm pooled connection (was a fresh get_conn per call — slow)
     cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -3790,6 +3854,8 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
         tally_where.append("LOWER(voucher_type) = LOWER(%s)")
         tally_params.append(voucher_type)
 
+    # Sprint 45 — also return discarded_at so a Tally-mirror row that Tally
+    # subsequently dropped surfaces as Reco = 🗑️ Deleted in Tally.
     cursor.execute(f"""
         SELECT id, date, voucher_number, voucher_type, ledger_name AS party_name,
                amount, narration, ledger_entries::text AS ledger_entries,
@@ -3801,7 +3867,7 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                'tally' AS source, updated_at, created_at,
                COALESCE(origin, 'tally') AS origin, yantrai_uid,
                (archived_at IS NOT NULL) AS archived,
-               deleted_from_tally_at
+               deleted_from_tally_at, discarded_at
         FROM tally_vouchers
         WHERE {' AND '.join(tally_where)}
         ORDER BY date DESC
@@ -3829,6 +3895,9 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
         # Sprint 44 — stringify the delete-from-tally timestamp for the UI.
         if r.get('deleted_from_tally_at'):
             r['deleted_from_tally_at'] = str(r['deleted_from_tally_at'])
+        # Sprint 45 — stringify discarded_at (Tally-side soft-delete sentinel).
+        if r.get('discarded_at'):
+            r['discarded_at'] = str(r['discarded_at'])
         results.append(r)
 
     # --- Invoice-created vouchers (from invoices table) ---
@@ -3850,6 +3919,13 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
     # tally_outbox row authoritatively mark it 'synced' (the bridge agent
     # ack'd it into Tally). This keeps the Vouchers list status column honest
     # vs the end-to-end Tally sync state shown in Event Logs.
+    # Sprint 45 — second LATERAL JOIN against tally_vouchers gives us the
+    # Tally-side twin lookup per invoice row: how many twins exist, the
+    # twin's total + GST breakdown for mismatch detection, and whether
+    # Tally has discarded it. yantrai_uid is the indexed string of the
+    # invoice UUID (round-tripped via the [YAI:uid] narration marker since
+    # Sprint 35-39). Single-twin row is the steady state; count > 1 means
+    # one of our voucher Alter attempts created a duplicate (Sprint 44.3).
     cursor.execute(f"""
         SELECT i.id, i.created_at AS date, i.invoice_number AS voucher_number,
                COALESCE(i.voucher_type, i.category) AS voucher_type, i.party_name,
@@ -3871,7 +3947,10 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                  ELSE COALESCE(i.status, 'pending')
                END AS status,
                ob.tally_voucher_guid,
-               COALESCE(ob.pushed_state, FALSE) AS was_pushed
+               COALESCE(ob.pushed_state, FALSE) AS was_pushed,
+               COALESCE(tv.tv_count, 0) AS tv_count,
+               tv.tv_amount, tv.tv_discarded_at,
+               tv.tv_cgst_amount, tv.tv_sgst_amount, tv.tv_igst_amount
         FROM invoices i
         LEFT JOIN LATERAL (
             SELECT BOOL_OR(o.state = 'pushed') AS pushed_state,
@@ -3880,6 +3959,17 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
             WHERE o.company_name = i.company_name
               AND o.payload->>'invoice_number' = i.invoice_number
         ) ob ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*) AS tv_count,
+                   MAX(amount) AS tv_amount,
+                   MAX(discarded_at) AS tv_discarded_at,
+                   MAX(cgst_amount) AS tv_cgst_amount,
+                   MAX(sgst_amount) AS tv_sgst_amount,
+                   MAX(igst_amount) AS tv_igst_amount
+            FROM tally_vouchers tvi
+            WHERE tvi.yantrai_uid = i.id::text
+              AND tvi.company_name = i.company_name
+        ) tv ON TRUE
         WHERE {' AND '.join(inv_qualified_where)}
         ORDER BY i.created_at DESC
         LIMIT %s OFFSET %s
@@ -3892,6 +3982,9 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
         # Sprint 44 — stringify the delete-from-tally timestamp for the UI.
         if r.get('deleted_from_tally_at'):
             r['deleted_from_tally_at'] = str(r['deleted_from_tally_at'])
+        # Sprint 45 — stringify the Tally-twin discarded_at for the Reco helper.
+        if r.get('tv_discarded_at'):
+            r['tv_discarded_at'] = str(r['tv_discarded_at'])
         r['ledger_entries'] = []
         r['cost_centres'] = []
         r['bill_refs'] = []
@@ -3946,6 +4039,13 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
 
     # Sort merged by date descending
     results.sort(key=lambda r: r.get('date') or '', reverse=True)
+
+    # Sprint 45 — stamp the Reco-column flag (Tally → YantrAI direction) on
+    # every row, then strip the scratch columns we only needed for derivation.
+    for r in results:
+        r['reco_flag'] = _derive_reco_flag(r)
+        for k in _RECO_SCRATCH_KEYS:
+            r.pop(k, None)
 
     # Get total count for pagination (counts ALL rows incl. archived, matching the
     # "Status: any" view which shows every line; the Status column marks archived ones).

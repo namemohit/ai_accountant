@@ -1954,14 +1954,26 @@
                                 <span id="vf-types-label">All types</span>
                                 <span style="color:#64748b; font-size:0.7rem;">▾</span>
                             </button>
-                            <!-- Status / lifecycle filter (right of voucher-type). "Archived (YantrAI)"
-                                 surfaces soft-archived rows that need to be voided/removed in Tally. -->
-                            <select id="vf-status" onchange="applyVoucherFilters()" title="Filter by status" style="padding: 6px 10px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
+                            <!-- Sprint 45 — Status = YantrAI → Tally direction (our-side lifecycle).
+                                 Adjacent Reco chip = Tally → YantrAI direction (their-side gaps).
+                                 Two orthogonal axes; AND-combined when both are set. -->
+                            <select id="vf-status" onchange="applyVoucherFilters()" title="Filter by status — YantrAI → Tally direction" style="padding: 6px 10px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
                                 <option value="">🏷️ Status: any</option>
-                                <option value="Tally &amp; YantrAI">🟢 Tally &amp; YantrAI</option>
-                                <option value="YantrAI">🟡 YantrAI</option>
-                                <option value="Edited – resync">🟠 Edited – resync</option>
-                                <option value="Archived (YantrAI)">🗄️ Archived (YantrAI)</option>
+                                <option value="Synced">🟢 Synced</option>
+                                <option value="Draft">🟡 Draft</option>
+                                <option value="Edited">🟠 Edited</option>
+                                <option value="Archived">🗄️ Archived</option>
+                                <option value="Tally mirror">📥 Tally mirror</option>
+                            </select>
+                            <select id="vf-reco" onchange="applyVoucherFilters()" title="Filter by reconciliation flag — Tally → YantrAI direction" style="padding: 6px 10px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
+                                <option value="">⚖️ Reco: any</option>
+                                <option value="needs_attention">📝 Needs attention (any gap)</option>
+                                <option value="matched">✓ Matched</option>
+                                <option value="not_in_tally">⊘ Not in Tally</option>
+                                <option value="duplicate_in_tally">🔁 Duplicate in Tally</option>
+                                <option value="amount_mismatch">⚠️ Amount mismatch</option>
+                                <option value="gst_mismatch">⚠️ GST split mismatch</option>
+                                <option value="deleted_in_tally">🗑️ Deleted in Tally</option>
                             </select>
                             <input type="date" id="vf-from" onchange="applyVoucherFilters()" title="From date" style="padding: 6px 8px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
                             <input type="date" id="vf-to" onchange="applyVoucherFilters()" title="To date" style="padding: 6px 8px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
@@ -2001,6 +2013,12 @@
                             <span style="color: #64748b;">·</span>
                             <span title="Voucher drafts waiting for review">📝 Drafts: <strong id="vstat-drafts" style="color: #f59e0b;">—</strong></span>
                             <span style="color: #64748b;">·</span>
+                            <!-- Sprint 45 — Needs attention count (Reco gaps). Clickable: applies the
+                                 'needs_attention' Reco filter to surface them. Hidden when zero. -->
+                            <span id="vstat-attention-wrap" style="display:none;" title="Vouchers with a Tally-side reconciliation gap (any non-Matched Reco flag). Click to filter.">
+                                <a href="javascript:void(0)" onclick="setVoucherRecoFilter('needs_attention')" style="color:#ef4444; text-decoration:none; cursor:pointer;">📝 Needs attention: <strong id="vstat-attention" style="color: #ef4444;">—</strong></a>
+                                <span style="color: #64748b;"> · </span>
+                            </span>
                             <span title="Sum of Debit amounts (Purchase / Payment)">💸 Debit: <strong id="vstat-debit" style="color: #f87171;">—</strong></span>
                             <span style="color: #64748b;">·</span>
                             <span title="Sum of Credit amounts (Sales / Receipt)">💚 Credit: <strong id="vstat-credit" style="color: #4ade80;">—</strong></span>
@@ -2035,7 +2053,8 @@
                                     <th style="padding: 10px; text-align: right; background: #1e293b;">Credit (₹) <span class="vcol-chev" style="cursor:pointer; color:#64748b; margin-left:4px; font-size:0.7rem; user-select:none;" data-col="credit" onclick="openVoucherColFilter('credit', this, event)">▾</span></th>
                                     <th style="padding: 10px; background: #1e293b;" title="Where this voucher originated">Origin <span class="vcol-chev" style="cursor:pointer; color:#64748b; margin-left:4px; font-size:0.7rem; user-select:none;" data-col="source" onclick="openVoucherColFilter('source', this, event)">▾</span></th>
                                     <th style="padding: 10px; background: #1e293b;" title="Link to the source document (uploaded file or printable voucher)">Document</th>
-                                    <th style="padding: 10px; background: #1e293b;" title="Tally sync state">Status <span class="vcol-chev" style="cursor:pointer; color:#64748b; margin-left:4px; font-size:0.7rem; user-select:none;" data-col="status" onclick="openVoucherColFilter('status', this, event)">▾</span></th>
+                                    <th style="padding: 10px; background: #1e293b;" title="YantrAI → Tally direction (our-side lifecycle)">Status <span class="vcol-chev" style="cursor:pointer; color:#64748b; margin-left:4px; font-size:0.7rem; user-select:none;" data-col="status" onclick="openVoucherColFilter('status', this, event)">▾</span></th>
+                                    <th style="padding: 10px; background: #1e293b;" title="Tally → YantrAI direction (their-side reconciliation)">Reco <span class="vcol-chev" style="cursor:pointer; color:#64748b; margin-left:4px; font-size:0.7rem; user-select:none;" data-col="reco" onclick="openVoucherColFilter('reco', this, event)">▾</span></th>
                                     <th style="padding: 10px; background: #1e293b;" title="AI-detected data-quality flags">AI Flags</th>
                                 </tr>
                             </thead>
@@ -6262,6 +6281,13 @@
                 const _ss = _vStatusStyle(_vRowStatus(v));
                 let badgeBg = _ss.bg, badgeColor = _ss.c, badgeText = _ss.t;
 
+                // Sprint 45 — Reco badge (Tally → YantrAI direction). null style ⇒
+                // em-dash. The flag itself comes from db._derive_reco_flag.
+                const _rs = _vRecoStyle(_vRecoFlag(v));
+                const recoHtml = _rs
+                    ? `<span style="background: ${_rs.bg}; color: ${_rs.c}; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">${_rs.t}</span>`
+                    : `<span style="color:#475569;">—</span>`;
+
                 // Sprint 37 — edit available on every voucher (tally + invoice/PDF/manual)
                 const canEdit = true;
                 const editBtn = canEdit
@@ -6325,6 +6351,7 @@
                     <td style="padding: 10px;">${originHtml}</td>
                     <td style="padding: 10px;">${sourceDocHtml}</td>
                     <td style="padding: 10px; white-space: nowrap;"><span style="background: ${badgeBg}; color: ${badgeColor}; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">${badgeText}</span>${deletedSyncedPill}${editedPill}${editBtn}${resyncBtn}${archiveBtn}${deleteFromTallyBtn}</td>
+                    <td style="padding: 10px; white-space: nowrap;">${recoHtml}</td>
                     <td id="aiflags-${v.id}" style="padding: 10px; white-space: nowrap;">${aiChips || '<span style="color:#475569;">–</span>'}</td>
                 `;
                 if (hasDetail) {
@@ -6349,7 +6376,7 @@
                     detailTr.style.display = 'none';
                     detailTr.style.background = 'rgba(56, 189, 248, 0.02)';
 
-                    let detailHtml = '<td colspan="12" style="padding: 8px 16px 12px 40px;">';
+                    let detailHtml = '<td colspan="13" style="padding: 8px 16px 12px 40px;">';
                     if (v.narration) {
                         detailHtml += `<div style="color: #94a3b8; font-size: 0.8rem; margin-bottom: 6px;"><strong style="color: #cbd5e1;">Narration:</strong> ${v.narration}</div>`;
                     }
@@ -6412,7 +6439,7 @@
                         </div>`;
                     }).join('');
 
-                    subTr.innerHTML = `<td colspan="12" style="padding: 16px;">
+                    subTr.innerHTML = `<td colspan="13" style="padding: 16px;">
                         <div style="color: #f59e0b; font-weight: 600; font-size: 0.85rem; margin-bottom: 10px; display: flex; align-items: center; gap: 8px;"><i class="fas fa-info-circle"></i> Duplicate Manager — keep primary, remove extras</div>
                         <div style="display: flex; gap: 12px; flex-wrap: wrap;">
                             <div style="background: rgba(56, 189, 248, 0.05); padding: 12px; border-radius: 6px; border: 1px solid rgba(56, 189, 248, 0.2); min-width: 220px; flex: 1;">
@@ -6454,12 +6481,16 @@
             types: [], from_date: '', to_date: '',
             party: '', amount_min: null, amount_max: null,
             sort: 'date_desc', search: '', status: '',
-            columnFilters: {}   // { colKey: { values:[...], sort: null|'asc'|'desc' } }
+            columnFilters: {},  // { colKey: { values:[...], sort: null|'asc'|'desc' } }
+            reco: ''            // Sprint 45 — Tally-side reco flag filter
         };
 
         function _voucherFilterKey() {
             const u = JSON.parse(localStorage.getItem('currentUser') || '{}');
-            return 'voucherFilters_v1::' + (u.company_name || '__default__');
+            // Sprint 45 — bumped v1 → v2 because the Status filter value vocabulary
+            // changed (e.g. 'Tally & YantrAI' → 'Synced'). Old v1 keys are orphaned
+            // (harmless); users re-pick on next visit.
+            return 'voucherFilters_v2::' + (u.company_name || '__default__');
         }
 
         function _saveVoucherFilters() {
@@ -6481,6 +6512,7 @@
                 setVal('vf-amount-max', f.amount_max);
                 setVal('vf-sort',       f.sort);
                 setVal('vf-status',     f.status);
+                setVal('vf-reco',       f.reco);    // Sprint 45
                 setVal('voucher-search', f.search);
             } catch (e) {}
         }
@@ -6500,6 +6532,14 @@
             _voucherFilters.sort        = document.getElementById('vf-sort')?.value || 'date_desc';
             _voucherFilters.search      = (document.getElementById('voucher-search')?.value || '').toLowerCase();
             _voucherFilters.status      = document.getElementById('vf-status')?.value || '';
+            // Sprint 45 — Tally-side reconciliation filter (Reco column).
+            _voucherFilters.reco        = document.getElementById('vf-reco')?.value || '';
+
+            // expose this scope's value setter for the stats-strip click handler
+            window.setVoucherRecoFilter = window.setVoucherRecoFilter || function(value) {
+                const sel = document.getElementById('vf-reco');
+                if (sel) { sel.value = value; applyVoucherFilters(); }
+            };
             // Sprint 26 — AI Gap filter
             _voucherFilters.ai_gap      = document.getElementById('vf-ai-gap')?.value || '';
             if (typeof updateSelectedCount === 'function') updateSelectedCount();  // archive vs restore toolbar
@@ -6514,12 +6554,14 @@
                 types: [], from_date: '', to_date: '',
                 party: '', amount_min: null, amount_max: null,
                 sort: 'date_desc', search: '', status: '', columnFilters: {},
-                ai_gap: ''   // Sprint 26
+                ai_gap: '',  // Sprint 26
+                reco: ''     // Sprint 45 — Tally-side reco flag filter
             };
             // Reset DOM
             if (typeof _refreshVoucherTypeButton === 'function') _refreshVoucherTypeButton();
             const aiSel = document.getElementById('vf-ai-gap'); if (aiSel) aiSel.value = '';
             const stSel = document.getElementById('vf-status'); if (stSel) stSel.value = '';
+            const rcSel = document.getElementById('vf-reco'); if (rcSel) rcSel.value = '';
             ['vf-from','vf-to','vf-party','vf-amount-min','vf-amount-max','voucher-search'].forEach(id => {
                 const el = document.getElementById(id);
                 if (el) el.value = '';
@@ -6546,20 +6588,45 @@
             if (o === 'tally') return 'Tally';
             return _vRowSource(v) === 'tally' ? 'Tally' : 'YantrAI';
         }
-        // Status / lifecycle label (priority order). Drives both the badge and the Status filter.
+        // Sprint 45 — Status column = YantrAI → Tally direction (basis = our
+        // record). Reco column (separate) = Tally → YantrAI direction. The two
+        // are orthogonal axes; a row can simultaneously be Status: 🟠 Edited
+        // AND Reco: ⚠️ Amount mismatch — both badges render.
+        // Priority order matches old behavior: archived overrides edit which
+        // overrides Tally-only mirror which overrides synced/draft.
         function _vRowStatus(v) {
-            if (v.archived) return 'Archived (YantrAI)';
-            if (v.needs_resync) return 'Edited – resync';
-            return (v.source === 'tally' || v.status === 'synced' || v.reconciled) ? 'Tally & YantrAI' : 'YantrAI';
+            if (v.archived) return 'Archived';
+            if (v.needs_resync) return 'Edited';
+            // Tally mirror = row came from Tally with no YantrAI invoice driver.
+            // The dedup logic in db.get_all_vouchers keeps tally-source rows
+            // only when they have no YantrAI twin, so any tally-source row
+            // surfacing here is a true mirror.
+            if (v.source === 'tally' || v.origin === 'tally') return 'Tally mirror';
+            return (v.status === 'synced' || v.reconciled) ? 'Synced' : 'Draft';
         }
         // Badge styling per status (bg / color / label-with-emoji).
         function _vStatusStyle(st) {
             return ({
-                'Tally & YantrAI':    {bg:'rgba(16, 185, 129, 0.15)', c:'#10b981', t:'Tally & YantrAI 🟢'},
-                'YantrAI':            {bg:'rgba(245, 158, 11, 0.15)', c:'#f59e0b', t:'YantrAI 🟡'},
-                'Edited – resync':    {bg:'rgba(249, 115, 22, 0.15)', c:'#f97316', t:'Edited – resync 🟠'},
-                'Archived (YantrAI)': {bg:'rgba(148, 163, 184, 0.15)', c:'#94a3b8', t:'Archived (YantrAI) 🗄️'},
+                'Synced':       {bg:'rgba(16, 185, 129, 0.15)',  c:'#10b981', t:'🟢 Synced'},
+                'Draft':        {bg:'rgba(245, 158, 11, 0.15)',  c:'#f59e0b', t:'🟡 Draft'},
+                'Edited':       {bg:'rgba(249, 115, 22, 0.15)',  c:'#f97316', t:'🟠 Edited'},
+                'Archived':     {bg:'rgba(148, 163, 184, 0.15)', c:'#94a3b8', t:'🗄️ Archived'},
+                'Tally mirror': {bg:'rgba(59, 130, 246, 0.15)',  c:'#3b82f6', t:'📥 Tally mirror'},
             })[st] || {bg:'rgba(245, 158, 11, 0.15)', c:'#f59e0b', t:st};
+        }
+        // Sprint 45 — Reco column = Tally-side view of this voucher. The flag
+        // comes from db._derive_reco_flag (server-computed) so the badge stays
+        // in sync with the filter logic. `null` here ⇒ render an em-dash.
+        function _vRecoFlag(v) { return v.reco_flag || ''; }
+        function _vRecoStyle(flag) {
+            return ({
+                'matched':            {bg:'rgba(16, 185, 129, 0.10)',  c:'#10b981', t:'✓ Matched'},
+                'not_in_tally':       {bg:'rgba(148, 163, 184, 0.15)', c:'#94a3b8', t:'⊘ Not in Tally'},
+                'duplicate_in_tally': {bg:'rgba(168, 85, 247, 0.15)',  c:'#a855f7', t:'🔁 Duplicate in Tally'},
+                'amount_mismatch':    {bg:'rgba(239, 68, 68, 0.15)',   c:'#ef4444', t:'⚠ Amount mismatch'},
+                'gst_mismatch':       {bg:'rgba(249, 115, 22, 0.15)',  c:'#f97316', t:'⚠ GST split mismatch'},
+                'deleted_in_tally':   {bg:'rgba(148, 163, 184, 0.15)', c:'#94a3b8', t:'🗑 Deleted in Tally'},
+            })[flag] || null;
         }
         function _vRowDate(v)   { return (v.date || '').substring(0, 10); }   // YYYY-MM-DD
         // Debit/Credit columns: Purchase+Payment hit Debit; Sales+Receipt hit Credit.
@@ -6569,9 +6636,19 @@
         // Single predicate combining all 3 layers. Returns true if row should be visible.
         function _voucherFilterMatch(v) {
             const f = _voucherFilters;
-            // Status / lifecycle filter. "Status: any" (blank) shows ALL lines INCLUDING
-            // archived; picking a specific status (incl. "Archived (YantrAI)") narrows to it.
+            // Status / lifecycle filter (YantrAI → Tally direction). "Status: any" shows
+            // ALL lines incl. archived; picking a specific status narrows to it.
             if (f.status && _vRowStatus(v) !== f.status) return false;
+            // Sprint 45 — Reco filter (Tally → YantrAI direction). AND-combined with
+            // Status so a power-user can do "Status=Synced AND Reco=Amount mismatch"
+            // to surface synced-but-drifted vouchers. The 'needs_attention' composite
+            // matches anything that isn't cleanly Matched.
+            if (f.reco) {
+                const flag = v.reco_flag || '';
+                if (f.reco === 'needs_attention') {
+                    if (!flag || flag === 'matched') return false;
+                } else if (f.reco !== flag) return false;
+            }
             // Sprint 26 — AI Gap filter (joins against client-side suggestions map)
             if (f.ai_gap) {
                 const sugs = (window._aiSuggestionsByVoucherId || {})[v.id] || [];
@@ -6603,6 +6680,7 @@
                 party_name:     () => _vRowParty(v),
                 source:         () => _vRowOrigin(v),
                 status:         () => _vRowStatus(v),
+                reco:           () => _vRecoFlag(v),   // Sprint 45 — Tally-side reco flag
                 debit:          () => _vRowDebit(v),
                 credit:         () => _vRowCredit(v),
             };
@@ -6637,6 +6715,7 @@
             const cmpType   = (a,b) => _vRowType(a).localeCompare(_vRowType(b));
             const cmpSource = (a,b) => _vRowSource(a).localeCompare(_vRowSource(b));
             const cmpStatus = (a,b) => _vRowStatus(a).localeCompare(_vRowStatus(b));
+            const cmpReco   = (a,b) => _vRecoFlag(a).localeCompare(_vRecoFlag(b));   // Sprint 45
             const cmpDebit  = (a,b) => _vRowDebit(a)  - _vRowDebit(b);
             const cmpCredit = (a,b) => _vRowCredit(a) - _vRowCredit(b);
 
@@ -6645,7 +6724,7 @@
                 const pick = {
                     date: cmpDate, created_at: cmpCreated, voucher_number: cmpNumber, voucher_type: cmpType,
                     party_name: cmpParty, debit: cmpDebit, credit: cmpCredit,
-                    source: cmpSource, status: cmpStatus
+                    source: cmpSource, status: cmpStatus, reco: cmpReco
                 };
                 cmp = pick[colSortCol] || cmpDate;
                 reverse = (colSort === 'desc');
@@ -7552,6 +7631,17 @@
             setIf('vstat-total', total.toLocaleString('en-IN'));
             setIf('vstat-tally', fromTally.toLocaleString('en-IN'));
             setIf('vstat-uploaded', uploaded.toLocaleString('en-IN'));
+            // Sprint 45 — Tally-side reco gap counter. Anything with a non-empty,
+            // non-'matched' reco_flag has a gap the user might need to act on.
+            // Pill is hidden when zero so the strip stays clean for healthy data.
+            const needsAttn = filtered.filter(v => {
+                const f = v.reco_flag || '';
+                return f && f !== 'matched';
+            }).length;
+            const attnEl = document.getElementById('vstat-attention');
+            const attnWrap = document.getElementById('vstat-attention-wrap');
+            if (attnEl)   attnEl.innerText = needsAttn.toLocaleString('en-IN');
+            if (attnWrap) attnWrap.style.display = needsAttn > 0 ? '' : 'none';
             // Debit / Credit / Net
             let debit = 0, credit = 0;
             filtered.forEach(v => { debit += _vRowDebit(v); credit += _vRowCredit(v); });
@@ -11648,7 +11738,7 @@
             if (scEl) scEl.innerText = `${checkedCount} item(s) selected`;
 
             const show = checkedCount > 0;
-            const viewingArchived = !!(window._voucherFilters && _voucherFilters.status === 'Archived (YantrAI)');
+            const viewingArchived = !!(window._voucherFilters && _voucherFilters.status === 'Archived');
             const arcBtn = document.getElementById('archive-selected-btn');
             const resBtn = document.getElementById('restore-selected-btn');
             const delBtn = document.getElementById('delete-selected-btn');
@@ -11682,7 +11772,7 @@
                 const j = await res.json();
                 if (!res.ok) throw new Error(j.detail || 'archive failed');
                 if (typeof showChatToast === 'function')
-                    showChatToast(`🗄️ Archived ${j.archived||0} voucher(s). Filter Status → "Archived (YantrAI)" to view/restore.`);
+                    showChatToast(`🗄️ Archived ${j.archived||0} voucher(s). Filter Status → "Archived" to view/restore.`);
                 refreshVouchers();
             } catch (e) { alert('Archive failed: ' + e.message); }
         };
