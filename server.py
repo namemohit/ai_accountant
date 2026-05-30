@@ -272,6 +272,27 @@ async def dispatch_tally_command(token: str, cmd_type: str, data: dict = None) -
     finally:
         tally_futures.pop(req_id, None)
 
+# Sprint 47 — PWA / orchestrator probe endpoints. Returned the moment the
+# request reaches the route layer; NO DB hit, NO auth check (whitelisted in
+# _AUTH_WHITELIST_EXACT above). The browser's installed-PWA service worker
+# and any external uptime monitor poll /healthz + /api/version on a tight
+# loop; previously those 404'd through the full auth + verify_token + DB
+# path and exhausted Supabase Pooler. Two ms response now.
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True}
+
+
+@app.get("/api/version")
+async def api_version():
+    return {"version": APP_VERSION}
+
+
+@app.get("/api/health")
+async def api_health():
+    return {"ok": True}
+
+
 @app.get("/history")
 async def get_invoice_history(company_name: str = None):
     return db.get_history(company_name)
@@ -1236,7 +1257,13 @@ _AUTH_WHITELIST_PREFIXES = ("/api/login", "/api/auth/", "/api/onboard", "/api/re
                             "/api/webhooks/", "/static/", "/tally_bridge_agent",
                             "/api/shared/", "/s/")  # Sprint 84 public shared chats
 _AUTH_WHITELIST_EXACT = ("/", "/login", "/sw.js", "/manifest.json", "/favicon.ico",
-                         "/share-target")
+                         "/share-target",
+                         # Sprint 47 — PWA service worker + Cloud Run / Kubernetes probe
+                         # endpoints. Browsers / orchestrators hammer these every few
+                         # seconds; if they go through auth + DB they exhaust Supabase
+                         # Pooler (pool_size=15). Whitelisted so they short-circuit to
+                         # the cheap handlers below.
+                         "/healthz", "/api/version", "/api/health")
 def _is_auth_whitelisted(path):
     return path in _AUTH_WHITELIST_EXACT or any(path.startswith(p) for p in _AUTH_WHITELIST_PREFIXES)
 
