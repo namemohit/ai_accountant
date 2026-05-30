@@ -73,8 +73,20 @@ def resolve_agent_request(payload: dict, required_perm: str = "edit"):
             raise HTTPException(status_code=404, detail="Company not found")
         return sess["user_id"], str(company_id), row["name"]
 
-    # Legacy path — no auth, just use company_name (must be removed once all agents upgraded)
-    return None, None, company_name or "Acme Corp"
+    # Legacy path — no session_token+company_id in the payload (e.g. the web UI's
+    # Import/Export buttons send only company_name). Sprint 47: ALWAYS resolve the
+    # company_id from the name here, because downstream dispatch_tally_command keys
+    # on the company_id UUID (that's what the agent's WebSocket registers under).
+    # Returning company_id=None made the caller fall back to the NAME as the WS
+    # key → "No active Tally WebSocket connections for token '<name>'" → the
+    # "Tally bridge unavailable" error even with the agent fully connected.
+    cid = None
+    if company_name:
+        try:
+            cid = _resolve_company_id_by_name(company_name)
+        except Exception:
+            cid = None
+    return None, (str(cid) if cid else None), company_name or "Acme Corp"
 
 
 def _prune_user_sessions_in_memory(user_id, keep_token):
@@ -1013,7 +1025,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "236"
+APP_VERSION = "237"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
