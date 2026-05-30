@@ -231,6 +231,10 @@ async def tally_websocket_endpoint(websocket: WebSocket):
         while True:
             try:
                 msg_text = await websocket.receive_text()
+                # Sprint 47 — log inbound frame size so we can see exactly how big
+                # the seed_baseline (Import) response is and whether it's near the
+                # ws_max_size ceiling that caused the 1009 "message too big" drops.
+                print(f"[WS RECV] {len(msg_text)/1024/1024:.2f} MB frame on key {conn_key}", flush=True)
                 response = json.loads(msg_text)
                 request_id = response.get("request_id")
                 if request_id and request_id in tally_futures:
@@ -1025,7 +1029,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "237"
+APP_VERSION = "239"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -9485,5 +9489,15 @@ async def merge_parties_endpoint(payload: MergePartiesModel):
 if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 8000))
+    # Sprint 47 — ws_max_size bumped from the 16MB default to 256MB. The
+    # seed_baseline (Import-from-Tally) response streams ALL vouchers +
+    # ledgers + raw XML in one WebSocket frame; a real book (JMK = 2,849
+    # vouchers ≈ 20-30MB) exceeded 16MB, so the server rejected the frame
+    # with close code 1009 "message too big", the agent's tunnel dropped,
+    # and dispatch_tally_command sat until its 300s timeout → the Import
+    # dialog spun forever. The agent already allows 50MB inbound; 64MB here
+    # covers large books with raw XML. (Proper long-term fix: chunk the
+    # seed_baseline response — tracked as a follow-up.)
     uvicorn.run(app, host="0.0.0.0", port=port,
-                ws_ping_interval=300, ws_ping_timeout=300)
+                ws_ping_interval=300, ws_ping_timeout=300,
+                ws_max_size=256 * 1024 * 1024)
