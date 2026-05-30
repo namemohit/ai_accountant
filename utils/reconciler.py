@@ -4,11 +4,31 @@ load_dotenv()
 import db
 import json
 from datetime import datetime
-from google import generativeai as genai
 
-# Setup key
-if os.getenv("GEMINI_API_KEY"):
-    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# NOTE: google.generativeai is imported lazily via _get_genai() below, NOT at
+# module load. The module-level `from google import generativeai as genai`
+# + `genai.configure(api_key=...)` combo blocked Cloud Run's startup probe
+# (revisions 00074 + 00075, 30-May-2026) — the configure call's post-import
+# side-effect appears to hang under Cloud Run's restricted-network startup
+# window. Deferring both the import AND the configure means uvicorn can
+# bind 0.0.0.0:$PORT immediately. The SDK only loads the first time
+# something actually needs Gemini (reconciliation flow, batch embed, etc.).
+_GENAI_MODULE = None
+_GENAI_CONFIGURED = False
+
+
+def _get_genai():
+    """Lazy-init for google.generativeai. Imports + configures on first call,
+    returns the cached module on subsequent calls. Safe to call from any
+    request-handling code path; never call from module-level."""
+    global _GENAI_MODULE, _GENAI_CONFIGURED
+    if _GENAI_MODULE is None:
+        from google import generativeai as _genai
+        _GENAI_MODULE = _genai
+    if not _GENAI_CONFIGURED and os.getenv("GEMINI_API_KEY"):
+        _GENAI_MODULE.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        _GENAI_CONFIGURED = True
+    return _GENAI_MODULE
 
 # ── Confidence cutoffs for party suggestions (tunable) ──────────────────────
 # Cosine similarity (1 - distance) of the best party candidate must clear
@@ -27,6 +47,7 @@ HEAD_MIN_CONF = float(os.getenv("RECON_HEAD_MIN_CONF", "0.5"))
 
 def get_reconciliation_embedding(text):
     try:
+        genai = _get_genai()
         result = genai.embed_content(
             model="models/gemini-embedding-2",
             content=text,
@@ -376,6 +397,7 @@ Return ONLY a JSON array, one object per line in the same order, each with:
 Return the array only, no markdown fences, no commentary.
 """
             try:
+                genai = _get_genai()
                 model = genai.GenerativeModel('gemini-flash-latest')
                 response = model.generate_content(prompt)
                 text = response.text or ""
