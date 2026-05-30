@@ -1974,6 +1974,8 @@
                                 <option value="amount_mismatch">⚠️ Amount mismatch</option>
                                 <option value="gst_mismatch">⚠️ GST split mismatch</option>
                                 <option value="deleted_in_tally">🗑️ Deleted in Tally</option>
+                                <option value="still_in_tally">⚠️ Still in Tally (archived)</option>
+                                <option value="removed_from_tally">🗑️ Removed from Tally (archived)</option>
                             </select>
                             <input type="date" id="vf-from" onchange="applyVoucherFilters()" title="From date" style="padding: 6px 8px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
                             <input type="date" id="vf-to" onchange="applyVoucherFilters()" title="To date" style="padding: 6px 8px; background: var(--bg-light); color: white; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem;">
@@ -6625,6 +6627,9 @@
                 'amount_mismatch':    {bg:'rgba(239, 68, 68, 0.15)',   c:'#ef4444', t:'⚠ Amount mismatch'},
                 'gst_mismatch':       {bg:'rgba(249, 115, 22, 0.15)',  c:'#f97316', t:'⚠ GST split mismatch'},
                 'deleted_in_tally':   {bg:'rgba(148, 163, 184, 0.15)', c:'#94a3b8', t:'🗑 Deleted in Tally'},
+                // Phase 3 — archived-aware lifecycle (shown in the Archived view).
+                'still_in_tally':     {bg:'rgba(245, 158, 11, 0.15)',  c:'#f59e0b', t:'⚠ Still in Tally'},
+                'removed_from_tally': {bg:'rgba(100, 116, 139, 0.15)', c:'#64748b', t:'🗑 Removed from Tally'},
             })[flag] || null;
         }
         function _vRowDate(v)   { return (v.date || '').substring(0, 10); }   // YYYY-MM-DD
@@ -6653,7 +6658,7 @@
             if (f.reco) {
                 const flag = v.reco_flag || '';
                 if (f.reco === 'needs_attention') {
-                    if (!flag || flag === 'matched') return false;
+                    if (!flag || flag === 'matched' || flag === 'removed_from_tally') return false;
                 } else if (f.reco !== flag) return false;
             }
             // Sprint 26 — AI Gap filter (joins against client-side suggestions map)
@@ -7695,7 +7700,8 @@
             // Pill is hidden when zero so the strip stays clean for healthy data.
             const needsAttn = filtered.filter(v => {
                 const f = v.reco_flag || '';
-                return f && f !== 'matched';
+                // Phase 3 — 'removed_from_tally' is resolved (archived + gone), not a gap.
+                return f && f !== 'matched' && f !== 'removed_from_tally';
             }).length;
             const attnEl = document.getElementById('vstat-attention');
             const attnWrap = document.getElementById('vstat-attention-wrap');

@@ -1029,7 +1029,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "245"
+APP_VERSION = "246"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -6906,6 +6906,25 @@ async def ingest_tally_data(payload: dict):
                               v_result.get('upserted',0)+ledger_count+group_count+stock_count,
                               'success')
 
+            # Phase 3 (Sprint 52) — voucher deletion-detection. On a FULL pull the
+            # `vouchers` array IS the complete live set, so every voucher's GUID gives
+            # us the live-GUID set with NO agent change needed. (Prefer an explicit
+            # live_guids['vouchers'] if a newer agent ever sends one.) reconcile flags
+            # rows whose GUID vanished from Tally (missing_from_tally_at) so the Reco
+            # column shows them; it runs AFTER save (still-present rows are consistent)
+            # and is internally guarded against empty/partial pulls. NEVER on
+            # incremental — a partial fetch cannot prove a voucher is gone.
+            _vdel = 0
+            if _do_full:
+                try:
+                    _lg = ws_response.get("live_guids") or {}
+                    _live_vguids = (_lg.get("vouchers") if isinstance(_lg, dict) else None) \
+                                   or [v.get("guid") for v in vouchers if v.get("guid")]
+                    _vdel = await _loop.run_in_executor(
+                        None, db.reconcile_voucher_deletions, tally_company, _live_vguids)
+                except Exception as _vre:
+                    print(f"[reconcile vouchers] {_vre}", flush=True)
+
             # Phase 2 (Sprint 51) — ONE Event-Log summary line per sync (replaces
             # the per-voucher flood that save_tally_vouchers used to write). Counts
             # come straight from the upsert result + master counts. Mode-aware label.
@@ -6913,10 +6932,11 @@ async def ingest_tally_data(payload: dict):
                 _created = int(v_result.get('created', 0))
                 _updated = int(v_result.get('updated', 0))
                 _parts = []
-                if _created or _updated or vouchers:
+                if _created or _updated or _vdel or vouchers:
                     _vparts = []
                     if _created: _vparts.append(f"{_created:,} new")
                     if _updated: _vparts.append(f"{_updated:,} updated")
+                    if _vdel:    _vparts.append(f"{_vdel:,} removed")
                     if not _vparts: _vparts.append("no changes")
                     _parts.append(f"{', '.join(_vparts)} vouchers")
                 if ledger_count: _parts.append(f"{ledger_count:,} ledgers")

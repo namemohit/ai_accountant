@@ -3816,23 +3816,37 @@ def _gst_split_differs(row):
 
 def _derive_reco_flag(row):
     """Compute the Reco-column flag for one merged voucher row. Priority:
-    Deleted > Duplicate > Amount mismatch > GST mismatch > Not in Tally > Matched.
-    Pure-Tally rows (no YantrAI source) are 'matched' (Tally IS source-of-truth
-    for them) unless their own discarded_at is set."""
+    Removed-from-Tally (archived + gone) / Deleted-in-Tally (gone, not archived) >
+    Still-in-Tally (archived but still live in Tally) > Duplicate > Amount mismatch >
+    GST mismatch > Not in Tally > Matched.
+
+    Phase 3 (Sprint 52) — archived-aware lifecycle. After a user archives a voucher
+    in YantrAI, the next FULL import reconciles whether it's still in Tally:
+      • archived + gone from Tally  → 'removed_from_tally'  (🗑 resolved — gone both sides)
+      • archived + still in Tally   → 'still_in_tally'      (⚠️ cleanup pending in Tally)
+    A NON-archived voucher that vanished from Tally is 'deleted_in_tally' (a real gap
+    YantrAI still considers active). "Gone" = its own missing_from_tally_at sentinel
+    (set by reconcile_voucher_deletions) OR the legacy discarded_at; for invoice rows
+    the same is read off the Tally twin (tv_missing_from_tally_at / tv_discarded_at)."""
+    archived = bool(row.get('archived'))
     # Tally-source rows: the row IS YantrAI's mirror of what's in Tally.
     if row.get('source') != 'invoice':
-        if row.get('discarded_at'):
-            return 'deleted_in_tally'
+        if row.get('missing_from_tally_at') or row.get('discarded_at'):
+            return 'removed_from_tally' if archived else 'deleted_in_tally'
+        if archived:
+            return 'still_in_tally'
         return 'matched'
     # Invoice-source rows: compare against Tally twin from LATERAL lookup.
-    if row.get('tv_discarded_at'):
-        return 'deleted_in_tally'
+    if row.get('tv_missing_from_tally_at') or row.get('tv_discarded_at'):
+        return 'removed_from_tally' if archived else 'deleted_in_tally'
     try:
         count = int(row.get('tv_count') or 0)
     except (TypeError, ValueError):
         count = 0
     if count == 0:
-        return 'not_in_tally'
+        return 'not_in_tally'          # never in Tally — archiving a draft is no Tally gap
+    if archived:
+        return 'still_in_tally'        # archived here, but the Tally twin is still live
     if count > 1:
         return 'duplicate_in_tally'
     # count == 1 — total + GST comparison
@@ -3854,7 +3868,7 @@ def _derive_reco_flag(row):
 
 
 _RECO_SCRATCH_KEYS = (
-    'tv_count', 'tv_amount', 'tv_discarded_at',
+    'tv_count', 'tv_amount', 'tv_discarded_at', 'tv_missing_from_tally_at',
     'tv_cgst_amount', 'tv_sgst_amount', 'tv_igst_amount',
 )
 
@@ -3899,7 +3913,7 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                'tally' AS source, updated_at, created_at,
                COALESCE(origin, 'tally') AS origin, yantrai_uid,
                (archived_at IS NOT NULL) AS archived,
-               deleted_from_tally_at, discarded_at
+               deleted_from_tally_at, discarded_at, missing_from_tally_at
         FROM tally_vouchers
         WHERE {' AND '.join(tally_where)}
         ORDER BY date DESC
@@ -3930,6 +3944,9 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
         # Sprint 45 — stringify discarded_at (Tally-side soft-delete sentinel).
         if r.get('discarded_at'):
             r['discarded_at'] = str(r['discarded_at'])
+        # Sprint 52 — stringify the voucher deletion-detection sentinel.
+        if r.get('missing_from_tally_at'):
+            r['missing_from_tally_at'] = str(r['missing_from_tally_at'])
         results.append(r)
 
     # --- Invoice-created vouchers (from invoices table) ---
@@ -3981,7 +3998,7 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
                ob.tally_voucher_guid,
                COALESCE(ob.pushed_state, FALSE) AS was_pushed,
                COALESCE(tv.tv_count, 0) AS tv_count,
-               tv.tv_amount, tv.tv_discarded_at,
+               tv.tv_amount, tv.tv_discarded_at, tv.tv_missing_from_tally_at,
                tv.tv_cgst_amount, tv.tv_sgst_amount, tv.tv_igst_amount
         FROM invoices i
         LEFT JOIN LATERAL (
@@ -4007,6 +4024,7 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
             SELECT COUNT(*) AS tv_count,
                    MAX(amount) AS tv_amount,
                    MAX(discarded_at) AS tv_discarded_at,
+                   MAX(missing_from_tally_at) AS tv_missing_from_tally_at,
                    MAX(cgst_amount) AS tv_cgst_amount,
                    MAX(sgst_amount) AS tv_sgst_amount,
                    MAX(igst_amount) AS tv_igst_amount
@@ -4034,6 +4052,9 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
         # Sprint 45 — stringify the Tally-twin discarded_at for the Reco helper.
         if r.get('tv_discarded_at'):
             r['tv_discarded_at'] = str(r['tv_discarded_at'])
+        # Sprint 52 — stringify the Tally-twin deletion-detection sentinel.
+        if r.get('tv_missing_from_tally_at'):
+            r['tv_missing_from_tally_at'] = str(r['tv_missing_from_tally_at'])
         r['ledger_entries'] = []
         r['cost_centres'] = []
         r['bill_refs'] = []
@@ -6657,12 +6678,14 @@ def _ensure_tally_delete_column(cur):
             (SELECT 1 FROM information_schema.columns
               WHERE table_name='tally_vouchers' AND column_name='deleted_from_tally_at' LIMIT 1),
             (SELECT 1 FROM information_schema.columns
-              WHERE table_name='invoices' AND column_name='deleted_from_tally_at' LIMIT 1)""")
-        tv_has, inv_has = cur.fetchone()
+              WHERE table_name='invoices' AND column_name='deleted_from_tally_at' LIMIT 1),
+            (SELECT 1 FROM information_schema.columns
+              WHERE table_name='tally_vouchers' AND column_name='missing_from_tally_at' LIMIT 1)""")
+        tv_has, inv_has, miss_has = cur.fetchone()
     except Exception:
-        tv_has = inv_has = None
-    if tv_has and inv_has:
-        _TALLY_DELETE_READY = True   # both columns present → nothing to do
+        tv_has = inv_has = miss_has = None
+    if tv_has and inv_has and miss_has:
+        _TALLY_DELETE_READY = True   # all columns present → nothing to do
         return
     # Fresh DB path — column(s) missing, so the ALTER is safe (nothing else
     # is using the table yet on a brand-new install).
@@ -6672,6 +6695,15 @@ def _ensure_tally_delete_column(cur):
     if not inv_has:
         cur.execute("ALTER TABLE invoices "
                     "ADD COLUMN IF NOT EXISTS deleted_from_tally_at TIMESTAMP")
+    # Phase 3 (Sprint 52) — voucher deletion-detection sentinel. DISTINCT from
+    # discarded_at (which is overloaded: AI-duplicate-accept writes it and it's
+    # never auto-cleared). missing_from_tally_at is owned SOLELY by
+    # reconcile_voucher_deletions: set when a full pull no longer contains a
+    # voucher's GUID, cleared when it reappears — so it self-heals and never
+    # conflicts with the duplicate-hide meaning of discarded_at.
+    if not miss_has:
+        cur.execute("ALTER TABLE tally_vouchers "
+                    "ADD COLUMN IF NOT EXISTS missing_from_tally_at TIMESTAMP")
     try:
         cur.connection.commit()
     except Exception:
@@ -8635,6 +8667,87 @@ def reconcile_tally_deletions(company_name, entity, live_guids):
         return n
     except Exception as e:
         conn.rollback(); print(f"[reconcile_tally_deletions] {e}"); return 0
+    finally:
+        cur.close(); conn.close()
+
+
+def reconcile_voucher_deletions(company_name, live_guids):
+    """Phase 3 (Sprint 52) — detect VOUCHERS deleted in Tally. On a COMPLETE full
+    pull, `live_guids` is the set of GUIDs of every voucher currently in Tally.
+    Any tally_vouchers row whose tally_master_id (= its Tally GUID) is NOT in that
+    set was deleted in Tally since the last sync → mark missing_from_tally_at.
+    Rows whose GUID IS in the set get missing_from_tally_at cleared (self-heal: a
+    voucher that reappears, or a transient partial pull, recovers automatically).
+
+    **Call ONLY on a full pull, AFTER save_tally_vouchers has upserted every pulled
+    voucher.** Because the live set and the just-saved rows come from the SAME pull,
+    every still-present voucher's tally_master_id exactly equals a live GUID — so a
+    row that's "not in the live set" is a row from a PRIOR pull that's now gone, not
+    a false positive.
+
+    Vouchers are the customer's books, so two hard guards prevent a bad pull from
+    wiping the Reco state:
+      • EMPTY live set → no-op. An empty 'full' pull is far likelier a fetch glitch
+        than a genuinely voucher-less company; we refuse to flag everything missing.
+      • >50% guard → if marking-missing would hit more than half of the company's
+        GUID-bearing voucher rows (and >25 rows), skip + log loudly. A legitimate
+        bulk delete that large is rare; a partial pull or GUID drift is the likelier
+        cause, and 'detected nothing this time' is safer than 'flagged 1000s wrongly'.
+    Returns the number of vouchers newly marked missing (0 if guarded out)."""
+    if not company_name:
+        return 0
+    live = [g for g in (live_guids or []) if g]
+    if not live:
+        print(f"[reconcile_voucher_deletions] empty live set for {company_name!r} "
+              f"— skipping (refusing to mass-flag vouchers)", flush=True)
+        return 0
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        # The sync path may reach here before get_all_vouchers ever ran, so the
+        # missing_from_tally_at column might not exist yet on a provisioned DB.
+        # Ensure it (lock-free probe; ALTERs only if genuinely absent) — same
+        # helper the Vouchers page uses.
+        _ensure_tally_delete_column(cur)
+        # Self-heal FIRST: any row whose GUID is back in Tally clears its sentinel.
+        cur.execute("""UPDATE tally_vouchers SET missing_from_tally_at=NULL
+                       WHERE company_name=%s AND missing_from_tally_at IS NOT NULL
+                         AND tally_master_id = ANY(%s)""", (company_name, live))
+        resurrected = cur.rowcount
+
+        # How many GUID-bearing voucher rows exist (denominator for the guard)?
+        cur.execute("""SELECT COUNT(*) FROM tally_vouchers
+                       WHERE company_name=%s
+                         AND tally_master_id IS NOT NULL AND tally_master_id <> ''""",
+                    (company_name,))
+        total_guid_rows = cur.fetchone()[0] or 0
+        # How many WOULD be newly flagged missing (present in DB, absent from Tally)?
+        cur.execute("""SELECT COUNT(*) FROM tally_vouchers
+                       WHERE company_name=%s AND missing_from_tally_at IS NULL
+                         AND tally_master_id IS NOT NULL AND tally_master_id <> ''
+                         AND NOT (tally_master_id = ANY(%s))""",
+                    (company_name, live))
+        would_flag = cur.fetchone()[0] or 0
+
+        if would_flag > 25 and total_guid_rows and would_flag > 0.5 * total_guid_rows:
+            conn.commit()   # keep the self-heal; skip only the mass-flag
+            print(f"[reconcile_voucher_deletions] GUARD TRIPPED for {company_name!r}: "
+                  f"would flag {would_flag}/{total_guid_rows} vouchers missing (>50%) — "
+                  f"skipping (likely a partial pull or GUID drift, not real deletions).",
+                  flush=True)
+            return 0
+
+        cur.execute("""UPDATE tally_vouchers SET missing_from_tally_at=CURRENT_TIMESTAMP
+                       WHERE company_name=%s AND missing_from_tally_at IS NULL
+                         AND tally_master_id IS NOT NULL AND tally_master_id <> ''
+                         AND NOT (tally_master_id = ANY(%s))""", (company_name, live))
+        n = cur.rowcount
+        conn.commit()
+        if n or resurrected:
+            print(f"[reconcile_voucher_deletions] {company_name!r}: flagged {n} voucher(s) "
+                  f"deleted in Tally, cleared {resurrected} reappeared", flush=True)
+        return n
+    except Exception as e:
+        conn.rollback(); print(f"[reconcile_voucher_deletions] {e}"); return 0
     finally:
         cur.close(); conn.close()
 
