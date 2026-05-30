@@ -644,6 +644,18 @@ def build_create_company_xml(data):
     if address:
         optional += f"<ADDRESS.LIST TYPE=\"String\"><ADDRESS>{address}</ADDRESS></ADDRESS.LIST>"
 
+    # SPRINT 42 NOTE — Tally Prime company-creation XML is undocumented and
+    # extremely sensitive. Tested envelopes so far:
+    #   v1: <IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>...
+    #       → Tally returns "DESC not found" (harmless reject, no crash).
+    #   v2: <DESC><STATICVARIABLES>...</DESC><DATA>...
+    #       → Tally CRASHED with c0000005 (Memory Access Violation).
+    # Until we have a Tally instance we can crash safely, this builder returns
+    # the harmless-reject v1 envelope so the rest of the pipeline (auth → WS →
+    # dispatch → response parsing → UI) can be tested without ever risking the
+    # user's live books. The create_company branch will return an error result;
+    # the UI will show "DESC not found" in the raw-response details. That's the
+    # current expected behaviour.
     return (
         f"<ENVELOPE>"
         f"<HEADER>"
