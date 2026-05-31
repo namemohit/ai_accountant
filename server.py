@@ -1029,7 +1029,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "249"
+APP_VERSION = "250"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -4945,6 +4945,16 @@ async def set_voucher_dup_status_endpoint(dup_ref: str, payload: dict):
     return db.set_dup_group_status(company_name, dup_ref, status)
 
 
+@app.get("/api/tally/sync-status")
+async def tally_sync_status(company_name: str = None):
+    """Sprint 53.4 — live progress of the current/last Sync-from-Tally for this
+    company (phase + saved-voucher counts). The Vouchers progress dialog polls this
+    so a long import shows real progress and can run in the background."""
+    if not company_name:
+        return {"status": "idle", "job": None}
+    return {"status": "ok", "job": db.get_sync_job(company_name)}
+
+
 @app.post("/api/vouchers/cleanup/{cleanup_id}/done")
 async def mark_cleanup_done_endpoint(cleanup_id: str, payload: dict = None):
     """Sprint 33 — User ticks off a Tally-cleanup item after deleting it in Tally."""
@@ -6753,8 +6763,11 @@ async def ingest_tally_data(payload: dict):
             "since_stock_alterid":   _since_s,
             "full": _do_full,                          # agent uses this to collect live-GUID lists for deletion reconcile
         }
+        # Sprint 53.4 — open a progress job the UI can poll (phase + counts). Best-effort.
+        try: db.start_sync_job(company, 'full' if _do_full else 'incremental')
+        except Exception: pass
         ws_response = await dispatch_tally_command(conn_key, "seed_baseline", _cmd_payload)
-        
+
         if not ws_response or ws_response.get("status") != "success":
             # P0 FIX: never fabricate a customer's books. If the bridge gave us no
             # real data, fail loudly and change nothing — do NOT seed simulator data.
@@ -6764,6 +6777,9 @@ async def ingest_tally_data(payload: dict):
                     None, db.log_tally_sync, company, 'baseline', 0, 0, 'failed')
             except Exception:
                 pass
+            try: db.update_sync_job(company, state='error',
+                                    error='Tally bridge unavailable — open Tally and start the YantrAI Tally Bridge agent, then retry.')
+            except Exception: pass
             raise HTTPException(status_code=502, detail=(
                 "Tally bridge unavailable — open Tally and start the YantrAI Tally "
                 "Bridge agent on that machine, then retry. Nothing was changed."))
@@ -6896,12 +6912,23 @@ async def ingest_tally_data(payload: dict):
         # (which would kill WS pings and cause 1006 disconnect on large syncs).
         import asyncio as _aio
         _loop = _aio.get_event_loop()
+        # Sprint 53.4 — live progress: announce the save phase + total, and a callback
+        # that the save loop ticks every ~200 vouchers (best-effort, keyed by UI company).
+        try: db.update_sync_job(company, phase='Saving vouchers to YantrAI…', vouchers_total=len(vouchers))
+        except Exception: pass
+        def _save_progress(done, total, _co=company):
+            try: db.update_sync_job(_co, vouchers_done=done, vouchers_total=total)
+            except Exception: pass
         try:
-            v_result = await _loop.run_in_executor(None, db.save_tally_vouchers, tally_company, vouchers, 'tally_pull')
+            v_result = await _loop.run_in_executor(None, db.save_tally_vouchers, tally_company, vouchers, 'tally_pull', _save_progress)
             ledger_count = await _loop.run_in_executor(None, db.save_tally_ledgers, tally_company, rich_ledgers)
             group_count = await _loop.run_in_executor(None, db.save_tally_groups, tally_company, groups)
             stock_count = await _loop.run_in_executor(None, db.save_tally_stock_items, tally_company, stock_items)
             print(f"[SEED BASELINE] Upserted: {v_result.get('upserted',0)} vouchers, {ledger_count} ledgers, {group_count} groups, {stock_count} stock items.")
+            try: db.update_sync_job(company, phase='Reconciling & finalizing…',
+                                    vouchers_done=v_result.get('upserted',0),
+                                    ledgers=ledger_count, groups=group_count, stock=stock_count)
+            except Exception: pass
             # Preserve verbatim Tally XML (first-hand data for future training). No-op for
             # older agents that don't send raw_xml — fully backward-compatible.
             try:
@@ -6958,6 +6985,9 @@ async def ingest_tally_data(payload: dict):
                 _summary = ("Full import" if _do_full else "Incremental sync") + \
                            (" — " + " · ".join(_parts) if _parts else " — no changes")
                 await _loop.run_in_executor(None, db.log_tally_sync_batch, tally_company, _summary)
+                try: db.update_sync_job(company, state='done', phase='Done',
+                                        removed=_vdel, detail=_summary)
+                except Exception: pass
             except Exception as _sb_err:
                 print(f"[SEED BASELINE] sync-batch summary warning: {_sb_err}")
 
@@ -7065,6 +7095,8 @@ async def ingest_tally_data(payload: dict):
         except Exception as v_err:
             print(f"[SEED BASELINE] Error saving Tally data: {v_err}")
             db.log_tally_sync(tally_company, 'baseline', 0, 0, 'failed', str(v_err))
+            try: db.update_sync_job(company, state='error', error=f"Save failed: {v_err}")
+            except Exception: pass
         
         # =====================================================================
         # BANK RECONCILIATION AI TRAINING: Seed RAG knowledge base with

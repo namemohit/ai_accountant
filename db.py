@@ -3941,6 +3941,108 @@ def set_dup_group_status(company_name, dup_ref, status):
         cur.close(); conn.close()
 
 
+# ── Sprint 53.4 — Tally sync progress (live progress + run-in-background) ─────
+# One status row per company, upserted as a Sync-from-Tally runs. The UI polls it
+# to show phase + "Saving X / N" and to keep a backgrounded sync's button pulsing.
+# All writes are best-effort (wrapped by callers) so they never break the sync.
+_SYNC_JOBS_READY = False
+
+
+def _ensure_sync_jobs_table(cur):
+    global _SYNC_JOBS_READY
+    if _SYNC_JOBS_READY:
+        return
+    try:
+        cur.execute("""CREATE TABLE IF NOT EXISTS tally_sync_jobs (
+            company_name   TEXT PRIMARY KEY,
+            mode           TEXT,
+            state          TEXT,                 -- running | done | error
+            phase          TEXT,
+            vouchers_done  INT DEFAULT 0,
+            vouchers_total INT DEFAULT 0,
+            ledgers        INT DEFAULT 0,
+            groups         INT DEFAULT 0,
+            stock          INT DEFAULT 0,
+            removed        INT DEFAULT 0,
+            detail         TEXT,
+            error          TEXT,
+            started_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+        cur.connection.commit()
+    except Exception as e:
+        print(f"[_ensure_sync_jobs_table] {e}")
+        try: cur.connection.rollback()
+        except Exception: pass
+    _SYNC_JOBS_READY = True
+
+
+def start_sync_job(company_name, mode):
+    if not company_name:
+        return
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        _ensure_sync_jobs_table(cur)
+        cur.execute("""INSERT INTO tally_sync_jobs
+            (company_name, mode, state, phase, vouchers_done, vouchers_total,
+             ledgers, groups, stock, removed, detail, error, started_at, updated_at)
+            VALUES (%s,%s,'running','Contacting the Windows Tally Bridge…',
+                    0,0,0,0,0,0,NULL,NULL,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+            ON CONFLICT (company_name) DO UPDATE SET
+              mode=EXCLUDED.mode, state='running',
+              phase='Contacting the Windows Tally Bridge…',
+              vouchers_done=0, vouchers_total=0, ledgers=0, groups=0, stock=0,
+              removed=0, detail=NULL, error=NULL,
+              started_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP""",
+            (company_name, mode))
+        conn.commit()
+    except Exception as e:
+        conn.rollback(); print(f"[start_sync_job] {e}")
+    finally:
+        cur.close(); conn.close()
+
+
+def update_sync_job(company_name, **fields):
+    """Best-effort progress update. Allowed keys: state, phase, vouchers_done,
+    vouchers_total, ledgers, groups, stock, removed, detail, error."""
+    allowed = ('state', 'phase', 'vouchers_done', 'vouchers_total', 'ledgers',
+               'groups', 'stock', 'removed', 'detail', 'error')
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k}=%s"); vals.append(v)
+    if not company_name or not sets:
+        return
+    sets.append("updated_at=CURRENT_TIMESTAMP")
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute(f"UPDATE tally_sync_jobs SET {', '.join(sets)} WHERE company_name=%s",
+                    vals + [company_name])
+        conn.commit()
+    except Exception as e:
+        conn.rollback(); print(f"[update_sync_job] {e}")
+    finally:
+        cur.close(); conn.close()
+
+
+def get_sync_job(company_name):
+    if not company_name:
+        return None
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_sync_jobs_table(cur)
+        cur.execute("SELECT * FROM tally_sync_jobs WHERE company_name=%s", (company_name,))
+        r = cur.fetchone()
+        if r:
+            for k in ('started_at', 'updated_at'):
+                if r.get(k): r[k] = str(r[k])
+            return dict(r)
+        return None
+    except Exception as e:
+        print(f"[get_sync_job] {e}"); return None
+    finally:
+        pput(conn)
+
+
 def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limit=500, offset=0):
     """Return merged vouchers from tally_vouchers + invoices, sorted by date desc.
 
@@ -8513,7 +8615,7 @@ def tally_twin_exists(company_name, yantrai_uid):
         cur.close(); pput(conn)
 
 
-def save_tally_vouchers(company_name, vouchers, source=None):
+def save_tally_vouchers(company_name, vouchers, source=None, progress_cb=None):
     """
     UPSERT vouchers by (company_name, tally_master_id || voucher_number).
     Critical fix: previously did DELETE-then-INSERT which wiped all history every sync.
@@ -8523,11 +8625,15 @@ def save_tally_vouchers(company_name, vouchers, source=None):
     per-voucher event logging — Phase 2 (Sprint 51) replaced that flood with ONE
     'sync_batch' summary row written by the caller via log_tally_sync_batch, using
     the {created, updated} counts returned here. Local create paths leave source=None.
+
+    Sprint 53.4 — `progress_cb(done, total)` (optional, best-effort): called every
+    ~200 vouchers so the caller can report live save progress to the UI.
     """
     if not vouchers:
         return {"upserted": 0, "skipped": 0, "created": 0, "updated": 0}
     conn = get_conn()
     cursor = conn.cursor()
+    _total = len(vouchers)
     upserted = 0
     skipped = 0
     created = 0
@@ -8664,7 +8770,14 @@ def save_tally_vouchers(company_name, vouchers, source=None):
                 updated += 1
             else:
                 created += 1
+            # Sprint 53.4 — live save progress (best-effort; every ~200 rows).
+            if progress_cb and (upserted % 200 == 0):
+                try: progress_cb(upserted, _total)
+                except Exception: pass
         conn.commit()
+        if progress_cb:
+            try: progress_cb(upserted, _total)   # final tick
+            except Exception: pass
         # Phase 2 (Sprint 51) — per-voucher DOWNLOAD events REMOVED. A full sync
         # of N vouchers used to write N voucher_sync_events rows, flooding the
         # Event Log (2,849 "tally_updated" lines for JMK). The caller (ingest

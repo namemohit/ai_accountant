@@ -12035,6 +12035,11 @@
         }
         function openVoucherImportMenu(ev) {
             if (ev) ev.stopPropagation();
+            // Sprint 53.4 — if a sync is running in the background, the pulsing Import
+            // button reopens its live progress instead of the import menu.
+            if (window._tallySync && window._tallySync.active && window._tallySync.bg) {
+                _tallySyncReopen(); return;
+            }
             _vMenu('v-import-btn', [
                 { act:'excel', icon:'📊', label:'Excel (.xlsx)', fn:()=>openBulkExcelModal() },
                 { act:'csv',   icon:'📄', label:'CSV',           fn:()=>openBulkExcelModal() },
@@ -12074,7 +12079,11 @@
         // replacing the transient toast + browser alert. States: running
         // (spinner + step), success (✅ + summary), error (⚠️ + real server
         // message + Retry).
-        function _tallyProgress(title) {
+        // Sprint 53.4 — progress dialog now has a live progress bar + a
+        // "Continue in background" button (opts.onBackground). show()/close() let a
+        // backgrounded sync reopen the same dialog.
+        function _tallyProgress(title, opts) {
+            opts = opts || {};
             let modal = document.getElementById('tally-progress-modal');
             if (!modal) {
                 modal = document.createElement('div');
@@ -12091,11 +12100,17 @@
                         <i class="fas fa-spinner fa-spin" id="tp-spin" style="color:var(--primary,#da7756);"></i>
                         <span id="tp-step-text">Starting…</span>
                       </div>
+                      <div id="tp-bar-wrap" style="display:none; margin-top:14px; height:8px; background:rgba(148,163,184,0.18); border-radius:5px; overflow:hidden;">
+                        <div id="tp-bar-fill" style="height:100%; width:0%; background:var(--primary,#da7756); transition:width 0.4s ease;"></div>
+                      </div>
                       <div id="tp-detail" style="margin-top:14px; color:#94a3b8; font-size:0.82rem; line-height:1.5; max-height:200px; overflow:auto;"></div>
                     </div>
-                    <div style="padding:14px 22px; border-top:1px solid var(--border,#3a332e); display:flex; justify-content:flex-end; gap:10px;">
-                      <button id="tp-retry" style="display:none; padding:8px 16px; background:rgba(56,189,248,0.12); color:#38bdf8; border:1px solid rgba(56,189,248,0.4); border-radius:8px; font-weight:600; cursor:pointer; font-size:0.84rem;">↻ Retry</button>
-                      <button id="tp-close" style="display:none; padding:8px 18px; background:var(--primary,#da7756); color:white; border:none; border-radius:8px; font-weight:700; cursor:pointer; font-size:0.84rem;">Close</button>
+                    <div style="padding:14px 22px; border-top:1px solid var(--border,#3a332e); display:flex; justify-content:space-between; align-items:center; gap:10px;">
+                      <button id="tp-bg" style="display:none; padding:8px 14px; background:transparent; color:#94a3b8; border:1px solid var(--border,#3a332e); border-radius:8px; font-weight:600; cursor:pointer; font-size:0.82rem;">↘ Continue in background</button>
+                      <div style="display:flex; gap:10px; margin-left:auto;">
+                        <button id="tp-retry" style="display:none; padding:8px 16px; background:rgba(56,189,248,0.12); color:#38bdf8; border:1px solid rgba(56,189,248,0.4); border-radius:8px; font-weight:600; cursor:pointer; font-size:0.84rem;">↻ Retry</button>
+                        <button id="tp-close" style="display:none; padding:8px 18px; background:var(--primary,#da7756); color:white; border:none; border-radius:8px; font-weight:700; cursor:pointer; font-size:0.84rem;">Close</button>
+                      </div>
                     </div>
                   </div>`;
                 document.body.appendChild(modal);
@@ -12109,18 +12124,28 @@
             $('tp-detail').innerHTML = '';
             $('tp-close').style.display = 'none';
             $('tp-retry').style.display = 'none';
+            $('tp-bar-wrap').style.display = 'none';
+            const bg = $('tp-bg');
+            bg.style.display = opts.onBackground ? '' : 'none';
+            bg.onclick = opts.onBackground || null;
             const close = () => { modal.style.display = 'none'; };
+            const done = () => { $('tp-spin').style.display = 'none'; $('tp-bar-wrap').style.display = 'none'; bg.style.display = 'none'; };
             return {
                 step:   t => { $('tp-step-text').textContent = t; },
                 detail: h => { $('tp-detail').innerHTML = h; },
+                progress: (d, total) => {
+                    if (total > 0) { $('tp-bar-wrap').style.display = ''; $('tp-bar-fill').style.width = Math.min(100, Math.round(d / total * 100)) + '%'; }
+                    else { $('tp-bar-wrap').style.display = 'none'; }
+                },
+                show:  () => { modal.style.display = 'flex'; },
                 success(t, h) {
-                    $('tp-icon').textContent = '✅'; $('tp-spin').style.display = 'none';
+                    $('tp-icon').textContent = '✅'; done();
                     $('tp-step-text').textContent = t;
                     if (h) $('tp-detail').innerHTML = h;
                     $('tp-close').style.display = ''; $('tp-close').onclick = close;
                 },
                 error(t, h, onRetry) {
-                    $('tp-icon').textContent = '⚠️'; $('tp-spin').style.display = 'none';
+                    $('tp-icon').textContent = '⚠️'; done();
                     $('tp-step-text').innerHTML = `<span style="color:#fca5a5;">${t}</span>`;
                     if (h) $('tp-detail').innerHTML = h;
                     $('tp-close').style.display = ''; $('tp-close').onclick = close;
@@ -12130,29 +12155,79 @@
             };
         }
 
+        // Sprint 53.4 — pulse the Import button while a sync runs in the background.
+        function _tallySyncPulse(on) {
+            if (!document.getElementById('yai-sync-pulse-css')) {
+                const s = document.createElement('style'); s.id = 'yai-sync-pulse-css';
+                s.textContent = '@keyframes yaiSyncPulse{0%,100%{box-shadow:0 0 0 0 rgba(56,189,248,0.55)}50%{box-shadow:0 0 0 7px rgba(56,189,248,0)}}.yai-sync-pulse{animation:yaiSyncPulse 1.2s infinite;border-color:#38bdf8 !important;}';
+                document.head.appendChild(s);
+            }
+            const btn = document.getElementById('v-import-btn');
+            if (btn) { if (on) btn.classList.add('yai-sync-pulse'); else btn.classList.remove('yai-sync-pulse'); }
+        }
+        window._tallySyncReopen = function() {
+            if (window._tallySync && window._tallySync.dialog) window._tallySync.dialog.show();
+        };
+
         async function syncFromTally(mode) {
             // Phase 1 (Sprint 50) — explicit sync mode. 'incremental' (default) pulls
             // only what changed since the last sync; 'full' re-reads the entire Tally
             // company (slow on big books) and is the trigger for deletion reconcile.
             mode = (mode === 'full') ? 'full' : 'incremental';
             const u = (() => { try { return JSON.parse(localStorage.getItem('currentUser')||'{}'); } catch(_) { return {}; } })();
+            const company = u.company_name;
+            if (window._tallySync && window._tallySync.active) {
+                // A sync is already running — just reopen its progress instead of starting another.
+                _tallySyncReopen(); return;
+            }
             if (mode === 'full' &&
                 !confirm('Full import re-reads your ENTIRE Tally company (all vouchers, ledgers, groups). On a large book this can take up to a minute.\n\nUse "Incremental sync" for routine updates. Continue with a full import?')) {
                 return;
             }
             const title = mode === 'full' ? '🔁 Full import from Tally' : '⬇ Incremental sync from Tally';
-            const p = _tallyProgress(title);
+            const onBackground = () => {
+                if (window._tallySync) window._tallySync.bg = true;
+                p.close(); _tallySyncPulse(true);
+                if (typeof showChatToast === 'function')
+                    showChatToast('↘ Import is running in the background — click the Import button to check progress.');
+            };
+            const p = _tallyProgress(title, { onBackground });
             p.step('Contacting the Windows Tally Bridge…');
             p.detail(mode === 'full'
-                ? 'Re-reading the whole Tally company — vouchers, ledgers and groups — and sending it to YantrAI. This can take up to a minute for large books.'
+                ? 'Re-reading the whole Tally company — vouchers, ledgers and groups. This can take up to a minute for large books. You can continue in the background.'
                 : 'Asking the agent for everything that changed in Tally since the last sync. This is usually quick.');
+
+            // Poll the server-side job for live phase + save counts.
+            let stopped = false;
+            window._tallySync = { active: true, company, mode, bg: false, dialog: p };
+            const poll = async () => {
+                if (stopped || !company) return;
+                try {
+                    const r = await fetch(`${API}/api/tally/sync-status?company_name=${encodeURIComponent(company)}`);
+                    const j = await r.json().catch(()=>({}));
+                    const job = j && j.job;
+                    if (job && !stopped) {
+                        if (job.phase) p.step(job.phase);
+                        const dn = job.vouchers_done || 0, tot = job.vouchers_total || 0;
+                        if (tot > 0 && /sav/i.test(job.phase || '')) {
+                            p.detail(`Saving <strong style="color:#38bdf8;">${dn.toLocaleString('en-IN')}</strong> / ${tot.toLocaleString('en-IN')} vouchers…`);
+                            p.progress(dn, tot);
+                        }
+                    }
+                } catch(_) {}
+            };
+            const pollId = setInterval(poll, 1500); poll();
+            const finish = () => { stopped = true; clearInterval(pollId); _tallySyncPulse(false); if (window._tallySync) window._tallySync.active = false; };
+
             try {
                 const res = await fetch(`${API}/tally/ingest`, {
                     method:'POST', headers:{'Content-Type':'application/json'},
-                    body: JSON.stringify({ company_name: u.company_name, mode })
+                    body: JSON.stringify({ company_name: company, mode })
                 });
                 const d = await res.json().catch(()=>({}));
                 if (!res.ok) throw new Error(d.detail || `Sync failed (HTTP ${res.status})`);
+                const wasBg = window._tallySync && window._tallySync.bg;
+                finish();
                 const counts = [];
                 if (d.vouchers_count != null) counts.push(`${d.vouchers_count} vouchers`);
                 if (d.ledgers_count  != null) counts.push(`${d.ledgers_count} ledgers`);
@@ -12161,10 +12236,14 @@
                     counts.length
                       ? `Pulled from Tally: <strong style="color:#10b981;">${counts.join(', ')}</strong>. Refreshing the list…`
                       : 'Tally responded successfully. Refreshing the voucher list…');
-                if (typeof loadVouchers === 'function') loadVouchers();
+                if (wasBg && typeof showChatToast === 'function') showChatToast('✅ Import complete.');
+                else p.show();
+                if (typeof loadVouchers === 'function') loadVouchers(true);
             } catch (e) {
+                finish();
                 const msg = e.message || 'Sync from Tally failed';
                 const isBridge = /bridge unavailable|agent|timeout/i.test(msg);
+                p.show();
                 p.error(mode === 'full' ? 'Full import failed' : 'Incremental sync failed',
                     `<div style="color:#fca5a5;">${msg}</div>` + (isBridge
                       ? '<div style="margin-top:8px;">Open Tally Prime and confirm the <strong>YantrAI Tally Bridge</strong> window shows <em>“Tally connected”</em> with a green dot, then retry.</div>'
