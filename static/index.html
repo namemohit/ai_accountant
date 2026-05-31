@@ -12201,27 +12201,50 @@
                 ? 'Re-reading the whole Tally company — vouchers, ledgers and groups. This can take up to a minute for large books. You can continue in the background.'
                 : 'Asking the agent for everything that changed in Tally since the last sync. This is usually quick.');
 
-            // Poll the server-side job for live phase + save counts.
-            let stopped = false;
+            // The import now runs in the BACKGROUND on the server (so a long full import
+            // can't hit Cloud Run's request timeout). We fire /tally/ingest — which returns
+            // immediately — then poll the job to completion (state done/error).
+            let stopped = false, started = false, pollId = null;
             window._tallySync = { active: true, company, mode, bg: false, dialog: p };
+            const finish = () => { stopped = true; if (pollId) clearInterval(pollId); _tallySyncPulse(false); if (window._tallySync) window._tallySync.active = false; };
+            const showErr = (msg) => {
+                const isBridge = /bridge unavailable|agent|timeout/i.test(msg || '');
+                p.show();
+                p.error(mode === 'full' ? 'Full import failed' : 'Incremental sync failed',
+                    `<div style="color:#fca5a5;">${msg}</div>` + (isBridge
+                      ? '<div style="margin-top:8px;">Open Tally Prime and confirm the <strong>YantrAI Tally Bridge</strong> window shows <em>“Tally connected”</em> with a green dot, then retry.</div>'
+                      : ''),
+                    () => syncFromTally(mode));
+            };
             const poll = async () => {
                 if (stopped || !company) return;
                 try {
                     const r = await fetch(`${API}/api/tally/sync-status?company_name=${encodeURIComponent(company)}`);
                     const j = await r.json().catch(()=>({}));
                     const job = j && j.job;
-                    if (job && !stopped) {
-                        if (job.phase) p.step(job.phase);
-                        const dn = job.vouchers_done || 0, tot = job.vouchers_total || 0;
-                        if (tot > 0 && /sav/i.test(job.phase || '')) {
-                            p.detail(`Saving <strong style="color:#38bdf8;">${dn.toLocaleString('en-IN')}</strong> / ${tot.toLocaleString('en-IN')} vouchers…`);
-                            p.progress(dn, tot);
-                        }
+                    if (!job || stopped) return;
+                    if (job.phase) p.step(job.phase);
+                    const dn = job.vouchers_done || 0, tot = job.vouchers_total || 0;
+                    if (tot > 0 && /sav/i.test(job.phase || '')) {
+                        p.detail(`Saving <strong style="color:#38bdf8;">${dn.toLocaleString('en-IN')}</strong> / ${tot.toLocaleString('en-IN')} vouchers…`);
+                        p.progress(dn, tot);
+                    }
+                    // Completion comes from the job — but only after our own ingest call has
+                    // started, so a stale 'done' from a previous sync can't fire premature success.
+                    if (started && job.state === 'done') {
+                        const wasBg = window._tallySync && window._tallySync.bg;
+                        finish();
+                        p.success(mode === 'full' ? 'Full import complete' : 'Incremental sync complete',
+                            (job.detail ? `<strong style="color:#10b981;">${job.detail}</strong>. ` : 'Tally responded successfully. ') + 'Refreshing the list…');
+                        if (wasBg && typeof showChatToast === 'function') showChatToast('✅ Import complete.');
+                        else p.show();
+                        if (typeof loadVouchers === 'function') loadVouchers(true);
+                    } else if (started && job.state === 'error') {
+                        finish();
+                        showErr(job.error || 'Sync from Tally failed');
                     }
                 } catch(_) {}
             };
-            const pollId = setInterval(poll, 1500); poll();
-            const finish = () => { stopped = true; clearInterval(pollId); _tallySyncPulse(false); if (window._tallySync) window._tallySync.active = false; };
 
             try {
                 const res = await fetch(`${API}/tally/ingest`, {
@@ -12230,29 +12253,12 @@
                 });
                 const d = await res.json().catch(()=>({}));
                 if (!res.ok) throw new Error(d.detail || `Sync failed (HTTP ${res.status})`);
-                const wasBg = window._tallySync && window._tallySync.bg;
-                finish();
-                const counts = [];
-                if (d.vouchers_count != null) counts.push(`${d.vouchers_count} vouchers`);
-                if (d.ledgers_count  != null) counts.push(`${d.ledgers_count} ledgers`);
-                if (d.groups_count   != null) counts.push(`${d.groups_count} groups`);
-                p.success(mode === 'full' ? 'Full import complete' : 'Incremental sync complete',
-                    counts.length
-                      ? `Pulled from Tally: <strong style="color:#10b981;">${counts.join(', ')}</strong>. Refreshing the list…`
-                      : 'Tally responded successfully. Refreshing the voucher list…');
-                if (wasBg && typeof showChatToast === 'function') showChatToast('✅ Import complete.');
-                else p.show();
-                if (typeof loadVouchers === 'function') loadVouchers(true);
+                // Started OK — the import is running in the background; poll it to completion.
+                started = true;
+                pollId = setInterval(poll, 1500); poll();
             } catch (e) {
                 finish();
-                const msg = e.message || 'Sync from Tally failed';
-                const isBridge = /bridge unavailable|agent|timeout/i.test(msg);
-                p.show();
-                p.error(mode === 'full' ? 'Full import failed' : 'Incremental sync failed',
-                    `<div style="color:#fca5a5;">${msg}</div>` + (isBridge
-                      ? '<div style="margin-top:8px;">Open Tally Prime and confirm the <strong>YantrAI Tally Bridge</strong> window shows <em>“Tally connected”</em> with a green dot, then retry.</div>'
-                      : ''),
-                    () => syncFromTally(mode));
+                showErr(e.message || 'Sync from Tally failed');
             }
         }
 

@@ -1029,7 +1029,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "251"
+APP_VERSION = "252"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -6706,6 +6706,33 @@ async def get_tally_summary(payload: dict):
 
 @app.post("/tally/ingest")
 async def ingest_tally_data(payload: dict):
+    """Fire-and-return. A full import of a large book (Tally export + big WS frame +
+    saving thousands of rows) can run well past Cloud Run's 300s request timeout, which
+    returned 502/504 to the browser. So we validate + open the sync job synchronously,
+    then run the actual pull+save in a BACKGROUND task and return immediately. The UI
+    polls /api/tally/sync-status for live progress and completion (state done/error).
+    The real work lives in _ingest_worker below."""
+    # Validate auth synchronously so a bad request still gets a proper 401/403.
+    user_id, company_id, company = resolve_agent_request(payload, required_perm="edit")
+    _mode = (payload.get("mode") or "").strip().lower()
+    # Open the job NOW (state='running') so the very first UI poll can't read a stale
+    # 'done' from a previous sync and declare premature success.
+    try: db.start_sync_job(company, _mode or 'sync')
+    except Exception: pass
+    import asyncio as _aio
+    async def _bg():
+        try:
+            await _ingest_worker(payload)
+        except Exception as _e:
+            print(f"[ingest bg] worker crashed: {_e}", flush=True)
+            try: db.update_sync_job(company, state='error', error=str(_e)[:300])
+            except Exception: pass
+    _aio.create_task(_bg())
+    return {"status": "started", "state": "running", "company_name": company,
+            "mode": _mode or "auto", "background": True}
+
+
+async def _ingest_worker(payload: dict):
     try:
         user_id, company_id, company = resolve_agent_request(payload, required_perm="edit")
         username = payload.get("username", "admin")
