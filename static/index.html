@@ -16399,18 +16399,26 @@
                 const jsq = s => String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
                 const fmt = n => (n || 0).toLocaleString('en-IN');
                 tbody.innerHTML = companies.map(c => {
-                    const nm = esc(c.name) + (c.archived ? ' <span style="color:#64748b; font-size:0.72rem;">(archived)</span>' : '');
+                    const orphan = !!c.is_orphan;   // exists in data/users but no companies-table row
+                    const badge = c.archived
+                        ? ' <span style="color:#64748b; font-size:0.72rem;">(archived)</span>'
+                        : orphan
+                        ? ' <span title="Exists in data / user lists but has no companies record. Register to make it manageable." style="color:#fbbf24; font-size:0.7rem; border:1px solid rgba(251,191,36,0.4); border-radius:8px; padding:0 6px; margin-left:4px;">⚠ legacy</span>'
+                        : '';
+                    const nm = esc(c.name) + badge;
                     const cid = jsq(c.id), cnm = jsq(c.name);
-                    return `<tr style="border-bottom:1px solid rgba(255,255,255,0.04); ${c.archived ? 'opacity:0.55;' : ''}">
+                    const openBtn = `<button onclick="adminSwitchToCompany('${cnm}')" title="Open" style="background:rgba(56,189,248,0.12); color:#38bdf8; border:1px solid rgba(56,189,248,0.3); padding:4px 9px; border-radius:4px; font-size:0.74rem; cursor:pointer;">🔍 Open</button>`;
+                    const actions = orphan
+                        ? openBtn + ` <button onclick="adminRegisterCompany('${cnm}')" title="Create its companies record so it can be renamed / managed (no data change)" style="background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.3); padding:4px 9px; border-radius:4px; font-size:0.74rem; cursor:pointer; margin-left:4px;">➕ Register</button>`
+                        : openBtn
+                          + ` <button onclick="adminRenameCompany('${cid}','${cnm}')" title="Rename" style="background:rgba(148,163,184,0.12); color:#cbd5e1; border:1px solid rgba(148,163,184,0.3); padding:4px 9px; border-radius:4px; font-size:0.74rem; cursor:pointer; margin-left:4px;">✏️ Rename</button>`
+                          + (c.archived ? '' : ` <button onclick="adminDeleteCompany('${cid}','${cnm}')" title="Delete (archive)" style="background:rgba(239,68,68,0.12); color:#f87171; border:1px solid rgba(239,68,68,0.3); padding:4px 9px; border-radius:4px; font-size:0.74rem; cursor:pointer; margin-left:4px;">🗄 Delete</button>`);
+                    return `<tr style="border-bottom:1px solid rgba(255,255,255,0.04); ${c.archived ? 'opacity:0.55;' : ''}${orphan ? 'background:rgba(251,191,36,0.05);' : ''}">
                         <td style="padding:10px; color:#e2e8f0; font-weight:600;">${nm}</td>
                         <td style="padding:10px; text-align:right; color:#cbd5e1;">${fmt(c.voucher_count)}</td>
                         <td style="padding:10px; text-align:right; color:#cbd5e1;">${fmt(c.invoice_count)}</td>
                         <td style="padding:10px; text-align:right; color:#cbd5e1;">${fmt(c.user_access_count)}</td>
-                        <td style="padding:10px; text-align:right; white-space:nowrap;">
-                            <button onclick="adminSwitchToCompany('${cnm}')" title="Open" style="background:rgba(56,189,248,0.12); color:#38bdf8; border:1px solid rgba(56,189,248,0.3); padding:4px 9px; border-radius:4px; font-size:0.74rem; cursor:pointer;">🔍 Open</button>
-                            <button onclick="adminRenameCompany('${cid}','${cnm}')" title="Rename" style="background:rgba(148,163,184,0.12); color:#cbd5e1; border:1px solid rgba(148,163,184,0.3); padding:4px 9px; border-radius:4px; font-size:0.74rem; cursor:pointer; margin-left:4px;">✏️ Rename</button>
-                            ${c.archived ? '' : `<button onclick="adminDeleteCompany('${cid}','${cnm}')" title="Delete (archive)" style="background:rgba(239,68,68,0.12); color:#f87171; border:1px solid rgba(239,68,68,0.3); padding:4px 9px; border-radius:4px; font-size:0.74rem; cursor:pointer; margin-left:4px;">🗄 Delete</button>`}
-                        </td>
+                        <td style="padding:10px; text-align:right; white-space:nowrap;">${actions}</td>
                     </tr>`;
                 }).join('');
             } catch (e) {
@@ -16492,6 +16500,20 @@
                 const res = await fetch(`${API}/api/admin/companies/${encodeURIComponent(companyId)}/archive`, { method: 'POST' });
                 const j = await res.json();
                 if (!res.ok) { alert(j.detail || 'Delete failed'); return; }
+                _loadCompaniesTable();
+            } catch (e) { alert('Error: ' + e.message); }
+        }
+
+        // Backfill a `companies` record for a "⚠ legacy" orphan (exists only in data / user lists).
+        async function adminRegisterCompany(name) {
+            if (!confirm(`Register "${name}" in the companies registry?\n\nIt currently exists only in data / user lists, so the portal can't rename or manage it. Registering creates its record under the firm's workspace — no data is changed.`)) return;
+            try {
+                const res = await fetch(`${API}/api/admin/companies/register`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name })
+                });
+                const j = await res.json();
+                if (!res.ok) { alert(j.detail || 'Register failed'); return; }
                 _loadCompaniesTable();
             } catch (e) { alert('Error: ' + e.message); }
         }

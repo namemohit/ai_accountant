@@ -1946,6 +1946,7 @@ def add_company_to_user(username: str, new_company_name: str):
     conn = get_conn()
     cursor = conn.cursor()
     try:
+        ensure_company(new_company_name)   # registry heal — never let a workspace exist only in the jsonb list
         cursor.execute("SELECT companies FROM accounting_users WHERE username = %s", (username,))
         row = cursor.fetchone()
         if row:
@@ -3695,6 +3696,7 @@ def save_invoice(data):
 
     company_name = data.get('company_name')
     invoice_number = data.get('invoice_number')
+    ensure_company(company_name)   # registry heal — keep the companies table in sync with ingested invoices
 
     # ── Total integrity guard ─────────────────────────────────────────────────
     # The headline total must be the GROSS (taxable + all GST). A client that sums
@@ -8643,6 +8645,7 @@ def save_tally_vouchers(company_name, vouchers, source=None, progress_cb=None):
     """
     if not vouchers:
         return {"upserted": 0, "skipped": 0, "created": 0, "updated": 0}
+    ensure_company(company_name)   # registry heal — a synced/created Tally company must have a companies row
     conn = get_conn()
     cursor = conn.cursor()
     _total = len(vouchers)
@@ -10656,25 +10659,84 @@ def default_org_id():
         pput(conn)
 
 
+def ensure_company(name, org_id=None):
+    """Idempotently guarantee a `companies` row exists for this company_name.
+
+    A workspace must never live ONLY in accounting_users.companies (jsonb) or in data rows —
+    that's the orphan bug that hid claude_data_co et al. from the super-admin portal (which
+    reads the companies table). Fast no-op when the row already exists (one pooled SELECT),
+    so it's safe on hot save paths. Best-effort: never raises into the caller's flow."""
+    if not name or not str(name).strip():
+        return None
+    name = str(name).strip()
+    conn = pget(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT 1 FROM companies WHERE name=%s LIMIT 1", (name,))
+        exists = cur.fetchone() is not None
+    except Exception as e:
+        print(f"[ensure_company] probe failed for {name!r}: {e}")
+        exists = True   # on error, do NOT attempt a create
+    finally:
+        try: conn.rollback()
+        except Exception: pass
+        pput(conn)
+    if exists:
+        return None
+    try:
+        oid = org_id or default_org_id()
+        if not oid:
+            print(f"[ensure_company] no org available; skipped {name!r}")
+            return None
+        return create_company(oid, name)   # ON CONFLICT (org_id,name)-safe
+    except Exception as e:
+        print(f"[ensure_company] create failed for {name!r}: {e}")
+        return None
+
+
 def admin_list_companies():
-    """Super-admin global list FROM the `companies` table (so each row carries a real
-    id + org), with usage counts — lets the User Manager add / rename / delete by id."""
+    """Super-admin global list. Canonical rows from the `companies` table (each carries a real
+    id + org) PLUS any orphan company_name that exists only in data / users' jsonb lists,
+    flagged is_orphan (no id yet). The portal must never silently hide a real workspace, so it
+    reads every source — not just the registry."""
     conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        cur.execute("""SELECT id, org_id, name, gstin, state_code,
-                              (archived_at IS NOT NULL) AS archived
-                       FROM companies ORDER BY (archived_at IS NOT NULL), name""")
-        rows = cur.fetchall()
-        out = []
-        for r in rows:
-            nm = r["name"]
+        def _counts(nm):
             cur.execute("SELECT COUNT(*) n FROM tally_vouchers WHERE company_name=%s", (nm,)); tv = cur.fetchone()["n"]
             cur.execute("SELECT COUNT(*) n FROM invoices WHERE company_name=%s", (nm,)); inv = cur.fetchone()["n"]
             cur.execute("SELECT COUNT(*) n FROM accounting_users WHERE companies::text LIKE %s", (f'%"{nm}"%',)); acc = cur.fetchone()["n"]
+            return int(tv or 0), int(inv or 0), int(acc or 0)
+        # 1) Canonical companies-table rows.
+        cur.execute("""SELECT id, org_id, name, gstin, state_code,
+                              (archived_at IS NOT NULL) AS archived
+                       FROM companies ORDER BY (archived_at IS NOT NULL), name""")
+        canonical = cur.fetchall()
+        out = []
+        for r in canonical:
+            tv, inv, acc = _counts(r["name"])
             out.append({"id": str(r["id"]), "org_id": (str(r["org_id"]) if r["org_id"] else None),
-                        "name": nm, "gstin": r["gstin"], "state_code": r["state_code"],
-                        "archived": bool(r["archived"]), "voucher_count": int(tv or 0),
-                        "invoice_count": int(inv or 0), "user_access_count": int(acc or 0)})
+                        "name": r["name"], "gstin": r["gstin"], "state_code": r["state_code"],
+                        "archived": bool(r["archived"]), "voucher_count": tv,
+                        "invoice_count": inv, "user_access_count": acc, "is_orphan": False})
+        # 2) Orphans — names present in data / jsonb lists but with no companies row.
+        cur.execute("""
+            WITH names AS (
+                SELECT DISTINCT company_name AS n FROM tally_vouchers WHERE company_name IS NOT NULL
+                UNION SELECT DISTINCT company_name FROM invoices WHERE company_name IS NOT NULL
+                UNION SELECT DISTINCT jsonb_array_elements_text(companies) FROM accounting_users
+                      WHERE companies IS NOT NULL AND jsonb_typeof(companies)='array'
+            )
+            SELECT n FROM names
+            WHERE n IS NOT NULL AND n <> ''
+              AND NOT EXISTS (SELECT 1 FROM companies c WHERE c.name = names.n)
+            ORDER BY n
+        """)
+        orphan_rows = cur.fetchall()
+        for r in orphan_rows:
+            nm = r["n"]
+            tv, inv, acc = _counts(nm)
+            out.append({"id": None, "org_id": None, "name": nm, "gstin": None, "state_code": None,
+                        "archived": False, "voucher_count": tv, "invoice_count": inv,
+                        "user_access_count": acc, "is_orphan": True})
         return out
     finally:
         cur.close(); conn.close()

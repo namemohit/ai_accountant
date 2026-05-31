@@ -738,6 +738,13 @@ async def tally_create_company(payload: dict):
         except Exception as au_err:
             print(f"[AUDIT] tally_create_company log warning: {au_err}", flush=True)
 
+        # Registry heal — make the new Tally company visible in the super-admin portal too
+        # (its synced data will arrive under this name). Best-effort; never fails the request.
+        try:
+            db.ensure_company(tally_company_name)
+        except Exception as _ec:
+            print(f"[create-company] ensure_company warning: {_ec}", flush=True)
+
         return {
             "status": "success",
             "message": f"Created '{tally_company_name}' in Tally Prime.",
@@ -1002,6 +1009,23 @@ async def admin_archive_company(company_id: str):
         import traceback; traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/api/admin/companies/register")
+async def admin_register_company(payload: dict):
+    """Super-admin: backfill a `companies` row for an orphan company_name (one that exists in
+    data / users' lists but has no registry row). Idempotent via db.ensure_company."""
+    try:
+        name = (payload.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Company name is required.")
+        cid = db.ensure_company(name)
+        return {"status": "success", "name": name,
+                "id": (str(cid) if cid else None), "already_existed": cid is None}
+    except HTTPException: raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 # --- WhatsApp Webhook Endpoints ---
 
 @app.get("/webhook")
@@ -1076,7 +1100,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "255"
+APP_VERSION = "256"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
