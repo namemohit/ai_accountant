@@ -4307,6 +4307,11 @@ def get_all_vouchers(company_name=None, company_id=None, voucher_type=None, limi
         _dup_status = {row['dup_ref']: row['status'] for row in cursor.fetchall()}
         _clusters = {}
         for r in results:
+            if r.get('archived'):
+                continue   # Phase 6 — an archived voucher is a RESOLVED duplicate; it must not
+                           # keep its surviving twin tagged. Skipping archived rows means a
+                           # cluster needs 2+ ACTIVE members, so archiving one clears the chip
+                           # off the other (cluster of 1 → no dup_ref).
             try: _amt_r = int(round(abs(float(r.get('amount') or 0))))
             except (TypeError, ValueError): _amt_r = 0
             _party = (r.get('party_name') or '').strip().lower()
