@@ -255,7 +255,7 @@ async def tally_websocket_endpoint(websocket: WebSocket):
             tally_connections.pop(conn_key, None)
             print(f"[WS CLEANUP] Removed connection for key: {conn_key}", flush=True)
 
-async def dispatch_tally_command(token: str, cmd_type: str, data: dict = None) -> dict:
+async def dispatch_tally_command(token: str, cmd_type: str, data: dict = None, timeout: float = 300.0) -> dict:
     ws = tally_connections.get(token)
     # Sprint 47 — the agent's WebSocket can briefly drop + auto-reconnect
     # (code 1006 flaps on flaky links / server restarts). Rather than fail
@@ -289,10 +289,10 @@ async def dispatch_tally_command(token: str, cmd_type: str, data: dict = None) -
             "data": data
         })
         
-        res = await asyncio.wait_for(fut, timeout=300.0)
+        res = await asyncio.wait_for(fut, timeout=timeout)
         return res
     except asyncio.TimeoutError:
-        print(f"[WS TIMEOUT] Local agent did not respond inside 300s for request {req_id}", flush=True)
+        print(f"[WS TIMEOUT] Local agent did not respond inside {timeout:.0f}s for request {req_id}", flush=True)
         return {"status": "error", "message": "Local agent timeout error"}
     except Exception as e:
         print(f"[WS DISPATCH ERROR] Error tunneling request {req_id}: {e}", flush=True)
@@ -1100,7 +1100,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "257"
+APP_VERSION = "258"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -6786,6 +6786,27 @@ async def ingest_tally_data(payload: dict):
     # Validate auth synchronously so a bad request still gets a proper 401/403.
     user_id, company_id, company = resolve_agent_request(payload, required_perm="edit")
     _mode = (payload.get("mode") or "").strip().lower()
+    # Concurrent-run guard — if a sync for this company is already running and fresh
+    # (< 12 min), don't spawn a second worker: the job row is keyed by company so two runs
+    # clobber each other, and it doubles the agent's fetch load (which is what tips the
+    # import over its timeout). Return the in-flight job so the UI just keeps polling. A
+    # 'running' older than 12 min is treated as stale (crashed) and a new run is allowed.
+    try:
+        _job = db.get_sync_job(company)
+        if _job and _job.get("state") == "running":
+            import datetime as _dt
+            _fresh = True
+            try:
+                _age = (_dt.datetime.utcnow() - _dt.datetime.fromisoformat(str(_job.get("started_at")))).total_seconds()
+                _fresh = (0 <= _age < 720)
+            except Exception:
+                _fresh = True
+            if _fresh:
+                return {"status": "already_running", "state": "running", "company_name": company,
+                        "mode": (_job.get("mode") or _mode or "auto"), "background": True,
+                        "message": "A full import is already in progress — watch its status."}
+    except Exception:
+        pass
     # Open the job NOW (state='running') so the very first UI poll can't read a stale
     # 'done' from a previous sync and declare premature success.
     try: db.start_sync_job(company, _mode or 'sync')
@@ -6864,23 +6885,34 @@ async def _ingest_worker(payload: dict):
         # Sprint 53.4 — open a progress job the UI can poll (phase + counts). Best-effort.
         try: db.start_sync_job(company, 'full' if _do_full else 'incremental')
         except Exception: pass
-        ws_response = await dispatch_tally_command(conn_key, "seed_baseline", _cmd_payload)
+        # A full import of a large book can take minutes; give the single seed_baseline
+        # round-trip room (default 600s, tunable via env) so it doesn't false-fail at 300s.
+        _import_timeout = float(os.getenv("TALLY_IMPORT_TIMEOUT", "600"))
+        ws_response = await dispatch_tally_command(conn_key, "seed_baseline", _cmd_payload, timeout=_import_timeout)
 
         if not ws_response or ws_response.get("status") != "success":
-            # P0 FIX: never fabricate a customer's books. If the bridge gave us no
-            # real data, fail loudly and change nothing — do NOT seed simulator data.
+            # P0 FIX: never fabricate a customer's books — if the bridge gave us no real
+            # data, change nothing. But tell the user the TRUTH about why: an offline agent
+            # (no tunnel) is different from a connected agent whose fetch ran long.
+            _is_timeout = bool(ws_response) and ("timeout" in str(ws_response.get("message", "")).lower())
+            if ws_response is None:
+                _msg = ("Windows Agent isn't connected — open Tally Prime and the YantrAI Tally "
+                        "Bridge (wait for the green 'Tally connected' dot), then retry. Nothing was changed.")
+            elif _is_timeout:
+                _msg = ("Tally took longer than expected to return all records — the agent is "
+                        "connected and may still be working. Nothing was changed; wait a moment and "
+                        "retry (a large book can take a few minutes).")
+            else:
+                _msg = (str(ws_response.get("message") or "Tally import failed.")) + " Nothing was changed."
             try:
                 import asyncio as _aio
                 await _aio.get_event_loop().run_in_executor(
                     None, db.log_tally_sync, company, 'baseline', 0, 0, 'failed')
             except Exception:
                 pass
-            try: db.update_sync_job(company, state='error',
-                                    error='Tally bridge unavailable — open Tally and start the YantrAI Tally Bridge agent, then retry.')
+            try: db.update_sync_job(company, state='error', error=_msg)
             except Exception: pass
-            raise HTTPException(status_code=502, detail=(
-                "Tally bridge unavailable — open Tally and start the YantrAI Tally "
-                "Bridge agent on that machine, then retry. Nothing was changed."))
+            return   # background task — the job row (state='error') is what the UI polls
         # (Removed in Phase 7) A disabled `if False:` simulator-data fallback used to
         # live here — it fabricated a full fake company (VCH-GUID vouchers, "Steel
         # Pipes", Gupta & Sons, etc.) and is exactly the kind of thing that leaked test
