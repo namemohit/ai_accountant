@@ -10640,6 +10640,118 @@ def archive_company(org_id, company_id):
         cur.close(); pput(conn)
 
 
+# ── Super-admin User Manager: company add / rename / delete ──────────────────
+def default_org_id():
+    """The org that already holds companies (the firm's workspace) — used as the
+    default target when the super-admin adds a company without specifying an org."""
+    conn = pget(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT org_id FROM companies WHERE org_id IS NOT NULL ORDER BY created_at LIMIT 1")
+        r = cur.fetchone()
+        return str(r[0]) if r else None
+    finally:
+        cur.close()
+        try: conn.rollback()
+        except Exception: pass
+        pput(conn)
+
+
+def admin_list_companies():
+    """Super-admin global list FROM the `companies` table (so each row carries a real
+    id + org), with usage counts — lets the User Manager add / rename / delete by id."""
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""SELECT id, org_id, name, gstin, state_code,
+                              (archived_at IS NOT NULL) AS archived
+                       FROM companies ORDER BY (archived_at IS NOT NULL), name""")
+        rows = cur.fetchall()
+        out = []
+        for r in rows:
+            nm = r["name"]
+            cur.execute("SELECT COUNT(*) n FROM tally_vouchers WHERE company_name=%s", (nm,)); tv = cur.fetchone()["n"]
+            cur.execute("SELECT COUNT(*) n FROM invoices WHERE company_name=%s", (nm,)); inv = cur.fetchone()["n"]
+            cur.execute("SELECT COUNT(*) n FROM accounting_users WHERE companies::text LIKE %s", (f'%"{nm}"%',)); acc = cur.fetchone()["n"]
+            out.append({"id": str(r["id"]), "org_id": (str(r["org_id"]) if r["org_id"] else None),
+                        "name": nm, "gstin": r["gstin"], "state_code": r["state_code"],
+                        "archived": bool(r["archived"]), "voucher_count": int(tv or 0),
+                        "invoice_count": int(inv or 0), "user_access_count": int(acc or 0)})
+        return out
+    finally:
+        cur.close(); conn.close()
+
+
+def rename_company(company_id, new_name):
+    """Super-admin rename. company_name is a cross-table key, so this is TRANSACTIONAL:
+    UPDATE companies.name, cascade company_name across every company-scoped base table,
+    and replace the old name in members' accounting_users.companies JSON list (+ active
+    company_name, covered by the cascade)."""
+    new_name = (new_name or "").strip()
+    if not new_name:
+        return {"ok": False, "error": "New name is required."}
+    conn = get_conn(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT name, org_id FROM companies WHERE id=%s", (str(company_id),))
+        row = cur.fetchone()
+        if not row:
+            return {"ok": False, "error": "Company not found."}
+        old_name, org_id = row["name"], row["org_id"]
+        if old_name == new_name:
+            return {"ok": True, "old_name": old_name, "new_name": new_name, "unchanged": True}
+        cur.execute("SELECT 1 FROM companies WHERE org_id=%s AND name=%s AND id<>%s",
+                    (org_id, new_name, str(company_id)))
+        if cur.fetchone():
+            return {"ok": False, "error": f"A company named '{new_name}' already exists in this workspace."}
+        # 1. canonical row
+        cur.execute("UPDATE companies SET name=%s WHERE id=%s", (new_name, str(company_id)))
+        # 2. cascade the denormalized company_name across every BASE TABLE that has it
+        cur.execute("""SELECT c.table_name FROM information_schema.columns c
+                       JOIN information_schema.tables t
+                         ON t.table_name=c.table_name AND t.table_schema=c.table_schema
+                       WHERE c.column_name='company_name' AND c.table_schema='public'
+                         AND t.table_type='BASE TABLE'""")
+        cascaded = {}
+        for t in [r["table_name"] for r in cur.fetchall()]:
+            cur.execute(f'UPDATE "{t}" SET company_name=%s WHERE company_name=%s', (new_name, old_name))
+            if cur.rowcount:
+                cascaded[t] = cur.rowcount
+        # 3. members' switcher list — replace the QUOTED element so a substring can't bleed
+        member_lists = 0
+        if '"' not in old_name and '\\' not in old_name:
+            cur.execute("""UPDATE accounting_users SET companies = REPLACE(companies::text, %s, %s)::jsonb
+                           WHERE companies::text LIKE %s""",
+                        (f'"{old_name}"', f'"{new_name}"', f'%"{old_name}"%'))
+            member_lists = cur.rowcount
+        conn.commit()
+        return {"ok": True, "old_name": old_name, "new_name": new_name,
+                "cascaded": cascaded, "member_lists_updated": member_lists}
+    except Exception as e:
+        try: conn.rollback()
+        except Exception: pass
+        print(f"[rename_company] {e}")
+        return {"ok": False, "error": str(e)}
+    finally:
+        cur.close(); conn.close()
+
+
+def admin_archive_company(company_id):
+    """Super-admin delete = soft-archive. Resolve org_id from the company row, then reuse
+    archive_company (which fixes members' lists + refuses the last active company)."""
+    conn = pget(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT org_id, name FROM companies WHERE id=%s", (str(company_id),))
+        row = cur.fetchone()
+    finally:
+        cur.close()
+        try: conn.rollback()
+        except Exception: pass
+        pput(conn)
+    if not row:
+        return {"ok": False, "error": "Company not found."}
+    if not row["org_id"]:
+        return {"ok": False, "error": "Company has no org; cannot archive safely."}
+    return archive_company(row["org_id"], company_id)
+
+
 def create_membership(user_id, org_id, role, scope_company_ids=None, invited_by=None):
     """Add a user to an org with a role."""
     conn = get_conn()

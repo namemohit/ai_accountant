@@ -125,7 +125,7 @@
                         });
                         // Expose for runtime checks (showView guard, FAB menu).
                         window.__isSuperAdmin = isSuperAdmin;
-                        window.__RESTRICTED_VIEWS = new Set(['gstr-reco','gstr','tds','audit','recon','tasks','reports','itr','analytics']);
+                        window.__RESTRICTED_VIEWS = new Set(['gstr-reco','gstr','tds','audit','recon','tasks','reports','itr','analytics','whatsapp','users']);
                         // Make username available globally so the fetch wrapper can attach X-User.
                         window.__currentUsername = user.username || '';
 
@@ -2423,13 +2423,16 @@
 
             <!-- Companies tab -->
             <div id="users-pane-companies" class="card" style="display:none; padding:0;">
+                <div style="display:flex; justify-content:flex-end; padding:12px 14px; border-bottom:1px solid var(--border);">
+                    <button onclick="adminAddCompany()" style="padding:7px 14px; background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.3); border-radius:6px; font-size:0.8rem; font-weight:600; cursor:pointer;">➕ Add Company</button>
+                </div>
                 <div style="overflow:auto; max-height: calc(100vh - 240px);">
                     <table style="width:100%; border-collapse:collapse; font-size:0.85rem;">
                         <thead style="position:sticky; top:0; background:#1e293b; z-index:1;">
                             <tr style="color:#94a3b8; border-bottom:2px solid var(--border);">
                                 <th style="padding:10px; text-align:left;">Company name</th>
                                 <th style="padding:10px; text-align:right;">Vouchers</th>
-                                <th style="padding:10px; text-align:right;">Bank tx</th>
+                                <th style="padding:10px; text-align:right;">Invoices</th>
                                 <th style="padding:10px; text-align:right;">Users w/ access</th>
                                 <th style="padding:10px; text-align:right;">Actions</th>
                             </tr>
@@ -2637,77 +2640,12 @@
                         <input type="tel" id="settings-phone" placeholder="+91 XXXXX XXXXX">
                     </div>
                 </div>
-                <div class="card">
-                    <h3 style="margin-bottom: 16px;">🏢 Active Company</h3>
-                    <div class="form-group">
-                        <label>Company Name</label>
-                        <input type="text" id="settings-company" disabled style="opacity: 0.6;">
-                    </div>
-                    <div class="form-group">
-                        <label>PAN</label>
-                        <input type="text" id="settings-pan" disabled style="opacity: 0.6;">
-                    </div>
-                    <div style="margin-top: 20px; padding: 16px; background: rgba(218,119,86,0.06); border: 1px solid rgba(218,119,86,0.15); border-radius: 10px;">
-                        <h4 style="margin: 0 0 8px 0; font-size: 0.85rem;">🔗 Windows Agent Status</h4>
-                        <div id="settings-bridge-status" style="font-size: 0.85rem; color: var(--text-secondary);">Checking...</div>
-                    </div>
-                    <div style="margin-top: 20px; padding: 16px; background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 10px;">
-                        <h4 style="margin: 0 0 8px 0; font-size: 0.85rem;">📊 Knowledge Base</h4>
-                        <div id="settings-kb-stats" style="font-size: 0.85rem; color: var(--text-secondary);">Loading stats...</div>
-                    </div>
-                </div>
+                <!-- Active Company card removed (Sprint 66 — redundant with the top-bar agent status) -->
             </div>
 
-            <!-- Sprint 60 — Platform tools (moved off the launcher into Settings) -->
-            <div class="card" style="margin-top:24px;">
-                <h3 style="margin-bottom: 14px;">⚙️ Platform</h3>
-                <div class="connector-grid">
-                    <div class="connector-card" data-role-gated="super_admin" style="cursor:pointer;" onclick="showView('whatsapp')">
-                        <div class="connector-icon">📱</div>
-                        <div class="connector-name">WhatsApp Setup</div>
-                        <div class="connector-desc">Receive invoices via WhatsApp</div>
-                    </div>
-                    <div class="connector-card" data-role-gated="super_admin" style="cursor:pointer;" onclick="showView('users')">
-                        <div class="connector-icon">👥</div>
-                        <div class="connector-name">User Manager</div>
-                        <div class="connector-desc">Users, companies & access</div>
-                    </div>
-                </div>
-            </div>
+            <!-- Platform tools (WhatsApp Setup, User Manager) moved to the super-admin home page (Sprint 66) -->
 
-            <!-- Sprint 60 — AI Learning (moved from Home) -->
-            <div class="card" style="margin-top:24px;">
-                <h3 style="margin-bottom: 14px;">🔬 AI Learning</h3>
-                <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px;">
-                    <div style="display: flex; align-items: center; gap: 24px; flex-wrap: wrap;">
-                        <div style="display: flex; align-items: center; gap: 8px;">
-                            <span style="color: #94a3b8; font-size: 0.82rem;">Learned Mappings</span>
-                            <span id="stat-mappings" style="font-weight: 800; color: white; font-size: 0.95rem;">0 Mapped</span>
-                        </div>
-                        <div style="width: 1px; height: 20px; background: var(--border);"></div>
-                        <div style="display: flex; align-items: center; gap: 8px;">
-                            <span style="color: #94a3b8; font-size: 0.82rem;">Confidence</span>
-                            <span id="stat-confidence" style="font-weight: 800; color: #4ade80; font-size: 0.95rem;">—</span>
-                        </div>
-                        <div style="width: 1px; height: 20px; background: var(--border);"></div>
-                        <div style="display: flex; align-items: center; gap: 8px;">
-                            <span style="color: #94a3b8; font-size: 0.82rem;">Status</span>
-                            <span id="stat-status" style="background: rgba(16, 185, 129, 0.15); color: #10b981; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 0.72rem;">—</span>
-                        </div>
-                    </div>
-                    <button class="btn" onclick="startModelOptimization()" style="background: var(--accent); color: white; border: none; font-weight: bold; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; gap: 8px;">
-                        <i class="fas fa-bolt"></i> Optimize AI
-                    </button>
-                </div>
-                <div id="optimizer-console-wrapper" style="margin-top: 16px; display: none;">
-                    <div style="background: var(--bg-surface); border:1px solid rgba(255,255,255,0.05); border-radius:10px; padding:14px;">
-                        <h4 style="margin: 0 0 12px 0; color: #94a3b8; display: flex; align-items: center; gap: 8px;"><i class="fas fa-terminal" style="font-size: 0.8rem;"></i> Optimization Log</h4>
-                        <div id="optimizer-console" style="font-family: monospace; font-size: 0.8rem; color: #4ade80; text-align: left; height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;">
-                            <div style="color: #64748b;">[Ready] Click 'Optimize AI' to train model.</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
+            <!-- AI Learning card removed (Sprint 66 — untrained/0% in practice; no current value) -->
         </div>
 
         <!-- WhatsApp Setup View -->
@@ -3817,7 +3755,11 @@
                 tiles.push(tile('🔌', 'Connectors', 'Tally, devices & data sources', "showView('training')"));
                 tiles.push(tile('📚', 'Training', 'How much your AI has learned', "showView('training-progress')"));
                 tiles.push(tile('⚡', 'Wallet', 'Tokens & recharge', "if(typeof openWalletModal==='function') openWalletModal()"));
-                if (window.__isSuperAdmin) tiles.push(tile('📊', 'Data Analyst', 'Platform usage & tokens', "showView('analytics')"));
+                if (window.__isSuperAdmin) {
+                    tiles.push(tile('📊', 'Data Analyst', 'Platform usage & tokens', "showView('analytics')"));
+                    tiles.push(tile('📱', 'WhatsApp Setup', 'Receive invoices via WhatsApp', "showView('whatsapp')"));
+                    tiles.push(tile('👥', 'User Manager', 'Users, companies & access', "showView('users')"));
+                }
                 tiles.push(tile('⚙️', 'Settings', 'Account & admin', "showView('settings')"));
                 // Create task — moved to the end.
                 tiles.push(tile('📝', 'Create task', 'Tell YantrAI what you need', "showView('yantrai-chat')"));
@@ -6660,9 +6602,11 @@
             })[flag] || null;
         }
         function _vRowDate(v)   { return (v.date || '').substring(0, 10); }   // YYYY-MM-DD
-        // Debit/Credit columns: Purchase+Payment hit Debit; Sales+Receipt hit Credit.
-        function _vRowDebit(v)  { return ['Purchase','Payment'].includes(_vRowType(v)) ? _vRowAmount(v) : 0; }
-        function _vRowCredit(v) { return ['Sales','Receipt'].includes(_vRowType(v))   ? _vRowAmount(v) : 0; }
+        // Debit/Credit columns — match Tally's Day Book (the party / cash leg, same side
+        // the Windows agent posts to): Sales + Receipt land in DEBIT (debtor / bank-in);
+        // Purchase + Payment land in CREDIT (creditor / bank-out).
+        function _vRowDebit(v)  { return ['Sales','Receipt'].includes(_vRowType(v))   ? _vRowAmount(v) : 0; }
+        function _vRowCredit(v) { return ['Purchase','Payment'].includes(_vRowType(v)) ? _vRowAmount(v) : 0; }
 
         // Single predicate combining all 3 layers. Returns true if row should be visible.
         function _voucherFilterMatch(v) {
@@ -16426,15 +16370,21 @@
                     tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:20px; color:#64748b;">No companies.</td></tr>';
                     return;
                 }
+                const esc = s => String(s||'').replace(/</g,'&lt;');
+                const jsq = s => String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+                const fmt = n => (n || 0).toLocaleString('en-IN');
                 tbody.innerHTML = companies.map(c => {
-                    const fmt = n => (n || 0).toLocaleString('en-IN');
-                    return `<tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                        <td style="padding:10px; color:#e2e8f0; font-weight:600;">${c.name.replace(/</g,'&lt;')}</td>
+                    const nm = esc(c.name) + (c.archived ? ' <span style="color:#64748b; font-size:0.72rem;">(archived)</span>' : '');
+                    const cid = jsq(c.id), cnm = jsq(c.name);
+                    return `<tr style="border-bottom:1px solid rgba(255,255,255,0.04); ${c.archived ? 'opacity:0.55;' : ''}">
+                        <td style="padding:10px; color:#e2e8f0; font-weight:600;">${nm}</td>
                         <td style="padding:10px; text-align:right; color:#cbd5e1;">${fmt(c.voucher_count)}</td>
-                        <td style="padding:10px; text-align:right; color:#cbd5e1;">${fmt(c.bank_tx_count)}</td>
+                        <td style="padding:10px; text-align:right; color:#cbd5e1;">${fmt(c.invoice_count)}</td>
                         <td style="padding:10px; text-align:right; color:#cbd5e1;">${fmt(c.user_access_count)}</td>
                         <td style="padding:10px; text-align:right; white-space:nowrap;">
-                            <button onclick="adminSwitchToCompany('${c.name.replace(/'/g,"\\'")}')" style="background:rgba(56,189,248,0.12); color:#38bdf8; border:1px solid rgba(56,189,248,0.3); padding:4px 10px; border-radius:4px; font-size:0.74rem; cursor:pointer;">🔍 Open</button>
+                            <button onclick="adminSwitchToCompany('${cnm}')" title="Open" style="background:rgba(56,189,248,0.12); color:#38bdf8; border:1px solid rgba(56,189,248,0.3); padding:4px 9px; border-radius:4px; font-size:0.74rem; cursor:pointer;">🔍 Open</button>
+                            <button onclick="adminRenameCompany('${cid}','${cnm}')" title="Rename" style="background:rgba(148,163,184,0.12); color:#cbd5e1; border:1px solid rgba(148,163,184,0.3); padding:4px 9px; border-radius:4px; font-size:0.74rem; cursor:pointer; margin-left:4px;">✏️ Rename</button>
+                            ${c.archived ? '' : `<button onclick="adminDeleteCompany('${cid}','${cnm}')" title="Delete (archive)" style="background:rgba(239,68,68,0.12); color:#f87171; border:1px solid rgba(239,68,68,0.3); padding:4px 9px; border-radius:4px; font-size:0.74rem; cursor:pointer; margin-left:4px;">🗄 Delete</button>`}
                         </td>
                     </tr>`;
                 }).join('');
@@ -16479,6 +16429,45 @@
                 });
                 if (!res.ok) { const j = await res.json(); alert(j.detail || 'Promote failed'); return; }
                 _loadUsersTable();
+            } catch (e) { alert('Error: ' + e.message); }
+        }
+
+        async function adminAddCompany() {
+            const name = prompt('New company name:');
+            if (!name || !name.trim()) return;
+            try {
+                const res = await fetch(`${API}/api/admin/companies`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name.trim() })
+                });
+                const j = await res.json();
+                if (!res.ok) { alert(j.detail || 'Add failed'); return; }
+                _loadCompaniesTable();
+            } catch (e) { alert('Error: ' + e.message); }
+        }
+
+        async function adminRenameCompany(companyId, oldName) {
+            const newName = prompt(`Rename company "${oldName}" to:`, oldName);
+            if (!newName || !newName.trim() || newName.trim() === oldName) return;
+            if (!confirm(`Rename "${oldName}" → "${newName.trim()}"?\n\nUpdates the name everywhere it's stored (vouchers, invoices, members' access lists, etc.).`)) return;
+            try {
+                const res = await fetch(`${API}/api/admin/companies/${encodeURIComponent(companyId)}/rename`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ new_name: newName.trim() })
+                });
+                const j = await res.json();
+                if (!res.ok) { alert(j.detail || 'Rename failed'); return; }
+                _loadCompaniesTable();
+            } catch (e) { alert('Error: ' + e.message); }
+        }
+
+        async function adminDeleteCompany(companyId, name) {
+            if (!confirm(`Delete (archive) company "${name}"?\n\nIt's hidden and removed from members' access, but reversible — its data is kept.`)) return;
+            try {
+                const res = await fetch(`${API}/api/admin/companies/${encodeURIComponent(companyId)}/archive`, { method: 'POST' });
+                const j = await res.json();
+                if (!res.ok) { alert(j.detail || 'Delete failed'); return; }
+                _loadCompaniesTable();
             } catch (e) { alert('Error: ' + e.message); }
         }
 

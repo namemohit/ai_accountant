@@ -913,10 +913,10 @@ async def admin_list_users():
 
 @app.get("/api/admin/companies")
 async def admin_list_companies():
-    """List every distinct company in the system with voucher / bank /
-    user-access counts."""
+    """List every company (from the companies table) with id, org, archived state, and
+    voucher / invoice / user-access counts — so the User Manager can act by id."""
     try:
-        return {"status": "success", "companies": db.list_all_companies_with_usage()}
+        return {"status": "success", "companies": db.admin_list_companies()}
     except Exception as e:
         import traceback; traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -951,6 +951,53 @@ async def admin_update_user(username: str, payload: dict):
             ok = db.add_company_to_user(username, payload["add_company"])
             result["add_company"] = {"ok": bool(ok)}
         return {"status": "success", "result": result}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/companies")
+async def admin_create_company(payload: dict):
+    """Super-admin: create a company (defaults to the firm's org if none given)."""
+    try:
+        name = (payload.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Company name is required.")
+        org_id = payload.get("org_id") or db.default_org_id()
+        if not org_id:
+            raise HTTPException(status_code=400, detail="No workspace found to add the company to.")
+        cid = db.create_company(org_id, name, gstin=(payload.get("gstin") or None),
+                                state_code=(payload.get("state_code") or None))
+        return {"status": "success", "id": str(cid), "name": name}
+    except HTTPException: raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/companies/{company_id}/rename")
+async def admin_rename_company(company_id: str, payload: dict):
+    """Super-admin: rename a company — cascades company_name across all company-scoped tables."""
+    try:
+        res = db.rename_company(company_id, payload.get("new_name"))
+        if not res.get("ok"):
+            raise HTTPException(status_code=400, detail=res.get("error", "Rename failed."))
+        return {"status": "success", **res}
+    except HTTPException: raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/companies/{company_id}/archive")
+async def admin_archive_company(company_id: str):
+    """Super-admin: delete = soft-archive a company (reversible)."""
+    try:
+        res = db.admin_archive_company(company_id)
+        if not res.get("ok"):
+            raise HTTPException(status_code=400, detail=res.get("error", "Archive failed."))
+        return {"status": "success", **res}
+    except HTTPException: raise
     except Exception as e:
         import traceback; traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -1029,7 +1076,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "252"
+APP_VERSION = "253"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
