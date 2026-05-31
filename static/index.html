@@ -6200,7 +6200,10 @@
                 const v = group.primary;
                 const vType = v.voucher_type || v.category || v.type || 'Sales';
                 const amount = parseFloat(v.total_amount || v.amount || 0);
-                const isDebit = ['Purchase', 'Payment'].includes(vType);
+                // Tally convention: Sales/Receipt sit in DEBIT, Purchase/Payment in CREDIT.
+                // Keep in sync with _vRowDebit/_vRowCredit (~line 6608) — these two predicates
+                // must never diverge again (they did: v253 swapped the helpers but not this cell).
+                const isDebit = ['Sales', 'Receipt'].includes(vType);
                 const typeColors = { Sales: '#4ade80', Purchase: '#f87171', Payment: '#fbbf24', Receipt: '#38bdf8', Journal: '#a78bfa', Contra: '#94a3b8' };
 
                 // Source document link — Sprint 38.
