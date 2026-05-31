@@ -14871,7 +14871,29 @@
                 return;
             }
 
-            const invoiceIds = Array.from(checkedBoxes).map(cb => cb.getAttribute('data-inv-id'));
+            let invoiceIds = Array.from(checkedBoxes).map(cb => cb.getAttribute('data-inv-id'));
+
+            // Duplicate-push heads-up — a bulk Sync to Tally CREATEs each voucher, so re-pushing
+            // one that's already in Tally makes a duplicate (exactly what hit JMK 047–062). Warn,
+            // then let the user push only the genuinely-new ones. To UPDATE one already in Tally,
+            // the per-row Resync button (ACTION=Alter, targets the same voucher) is the safe path.
+            const _alreadyInTally = v => v && ((Number(v.tv_count) > 0) || v.was_pushed
+                                      || v.status === 'synced' || v.source === 'tally' || v.origin === 'tally');
+            const _vById = id => (allVouchers || []).find(x => String(x.id) === String(id));
+            const dupIds = invoiceIds.filter(id => _alreadyInTally(_vById(id)));
+            if (dupIds.length) {
+                const nums = dupIds.map(id => { const v = _vById(id); return (v && (v.voucher_number || v.invoice_number)) || id; });
+                const shown = nums.slice(0, 10).join(', ') + (nums.length > 10 ? ` +${nums.length - 10} more` : '');
+                const newIds = invoiceIds.filter(id => !dupIds.includes(id));
+                if (newIds.length === 0) {
+                    alert(`⚠️ All ${invoiceIds.length} selected voucher(s) are already in Tally:\n${shown}\n\nPushing again would create DUPLICATES in Tally. To update one that's already there, use its Resync button (it edits the same voucher instead of adding a copy).\n\nNothing was pushed.`);
+                    return;
+                }
+                if (!confirm(`⚠️ ${dupIds.length} of ${invoiceIds.length} selected voucher(s) already exist in Tally:\n${shown}\n\nPushing those again creates DUPLICATES. To update one already in Tally, use its Resync button instead.\n\nOK = push ONLY the ${newIds.length} new one(s).\nCancel = stop and review.`)) {
+                    return;
+                }
+                invoiceIds = newIds;
+            }
 
             // Sprint 47 — progress dialog instead of inline spinner + alert.
             const p = _tallyProgress('⬆ Export to Tally');
