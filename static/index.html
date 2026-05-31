@@ -6128,7 +6128,13 @@
                 if (typeof _populateVoucherPartyDatalist === 'function') _populateVoucherPartyDatalist();
                 if (typeof _updateColChevronIndicators === 'function') _updateColChevronIndicators();
                 _voucherPage = 1;   // Sprint 39 — fresh load (company switch / forced refresh) starts at page 1
-                renderVouchers();
+                // Sprint 53.3 — drive the render through applyVoucherFilters so the
+                // RESTORED filters (controls + _voucherFilters state) actually take
+                // effect on a fresh page load. A bare renderVouchers() could paint
+                // before the restored state was fully applied, so saved filters
+                // looked like they didn't persist across a refresh.
+                if (typeof applyVoucherFilters === 'function') applyVoucherFilters();
+                else renderVouchers();
             } catch(e) {
                 console.error('Failed to load vouchers:', e);
             }
