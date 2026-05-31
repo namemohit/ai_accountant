@@ -232,9 +232,9 @@ def fetch_local_ledgers(tally_url):
     xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedgerCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="LedgerCol"><TYPE>Ledger</TYPE><FETCH>Name, Parent, ClosingBalance</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
     res = query_local_tally(tally_url, xml)
     if not res:
-        return ["Cash", "Sales Account", "Purchase Account", "GST Payable", "Bank Account", "Bank Charges A/c"]
+        return []   # never fabricate — empty/unreachable Tally yields no ledgers
     ledgers = re.findall(r'<LEDGER NAME="([^"]*)"', res)
-    return ledgers if ledgers else ["Cash", "Sales Account", "Purchase Account", "Bank Account"]
+    return ledgers
 
 # Sprint 40 — TDL AlterId filter helper. When since>0, Tally returns only rows with
 # AlterId greater than the watermark — same pattern fetch_vouchers already uses.
@@ -256,21 +256,7 @@ def fetch_rich_ledgers(tally_url, since_alter_id=0):
     xml = f"""<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedgerCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="LedgerCol"><TYPE>Ledger</TYPE><FETCH>Name, Parent, ClosingBalance, OpeningBalance, BankingConfigBank, BankAccountNumber, IFSCCode, BankBranchName, GSTRegistrationType, PartyGSTIN, PANNo, Email, LedgerPhone, LedgerMobile, Address, CreditPeriod, AlterId, Guid</FETCH>{_use}</COLLECTION>{_decl}</TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
     res = query_local_tally(tally_url, xml, timeout=30.0)
     if not res:
-        return [
-            {"name": "Cash", "parent": "Cash-in-Hand", "closing_balance": "50000.00"},
-            {"name": "Bank Account", "parent": "Bank Accounts", "closing_balance": "1250000.00", "bank_account_number": "1234567890", "ifsc_code": "HDFC0001234", "bank_name": "HDFC Bank"},
-            {"name": "Sales Account", "parent": "Sales Accounts", "closing_balance": "-450000.00"},
-            {"name": "Purchase Account", "parent": "Purchase Accounts", "closing_balance": "230000.00"},
-            {"name": "GST Payable", "parent": "Duties & Taxes", "closing_balance": "-45000.00"},
-            {"name": "Bank Charges A/c", "parent": "Indirect Expenses", "closing_balance": "1500.00"},
-            {"name": "Sharma Traders", "parent": "Sundry Creditors", "closing_balance": "-150000.00", "gstin": "07AAAAA0000A1Z5", "pan": "AAAAA0000A"},
-            {"name": "Gupta & Sons", "parent": "Sundry Debtors", "closing_balance": "280000.00", "gstin": "07BBBBB0000B1Z5", "pan": "BBBBB0000B"},
-            {"name": "Rent Expense", "parent": "Indirect Expenses", "closing_balance": "40000.00"},
-            {"name": "Salary Expense", "parent": "Indirect Expenses", "closing_balance": "120000.00"},
-            {"name": "CGST Input", "parent": "Duties & Taxes", "closing_balance": "12000.00"},
-            {"name": "SGST Input", "parent": "Duties & Taxes", "closing_balance": "12000.00"},
-            {"name": "IGST Output", "parent": "Duties & Taxes", "closing_balance": "-35000.00"}
-        ]
+        return []   # never fabricate — empty/unreachable Tally yields no ledgers
     # Parse each ledger block with all available fields
     results = []
     for _lm in re.finditer(r'<LEDGER NAME="([^"]*)"[^>]*>(.*?)</LEDGER>', res, re.DOTALL):
@@ -301,7 +287,7 @@ def fetch_rich_ledgers(tally_url, since_alter_id=0):
         ledger["raw_xml"] = _lm.group(0)   # verbatim Tally ledger XML (first-hand data)
         # Only include non-empty extras (raw_xml is always present)
         results.append({k: v for k, v in ledger.items() if v})
-    return results if results else [{"name": "Cash", "parent": "Cash-in-Hand", "closing_balance": "50000.00"}]
+    return results
 
 def fetch_groups(tally_url, since_alter_id=0):
     """Fetch all account groups with parent + nature (revenue / capital / asset etc.).
@@ -310,13 +296,7 @@ def fetch_groups(tally_url, since_alter_id=0):
     xml = f"""<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>GroupCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="GroupCol"><TYPE>Group</TYPE><FETCH>Name, Parent, IsRevenue, IsDeemedPositive, IsSubLedger, ReservedName, AlterId, Guid</FETCH>{_use}</COLLECTION>{_decl}</TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
     res = query_local_tally(tally_url, xml, timeout=15.0)
     if not res:
-        return [
-            {"name": "Cash-in-Hand", "parent": "Current Assets"},
-            {"name": "Bank Accounts", "parent": "Current Assets"},
-            {"name": "Sales Accounts", "parent": "Revenue Accounts"},
-            {"name": "Purchase Accounts", "parent": "Cost of Goods Sold"},
-            {"name": "Duties & Taxes", "parent": "Current Liabilities"},
-        ]
+        return []   # never fabricate — empty/unreachable Tally yields no groups
     groups = []
     for _gm in re.finditer(r'<GROUP NAME="([^"]*)"[^>]*>(.*?)</GROUP>', res, re.DOTALL):
         name, block = _gm.group(1), _gm.group(2)
@@ -360,25 +340,7 @@ def fetch_vouchers(tally_url, from_date="20000401", to_date=None, since_alter_id
     xml = f"""<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export Data</TALLYREQUEST><TYPE>Collection</TYPE><ID>VchCol</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><SVFROMDATE TYPE="Date">{from_date}</SVFROMDATE><SVTODATE TYPE="Date">{to_date}</SVTODATE></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="VchCol"><TYPE>Voucher</TYPE><FETCH>AlterId, Date, VoucherTypeName, VoucherNumber, PartyLedgerName, Amount, Narration, GUID, ReferenceNumber, ReferenceDate, PlaceOfSupply, AllLedgerEntries, AllLedgerEntries.BankAllocations, AllLedgerEntries.BillAllocations, AllLedgerEntries.CategoryAllocations, AllLedgerEntries.CategoryAllocations.CostCentreAllocations</FETCH>{_filter_use}</COLLECTION>{_filter_decl}</TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
     res = query_local_tally(tally_url, xml, timeout=180.0)
     if not res:
-        return [
-            {"date": "20260501", "type": "Sales", "party": "Gupta & Sons", "number": "INV-2026-001", "amount": 45000.00, "narration": "Sale of coffee beans"},
-            {"date": "20260502", "type": "Purchase", "party": "Sharma Traders", "number": "PUR-101", "amount": 25000.00, "narration": "Purchase of green tea"},
-            {"date": "20260503", "type": "Payment", "party": "Rent Expense", "number": "VCH-201", "amount": 40000.00, "narration": "Office rent May 2026",
-             "ledger_entries": [
-                 {"ledger_name": "Rent Expense", "amount": 40000.0},
-                 {"ledger_name": "Bank Account", "amount": -40000.0, "bank_allocations": [
-                     {"instrument_number": "CHQ001234", "instrument_date": "20260503", "bank_date": "20260505", "transaction_type": "Cheque", "payment_favouring": "Landlord Corp", "amount": 40000.0}
-                 ]}
-             ]},
-            {"date": "20260504", "type": "Receipt", "party": "Gupta & Sons", "number": "VCH-202", "amount": 20000.00, "narration": "Against INV-2026-001",
-             "ledger_entries": [
-                 {"ledger_name": "Bank Account", "amount": -20000.0, "bank_allocations": [
-                     {"instrument_number": "NEFT-REF-98765", "instrument_date": "20260504", "bank_date": "20260504", "transaction_type": "NEFT", "payment_favouring": "Gupta & Sons", "amount": 20000.0}
-                 ]},
-                 {"ledger_name": "Gupta & Sons", "amount": 20000.0}
-             ]},
-            {"date": "20260505", "type": "Sales", "party": "Cash", "number": "INV-2026-002", "amount": 15000.00, "narration": "Counter sale"}
-        ]
+        return []   # never fabricate — empty/unreachable Tally yields no vouchers
     # Parse voucher XML with regex for robustness (Tally XML is not always well-formed)
     vouchers = []
     for _vm in re.finditer(r'<VOUCHER[^>]*>(.*?)</VOUCHER>', res, re.DOTALL):
@@ -878,7 +840,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.20.0"  # v0.20.0 — CRITICAL accounting fix: _build_voucher_xml AMOUNT sign was inverted (Dr=+, Cr=-), so every pushed Sales landed in Tally's CREDIT column (party credited not debited). Now Tally-correct: Dr=negative, Cr=positive (confirmed vs native vouchers). v0.19.4 — Cloud Run preset URL fix (project-number host returned Google 404; switched to hash-format canonical host). v0.19.3 — Sprint 44.3 query-then-act Alter/Delete via TDL collection on $Narration CONTAINS "[YAI:<uid>]" → keyed envelope on Tally-native MASTERID + DATE + VCHTYPE + VCHNUMBER; lookup-miss falls through to Create.
+AGENT_VERSION = "0.20.1"  # v0.20.1 — never fabricate: removed all mock/simulator fallbacks in fetch_vouchers/fetch_rich_ledgers/fetch_local_ledgers/fetch_groups that injected fake data ("coffee beans", VCH-GUID, Gupta & Sons) when Tally returned empty — that leaked fabricated vouchers into a real workspace. All now return []. v0.20.0 — CRITICAL accounting fix: _build_voucher_xml AMOUNT sign was inverted (Dr=+, Cr=-), so every pushed Sales landed in Tally's CREDIT column (party credited not debited). Now Tally-correct: Dr=negative, Cr=positive (confirmed vs native vouchers). v0.19.4 — Cloud Run preset URL fix (project-number host returned Google 404; switched to hash-format canonical host). v0.19.3 — Sprint 44.3 query-then-act Alter/Delete via TDL collection on $Narration CONTAINS "[YAI:<uid>]" → keyed envelope on Tally-native MASTERID + DATE + VCHTYPE + VCHNUMBER; lookup-miss falls through to Create.
 
 
 def _post_json(url, body, timeout=15.0):

@@ -1974,6 +1974,7 @@
                                 <option value="duplicate_in_tally">🔁 Duplicate in Tally</option>
                                 <option value="amount_mismatch">⚠️ Amount mismatch</option>
                                 <option value="gst_mismatch">⚠️ GST split mismatch</option>
+                                <option value="no_tally_link">⚠️ No Tally link (no GUID)</option>
                                 <option value="deleted_in_tally">🗑️ Deleted in Tally</option>
                                 <option value="edited_in_tally">✏️ Edited in Tally</option>
                                 <option value="still_in_tally">⚠️ Still in Tally (archived)</option>
@@ -6647,6 +6648,9 @@
                 'duplicate_in_tally': {bg:'rgba(168, 85, 247, 0.15)',  c:'#a855f7', t:'🔁 Duplicate in Tally'},
                 'amount_mismatch':    {bg:'rgba(239, 68, 68, 0.15)',   c:'#ef4444', t:'⚠ Amount mismatch'},
                 'gst_mismatch':       {bg:'rgba(249, 115, 22, 0.15)',  c:'#f97316', t:'⚠ GST split mismatch'},
+                // Phase 7 — Tally-mirror row with no GUID/master-id: never confirmed in
+                // Tally (fabricated / mock leftover). Surfaced as a suspect, not 'matched'.
+                'no_tally_link':      {bg:'rgba(234, 179, 8, 0.15)',   c:'#eab308', t:'⚠ No Tally link'},
                 'deleted_in_tally':   {bg:'rgba(148, 163, 184, 0.15)', c:'#94a3b8', t:'🗑 Deleted in Tally'},
                 // Phase 3 — archived-aware lifecycle (shown in the Archived view).
                 'still_in_tally':     {bg:'rgba(245, 158, 11, 0.15)',  c:'#f59e0b', t:'⚠ Still in Tally'},

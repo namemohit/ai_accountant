@@ -1029,7 +1029,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "250"
+APP_VERSION = "251"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -6783,117 +6783,12 @@ async def ingest_tally_data(payload: dict):
             raise HTTPException(status_code=502, detail=(
                 "Tally bridge unavailable — open Tally and start the YantrAI Tally "
                 "Bridge agent on that machine, then retry. Nothing was changed."))
-        if False:  # DISABLED simulator fallback — retained out of the data path only.
-            ws_response = {
-                "status": "success",
-                "tally_company_name": company,
-                "pan": "ABCDE1234F",
-                "gstin": "27ABCDE1234F1Z5",
-                "ledgers": [
-                    {"name": "Cash", "parent": "Cash-in-Hand", "group_path": "Assets > Current Assets > Cash-in-Hand", "closing_balance": 50000.00, "ledger_type": "cash"},
-                    {"name": "HDFC Bank - Current A/c", "parent": "Bank Accounts", "group_path": "Assets > Current Assets > Bank Accounts", "closing_balance": 1250000.00, "bank_name": "HDFC Bank", "account_number": "50100012345678", "ifsc_code": "HDFC0001234", "ledger_type": "bank"},
-                    {"name": "Sales Account", "parent": "Sales Accounts", "group_path": "Income > Direct Income > Sales Accounts", "closing_balance": -450000.00, "is_revenue": True, "ledger_type": "income"},
-                    {"name": "Purchase Account", "parent": "Purchase Accounts", "group_path": "Expenses > Direct Expenses > Purchase Accounts", "closing_balance": 230000.00, "ledger_type": "expense"},
-                    {"name": "CGST Output", "parent": "Duties & Taxes", "group_path": "Liabilities > Current Liabilities > Duties & Taxes", "closing_balance": -22500.00, "gst_registration_type": "output", "ledger_type": "tax"},
-                    {"name": "SGST Output", "parent": "Duties & Taxes", "group_path": "Liabilities > Current Liabilities > Duties & Taxes", "closing_balance": -22500.00, "gst_registration_type": "output", "ledger_type": "tax"},
-                    {"name": "IGST Output", "parent": "Duties & Taxes", "group_path": "Liabilities > Current Liabilities > Duties & Taxes", "closing_balance": -35000.00, "gst_registration_type": "output", "ledger_type": "tax"},
-                    {"name": "CGST Input", "parent": "Duties & Taxes", "group_path": "Assets > Current Assets > Duties & Taxes", "closing_balance": 12000.00, "gst_registration_type": "input", "ledger_type": "tax"},
-                    {"name": "SGST Input", "parent": "Duties & Taxes", "group_path": "Assets > Current Assets > Duties & Taxes", "closing_balance": 12000.00, "gst_registration_type": "input", "ledger_type": "tax"},
-                    {"name": "Bank Charges A/c", "parent": "Indirect Expenses", "closing_balance": 1500.00, "ledger_type": "expense"},
-                    {"name": "Sharma Traders", "parent": "Sundry Creditors", "group_path": "Liabilities > Current Liabilities > Sundry Creditors", "closing_balance": -150000.00, "gstin": "27AABCS1234F1Z5", "pan": "AABCS1234F", "ledger_type": "party", "place_of_supply": "Maharashtra"},
-                    {"name": "Gupta & Sons", "parent": "Sundry Debtors", "group_path": "Assets > Current Assets > Sundry Debtors", "closing_balance": 280000.00, "gstin": "29AABCG5678N1Z8", "pan": "AABCG5678N", "ledger_type": "party", "place_of_supply": "Karnataka"},
-                    {"name": "Rent Expense", "parent": "Indirect Expenses", "closing_balance": 40000.00, "tds_applicable": True, "ledger_type": "expense"},
-                    {"name": "Salary Expense", "parent": "Indirect Expenses", "closing_balance": 120000.00, "ledger_type": "expense"}
-                ],
-                "groups": [
-                    {"name": "Cash-in-Hand", "parent": "Current Assets"},
-                    {"name": "Bank Accounts", "parent": "Current Assets"},
-                    {"name": "Sales Accounts", "parent": "Direct Income", "is_revenue": True},
-                    {"name": "Purchase Accounts", "parent": "Direct Expenses"},
-                    {"name": "Duties & Taxes", "parent": "Current Liabilities"},
-                    {"name": "Indirect Expenses", "parent": "Profit & Loss"},
-                    {"name": "Sundry Creditors", "parent": "Current Liabilities"},
-                    {"name": "Sundry Debtors", "parent": "Current Assets"}
-                ],
-                "stock_items": [
-                    {"name": "Steel Pipes 1 inch", "unit": "Nos", "hsn_code": "7306", "gst_rate": 18.0, "closing_qty": 250, "closing_value": 75000, "standard_rate": 300},
-                    {"name": "Aluminum Sheet 4x8", "unit": "Pcs", "hsn_code": "7606", "gst_rate": 18.0, "closing_qty": 80, "closing_value": 120000, "standard_rate": 1500},
-                    {"name": "Copper Wire 2.5mm", "unit": "Mtr", "hsn_code": "7408", "gst_rate": 18.0, "closing_qty": 1200, "closing_value": 96000, "standard_rate": 80}
-                ],
-                "vouchers": [
-                    {
-                        "date": "20260501", "type": "Sales", "number": "INV-2026-001",
-                        "party": "Gupta & Sons", "party_gstin": "29AABCG5678N1Z8",
-                        "amount": 45000.00, "taxable_value": 38135.59,
-                        "cgst_amount": 0, "sgst_amount": 0, "igst_amount": 6864.41,
-                        "place_of_supply": "Karnataka",
-                        "narration": "Sale of Steel Pipes to Gupta & Sons against PO-2026-15",
-                        "reference_no": "PO-2026-15",
-                        "ledger_entries": [
-                            {"ledger": "Gupta & Sons", "amount": 45000.00, "is_debit": True},
-                            {"ledger": "Sales Account", "amount": -38135.59, "is_debit": False},
-                            {"ledger": "IGST Output", "amount": -6864.41, "is_debit": False}
-                        ],
-                        "tally_master_id": "VCH-GUID-001"
-                    },
-                    {
-                        "date": "20260502", "type": "Purchase", "number": "PUR-101",
-                        "party": "Sharma Traders", "party_gstin": "27AABCS1234F1Z5",
-                        "amount": 25000.00, "taxable_value": 21186.44,
-                        "cgst_amount": 1906.78, "sgst_amount": 1906.78, "igst_amount": 0,
-                        "place_of_supply": "Maharashtra",
-                        "narration": "Purchase of Copper Wire from Sharma Traders, BillNo. ST-485",
-                        "reference_no": "ST-485",
-                        "ledger_entries": [
-                            {"ledger": "Purchase Account", "amount": 21186.44, "is_debit": True},
-                            {"ledger": "CGST Input", "amount": 1906.78, "is_debit": True},
-                            {"ledger": "SGST Input", "amount": 1906.78, "is_debit": True},
-                            {"ledger": "Sharma Traders", "amount": -25000.00, "is_debit": False}
-                        ],
-                        "tally_master_id": "VCH-GUID-002"
-                    },
-                    {
-                        "date": "20260503", "type": "Payment", "number": "VCH-201",
-                        "party": "Rent Expense",
-                        "amount": 40000.00,
-                        "narration": "Office rent for May 2026 paid by NEFT to landlord",
-                        "instrument_number": "NEFT240503",
-                        "ledger_entries": [
-                            {"ledger": "Rent Expense", "amount": 40000.00, "is_debit": True},
-                            {"ledger": "HDFC Bank - Current A/c", "amount": -40000.00, "is_debit": False}
-                        ],
-                        "tally_master_id": "VCH-GUID-003"
-                    },
-                    {
-                        "date": "20260504", "type": "Receipt", "number": "VCH-202",
-                        "party": "Gupta & Sons",
-                        "amount": 20000.00,
-                        "narration": "Part payment received from Gupta & Sons against INV-2026-001",
-                        "instrument_number": "UTR240504",
-                        "bill_refs": [{"name": "INV-2026-001", "type": "Agst Ref", "amount": 20000.00}],
-                        "ledger_entries": [
-                            {"ledger": "HDFC Bank - Current A/c", "amount": 20000.00, "is_debit": True},
-                            {"ledger": "Gupta & Sons", "amount": -20000.00, "is_debit": False}
-                        ],
-                        "tally_master_id": "VCH-GUID-004"
-                    },
-                    {
-                        "date": "20260505", "type": "Sales", "number": "INV-2026-002",
-                        "party": "Cash",
-                        "amount": 15000.00, "taxable_value": 12711.86,
-                        "cgst_amount": 1144.07, "sgst_amount": 1144.07, "igst_amount": 0,
-                        "place_of_supply": "Maharashtra",
-                        "narration": "Counter sale - Aluminum Sheet 4x8 - 1 piece",
-                        "ledger_entries": [
-                            {"ledger": "Cash", "amount": 15000.00, "is_debit": True},
-                            {"ledger": "Sales Account", "amount": -12711.86, "is_debit": False},
-                            {"ledger": "CGST Output", "amount": -1144.07, "is_debit": False},
-                            {"ledger": "SGST Output", "amount": -1144.07, "is_debit": False}
-                        ],
-                        "tally_master_id": "VCH-GUID-005"
-                    }
-                ]
-            }
+        # (Removed in Phase 7) A disabled `if False:` simulator-data fallback used to
+        # live here — it fabricated a full fake company (VCH-GUID vouchers, "Steel
+        # Pipes", Gupta & Sons, etc.) and is exactly the kind of thing that leaked test
+        # data into real workspaces. Deleted outright so it can never be re-enabled.
+        # The only paths now: real agent data (handled below) or the 502 raised above
+        # when the bridge is unavailable.
 
         tally_company = ws_response.get("tally_company_name", company)
         pan = ws_response.get("pan", "ABCDE1234F")

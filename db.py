@@ -3839,6 +3839,13 @@ def _derive_reco_flag(row):
     if row.get('source') != 'invoice':
         if row.get('missing_from_tally_at') or row.get('discarded_at'):
             return 'removed_from_tally' if archived else 'deleted_in_tally'
+        # Phase 7 — a Tally-mirror row with NO Tally GUID/master-id was never genuinely
+        # confirmed in Tally (real pulls always carry one; id-less rows are fabricated /
+        # mock leftovers). reconcile_voucher_deletions only checks GUID-bearing rows, so
+        # an id-less row can never be flagged missing — it must NOT claim 'matched'.
+        # Archived → treat as resolved/gone; otherwise surface it as a suspect.
+        if not str(row.get('tally_master_id') or '').strip():
+            return 'removed_from_tally' if archived else 'no_tally_link'
         if archived:
             return 'still_in_tally'
         if row.get('tally_edited_at'):
