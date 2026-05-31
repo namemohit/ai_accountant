@@ -840,7 +840,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.20.2"  # v0.20.2 — tunnel auto-reconnect hardening: _run_tunnel_loop now self-restarts (no more silent thread death), the WS auth-ack resumes via the durable device token instead of logging out on a transient blip, and a liveness watchdog respawns the tunnel if it ever dies — so a Cloud Run redeploy never leaves the agent disconnected (heartbeat-green but tunnel-dead). v0.20.1 — never fabricate: removed all mock/simulator fallbacks in fetch_vouchers/fetch_rich_ledgers/fetch_local_ledgers/fetch_groups that injected fake data ("coffee beans", VCH-GUID, Gupta & Sons) when Tally returned empty — that leaked fabricated vouchers into a real workspace. All now return []. v0.20.0 — CRITICAL accounting fix: _build_voucher_xml AMOUNT sign was inverted (Dr=+, Cr=-), so every pushed Sales landed in Tally's CREDIT column (party credited not debited). Now Tally-correct: Dr=negative, Cr=positive (confirmed vs native vouchers). v0.19.4 — Cloud Run preset URL fix (project-number host returned Google 404; switched to hash-format canonical host). v0.19.3 — Sprint 44.3 query-then-act Alter/Delete via TDL collection on $Narration CONTAINS "[YAI:<uid>]" → keyed envelope on Tally-native MASTERID + DATE + VCHTYPE + VCHNUMBER; lookup-miss falls through to Create.
+AGENT_VERSION = "0.21.0"  # v0.21.0 — chunked import: full pull fetched fast (localhost) then PUSHED to the server in small HTTP batches (/tally/ingest-batch + /tally/ingest-complete) so no single giant WS frame stalls/times-out on the cloud tunnel (fixes Full-import-from-Tally). v0.20.2 — tunnel auto-reconnect hardening: _run_tunnel_loop now self-restarts (no more silent thread death), the WS auth-ack resumes via the durable device token instead of logging out on a transient blip, and a liveness watchdog respawns the tunnel if it ever dies — so a Cloud Run redeploy never leaves the agent disconnected (heartbeat-green but tunnel-dead). v0.20.1 — never fabricate: removed all mock/simulator fallbacks in fetch_vouchers/fetch_rich_ledgers/fetch_local_ledgers/fetch_groups that injected fake data ("coffee beans", VCH-GUID, Gupta & Sons) when Tally returned empty — that leaked fabricated vouchers into a real workspace. All now return []. v0.20.0 — CRITICAL accounting fix: _build_voucher_xml AMOUNT sign was inverted (Dr=+, Cr=-), so every pushed Sales landed in Tally's CREDIT column (party credited not debited). Now Tally-correct: Dr=negative, Cr=positive (confirmed vs native vouchers). v0.19.4 — Cloud Run preset URL fix (project-number host returned Google 404; switched to hash-format canonical host). v0.19.3 — Sprint 44.3 query-then-act Alter/Delete via TDL collection on $Narration CONTAINS "[YAI:<uid>]" → keyed envelope on Tally-native MASTERID + DATE + VCHTYPE + VCHNUMBER; lookup-miss falls through to Create.
 
 
 def _post_json(url, body, timeout=15.0):
@@ -858,6 +858,62 @@ def _post_json(url, body, timeout=15.0):
             except: return {"_raw": raw}
     except Exception as e:
         return {"_error": str(e)}
+
+
+def _chunked_seed_push(since_v, since_l, since_g, since_s, full_pull, http, tok, cid, cname, turl):
+    """v0.21.0 chunked import worker (runs in a daemon thread). Fetch the whole company from Tally
+    (fast — localhost), then PUSH it to the server in small HTTP batches so no single giant frame has
+    to cross the cloud tunnel (which stalls/times-out). Report any failure so the job surfaces an
+    honest error instead of hanging."""
+    base = {"session_token": tok, "company_id": cid}
+    def _send(path, body, timeout=180.0):
+        r = _post_json(f"{http}{path}", {**base, **body}, timeout=timeout)
+        if isinstance(r, dict) and r.get("_error"):
+            raise RuntimeError(f"{path}: {r['_error']}")
+        return r
+    try:
+        _sync_in_progress.set()
+        try:
+            info = fetch_tally_company_info(turl)
+            tally_company = info.get("company_name") or cname or "Unknown"
+            base["tally_company_name"] = tally_company
+            rich_ledgers = fetch_rich_ledgers(turl, since_alter_id=since_l)
+            groups       = fetch_groups(turl, since_alter_id=since_g)
+            vouchers     = fetch_vouchers(turl, since_alter_id=since_v)
+            stock_items  = fetch_stock_items(turl, since_alter_id=since_s)
+        finally:
+            _sync_in_progress.clear()
+
+        # masters first (small — one batch each)
+        _send("/tally/ingest-batch", {"entity": "ledgers",     "items": rich_ledgers})
+        _send("/tally/ingest-batch", {"entity": "groups",      "items": groups})
+        _send("/tally/ingest-batch", {"entity": "stock_items", "items": stock_items})
+
+        # vouchers in 250-row batches — each POST is small + independent
+        BATCH = 250
+        total = len(vouchers)
+        for i in range(0, total, BATCH):
+            _send("/tally/ingest-batch",
+                  {"entity": "vouchers", "items": vouchers[i:i + BATCH], "vouchers_total": total})
+
+        # finalize — reconcile + watermarks + summary run server-side from these
+        def _g(lst): return [x.get("guid") for x in lst if x.get("guid")]
+        complete = {
+            "full": full_pull,
+            "counts": {"vouchers": total, "ledgers": len(rich_ledgers),
+                       "groups": len(groups), "stock_items": len(stock_items)},
+            "max_voucher_alterid": max((int(v.get("alterid")  or 0) for v in vouchers),     default=since_v),
+            "max_ledger_alterid":  max((int(x.get("alter_id") or 0) for x in rich_ledgers), default=since_l),
+            "max_group_alterid":   max((int(x.get("alter_id") or 0) for x in groups),       default=since_g),
+            "max_stock_alterid":   max((int(x.get("alter_id") or 0) for x in stock_items),  default=since_s),
+        }
+        if full_pull:
+            complete["live_guids"] = {"vouchers": _g(vouchers), "ledgers": _g(rich_ledgers),
+                                      "groups": _g(groups), "stock_items": _g(stock_items)}
+        _send("/tally/ingest-complete", complete)
+    except Exception as e:
+        try: _post_json(f"{http}/tally/ingest-fail", {**base, "error": str(e)[:300]}, timeout=15.0)
+        except Exception: pass
 
 
 def _get_json(url, timeout=15.0):
@@ -3006,6 +3062,28 @@ class TallyBridgeApp:
                             response["active_ledgers"] = ledgers
                             response["synced_today"] = self.synced_count
                             self.log(f"Transmitted Tally summary for '{tally_company}'.", "success")
+
+                        elif cmd_type == "seed_baseline" and (data or {}).get("chunked"):
+                            # v0.21.0 CHUNKED PUSH — ACK instantly, then fetch + POST the data to the
+                            # server in small HTTP batches from a daemon thread (no giant WS frame to
+                            # stall on the cloud tunnel; the WS loop stays responsive). The server saves
+                            # each batch and finalizes via /tally/ingest-complete.
+                            _d = data or {}
+                            def _ci(k, fb=0):
+                                try: return int(_d.get(k) or fb)
+                                except Exception: return fb
+                            _legacy = _ci("since_alter_id", 0)
+                            _sv = _ci("since_voucher_alterid", _legacy); _sl = _ci("since_ledger_alterid", 0)
+                            _sg = _ci("since_group_alterid", 0); _ss = _ci("since_stock_alterid", 0)
+                            _full = bool(_d.get("full")) or (_sv == 0 and _sl == 0 and _sg == 0 and _ss == 0)
+                            response["chunked_ack"] = True
+                            response["vouchers_total"] = 0
+                            _threading.Thread(
+                                target=_chunked_seed_push,
+                                args=(_sv, _sl, _sg, _ss, _full, http_url, self.session_token,
+                                      self.selected_company_id, self.selected_company_name, tally_url),
+                                daemon=True).start()
+                            self.log("Chunked import: fetching from Tally, pushing in batches…", "info")
 
                         elif cmd_type == "seed_baseline":
                             # Per-entity incremental sync (Sprint 41).

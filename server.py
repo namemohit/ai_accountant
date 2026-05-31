@@ -1100,7 +1100,7 @@ _NOCACHE = {"Cache-Control": "no-cache, must-revalidate"}
 # placeholder) into the served shell HTML, the service worker (CACHE_NAME) and
 # the ?v= CSS cache-bust — so the visible label, the SW cache and the asset
 # cache-bust are always the SAME number. Nothing else needs editing per release.
-APP_VERSION = "258"
+APP_VERSION = "259"
 
 def _serve_versioned(path, media_type):
     """Serve a static text file with __APP_VER__ replaced by APP_VERSION."""
@@ -6824,6 +6824,166 @@ async def ingest_tally_data(payload: dict):
             "mode": _mode or "auto", "background": True}
 
 
+# ── Chunked import (v0.21.0+ agents) ────────────────────────────────────────
+# A full import used to come back as ONE giant WebSocket frame (all ~3k vouchers),
+# which stalls over the cloud tunnel. v0.21.0 agents instead PUSH the data here in
+# small HTTP batches (each a short, independent, retryable request — no giant frame,
+# and it rides plain HTTP so it never depends on the WS landing on a given instance).
+# These are under /tally/ (auth-whitelisted) and self-auth via the agent session_token.
+@app.post("/tally/ingest-batch")
+async def tally_ingest_batch(payload: dict):
+    """Receive + UPSERT one small batch of a single entity. Idempotent (safe to retry)."""
+    user_id, company_id, company = resolve_agent_request(payload, required_perm="edit")
+    tally_company = (payload.get("tally_company_name") or company)
+    entity = (payload.get("entity") or "").strip()
+    items = payload.get("items") or []
+    import asyncio as _aio
+    loop = _aio.get_event_loop()
+    try:
+        if entity == "vouchers":
+            res = await loop.run_in_executor(None, db.save_tally_vouchers, tally_company, items, 'tally_pull', None)
+            try: await loop.run_in_executor(None, db.save_tally_raw, tally_company, items, 'voucher', company_id)
+            except Exception: pass
+            _saved = res.get('upserted', len(items)) if isinstance(res, dict) else len(items)
+            _job = db.get_sync_job(company) or {}
+            _upd = {'vouchers_done': int(_job.get('vouchers_done') or 0) + int(_saved or 0),
+                    'phase': 'Saving vouchers to YantrAI…'}
+            if payload.get('vouchers_total'):
+                _upd['vouchers_total'] = int(payload['vouchers_total'])
+            try: db.update_sync_job(company, **_upd)
+            except Exception: pass
+        elif entity == "ledgers":
+            c = await loop.run_in_executor(None, db.save_tally_ledgers, tally_company, items)
+            try: await loop.run_in_executor(None, db.save_tally_raw, tally_company, items, 'ledger', company_id)
+            except Exception: pass
+            try: db.update_sync_job(company, ledgers=int(c or 0), phase='Saving masters…')
+            except Exception: pass
+        elif entity == "groups":
+            c = await loop.run_in_executor(None, db.save_tally_groups, tally_company, items)
+            try: await loop.run_in_executor(None, db.save_tally_raw, tally_company, items, 'group', company_id)
+            except Exception: pass
+            try: db.update_sync_job(company, groups=int(c or 0))
+            except Exception: pass
+        elif entity == "stock_items":
+            c = await loop.run_in_executor(None, db.save_tally_stock_items, tally_company, items)
+            try: await loop.run_in_executor(None, db.save_tally_raw, tally_company, items, 'stock_item', company_id)
+            except Exception: pass
+            try: db.update_sync_job(company, stock=int(c or 0))
+            except Exception: pass
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown entity '{entity}'")
+        return {"status": "success", "entity": entity, "saved": len(items)}
+    except HTTPException: raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        try: db.update_sync_job(company, state='error', error=f"Batch save failed ({entity}): {str(e)[:180]}")
+        except Exception: pass
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/tally/ingest-complete")
+async def tally_ingest_complete(payload: dict):
+    """After all batches are saved: reconcile deletions + advance watermarks + summary +
+    company_id backfill + background embed/bank-ingest, then mark the sync job done."""
+    user_id, company_id, company = resolve_agent_request(payload, required_perm="edit")
+    tally_company = (payload.get("tally_company_name") or company)
+    do_full = bool(payload.get("full", True))
+    live = payload.get("live_guids") or {}
+    counts = payload.get("counts") or {}
+    import asyncio as _aio
+    loop = _aio.get_event_loop()
+    try:
+        try: db.update_sync_job(company, phase='Reconciling & finalizing…')
+        except Exception: pass
+
+        _vdel = 0
+        if do_full and isinstance(live, dict) and live.get("vouchers"):
+            try: _vdel = await loop.run_in_executor(None, db.reconcile_voucher_deletions, tally_company, live["vouchers"])
+            except Exception as _e: print(f"[ingest-complete] voucher reconcile: {_e}", flush=True)
+        if do_full and isinstance(live, dict):
+            for _ent in ("ledgers", "groups", "stock_items"):
+                if _ent in live:
+                    try: await loop.run_in_executor(None, db.reconcile_tally_deletions, tally_company, _ent, live[_ent])
+                    except Exception as _e: print(f"[ingest-complete] {_ent} reconcile: {_e}", flush=True)
+
+        _mv = payload.get("max_voucher_alterid"); _ml = payload.get("max_ledger_alterid")
+        _mg = payload.get("max_group_alterid");   _ms = payload.get("max_stock_alterid")
+        if any(x is not None for x in (_mv, _ml, _mg, _ms)):
+            try: await loop.run_in_executor(None, db.set_sync_watermark, company,
+                                            int(_mv or 0), int(_ml or 0), int(_mg or 0), int(_ms or 0), do_full)
+            except Exception as _e: print(f"[ingest-complete] watermark: {_e}", flush=True)
+
+        _vc = int(counts.get("vouchers", 0)); _lc = int(counts.get("ledgers", 0))
+        _gc = int(counts.get("groups", 0));   _sc = int(counts.get("stock_items", 0))
+        _parts = []
+        if _vc or _vdel: _parts.append(f"{_vc:,} vouchers" + (f" ({_vdel:,} removed)" if _vdel else ""))
+        if _lc: _parts.append(f"{_lc:,} ledgers")
+        if _gc: _parts.append(f"{_gc:,} groups")
+        if _sc: _parts.append(f"{_sc:,} stock items")
+        _summary = ("Full import" if do_full else "Incremental sync") + (" — " + " · ".join(_parts) if _parts else " — no changes")
+        try:
+            await loop.run_in_executor(None, db.log_tally_sync, tally_company,
+                                       'baseline' if do_full else 'incremental', _vc+_lc+_gc+_sc, _vc+_lc+_gc+_sc, 'success')
+            await loop.run_in_executor(None, db.log_tally_sync_batch, tally_company, _summary)
+        except Exception as _e: print(f"[ingest-complete] log: {_e}", flush=True)
+
+        if company_id:
+            def _post_save_backfill():
+                try:
+                    conn_bf = db.get_conn(); cur_bf = conn_bf.cursor()
+                    for tbl in ['tally_vouchers', 'tally_ledgers', 'tally_groups', 'tally_stock_items', 'tally_sync_log']:
+                        cur_bf.execute(f"UPDATE {tbl} SET company_id = %s WHERE company_name = %s AND company_id IS NULL",
+                                       (company_id, tally_company))
+                    conn_bf.commit(); cur_bf.close(); conn_bf.close()
+                    try:
+                        conn_a = db.get_conn(); cur_a = conn_a.cursor()
+                        cur_a.execute("""INSERT INTO tenant_audit_log (user_id, action, entity_type, company_id, payload)
+                                         VALUES (%s, 'tally_sync_baseline', 'tally', %s, %s::jsonb)""",
+                                      (user_id, company_id, json.dumps({"tally_company": tally_company,
+                                       "vouchers": _vc, "ledgers": _lc, "groups": _gc, "stock_items": _sc, "chunked": True})))
+                        conn_a.commit(); cur_a.close(); conn_a.close()
+                    except Exception as _au: print(f"[ingest-complete] audit: {_au}", flush=True)
+                    try: db.mark_sensitive_ledgers(company_id)
+                    except Exception: pass
+                except Exception as _bf: print(f"[ingest-complete] backfill: {_bf}", flush=True)
+            await loop.run_in_executor(None, _post_save_backfill)
+
+            import threading as _thr
+            def _embed_bg():
+                try: db.embed_tally_master(company_id, tally_company, get_embedding)
+                except Exception as _ee: print(f"[ingest-complete] embed: {_ee}", flush=True)
+            _thr.Thread(target=_embed_bg, daemon=True).start()
+            def _bank_bg():
+                try:
+                    _r = db.ingest_bank_from_tally(company_id)
+                    _lr = db.link_bank_transactions(company_id)
+                    db.log_bank_sync_run(company_id, tally_company, "tally_hook", tally_res=_r, link_res=_lr, triggered_by="tally_sync")
+                except Exception as _be: print(f"[ingest-complete] bank: {_be}", flush=True)
+            _thr.Thread(target=_bank_bg, daemon=True).start()
+
+        try: db.update_sync_job(company, state='done', phase='Done', removed=_vdel, detail=_summary)
+        except Exception: pass
+        return {"status": "success", "summary": _summary, "removed": _vdel}
+    except HTTPException: raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        try: db.update_sync_job(company, state='error', error=f"Finalize failed: {str(e)[:180]}")
+        except Exception: pass
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/tally/ingest-fail")
+async def tally_ingest_fail(payload: dict):
+    """The agent couldn't fetch/push — mark the job errored with the real reason."""
+    user_id, company_id, company = resolve_agent_request(payload, required_perm="edit")
+    _err = (str(payload.get("error") or "Tally import failed on the agent."))[:300]
+    try: db.update_sync_job(company, state='error', error=_err)
+    except Exception: pass
+    try: db.log_tally_sync(payload.get('tally_company_name') or company, 'baseline', 0, 0, 'failed', _err)
+    except Exception: pass
+    return {"status": "success"}
+
+
 async def _ingest_worker(payload: dict):
     try:
         user_id, company_id, company = resolve_agent_request(payload, required_perm="edit")
@@ -6881,6 +7041,7 @@ async def _ingest_worker(payload: dict):
             "since_group_alterid":   _since_g,
             "since_stock_alterid":   _since_s,
             "full": _do_full,                          # agent uses this to collect live-GUID lists for deletion reconcile
+            "chunked": True,                            # v0.21.0+ agents PUSH data in batches; older agents ignore this
         }
         # Sprint 53.4 — open a progress job the UI can poll (phase + counts). Best-effort.
         try: db.start_sync_job(company, 'full' if _do_full else 'incremental')
@@ -6919,6 +7080,18 @@ async def _ingest_worker(payload: dict):
         # data into real workspaces. Deleted outright so it can never be re-enabled.
         # The only paths now: real agent data (handled below) or the 502 raised above
         # when the bridge is unavailable.
+
+        # NEW (chunked): a v0.21.0+ agent ACKs instantly with chunked_ack=true, then PUSHES the
+        # data in small HTTP batches to /tally/ingest-batch and finalizes via /tally/ingest-complete.
+        # There's nothing to save here — just reflect the announced total and return. (Old agents
+        # return the whole dataset inline below — fully back-compatible.)
+        if ws_response.get("chunked_ack"):
+            try:
+                db.update_sync_job(company, phase='Receiving data from Tally…',
+                                   vouchers_total=int(ws_response.get('vouchers_total') or 0))
+            except Exception: pass
+            print(f"[ingest] chunked-ack from agent — it will push batches to /tally/ingest-batch.", flush=True)
+            return
 
         tally_company = ws_response.get("tally_company_name", company)
         pan = ws_response.get("pan", "ABCDE1234F")
