@@ -6200,10 +6200,11 @@
                 const v = group.primary;
                 const vType = v.voucher_type || v.category || v.type || 'Sales';
                 const amount = parseFloat(v.total_amount || v.amount || 0);
-                // Tally convention: Sales/Receipt sit in DEBIT, Purchase/Payment in CREDIT.
-                // Keep in sync with _vRowDebit/_vRowCredit (~line 6608) — these two predicates
-                // must never diverge again (they did: v253 swapped the helpers but not this cell).
-                const isDebit = ['Sales', 'Receipt'].includes(vType);
+                // Party-leg convention (the Party/Ledger column shows the counterparty): a row
+                // sits on the side that party's own ledger moves. Sales + Payment DEBIT the party
+                // (customer debited / supplier paid-down); Purchase + Receipt CREDIT it.
+                // Keep in sync with _vRowDebit/_vRowCredit (~line 6608) — never let them diverge.
+                const isDebit = ['Sales', 'Payment'].includes(vType);
                 const typeColors = { Sales: '#4ade80', Purchase: '#f87171', Payment: '#fbbf24', Receipt: '#38bdf8', Journal: '#a78bfa', Contra: '#94a3b8' };
 
                 // Source document link — Sprint 38.
@@ -6605,11 +6606,11 @@
             })[flag] || null;
         }
         function _vRowDate(v)   { return (v.date || '').substring(0, 10); }   // YYYY-MM-DD
-        // Debit/Credit columns — match Tally's Day Book (the party / cash leg, same side
-        // the Windows agent posts to): Sales + Receipt land in DEBIT (debtor / bank-in);
-        // Purchase + Payment land in CREDIT (creditor / bank-out).
-        function _vRowDebit(v)  { return ['Sales','Receipt'].includes(_vRowType(v))   ? _vRowAmount(v) : 0; }
-        function _vRowCredit(v) { return ['Purchase','Payment'].includes(_vRowType(v)) ? _vRowAmount(v) : 0; }
+        // Debit/Credit columns follow the PARTY leg (the Party/Ledger column shows the
+        // counterparty): the row sits on the side that party's own ledger moves. Sales + Payment
+        // DEBIT the party (customer debited / supplier paid-down); Purchase + Receipt CREDIT it.
+        function _vRowDebit(v)  { return ['Sales','Payment'].includes(_vRowType(v))   ? _vRowAmount(v) : 0; }
+        function _vRowCredit(v) { return ['Purchase','Receipt'].includes(_vRowType(v)) ? _vRowAmount(v) : 0; }
 
         // Single predicate combining all 3 layers. Returns true if row should be visible.
         function _voucherFilterMatch(v) {
