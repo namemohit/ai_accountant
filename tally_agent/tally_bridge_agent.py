@@ -840,7 +840,7 @@ def is_autostart_enabled():
 #   POST /api/tally/queue/{id}/fail        ← report a failed push
 #   POST /api/tally/heartbeat              ← keep the sidebar dot green
 # ============================================================
-AGENT_VERSION = "0.20.1"  # v0.20.1 — never fabricate: removed all mock/simulator fallbacks in fetch_vouchers/fetch_rich_ledgers/fetch_local_ledgers/fetch_groups that injected fake data ("coffee beans", VCH-GUID, Gupta & Sons) when Tally returned empty — that leaked fabricated vouchers into a real workspace. All now return []. v0.20.0 — CRITICAL accounting fix: _build_voucher_xml AMOUNT sign was inverted (Dr=+, Cr=-), so every pushed Sales landed in Tally's CREDIT column (party credited not debited). Now Tally-correct: Dr=negative, Cr=positive (confirmed vs native vouchers). v0.19.4 — Cloud Run preset URL fix (project-number host returned Google 404; switched to hash-format canonical host). v0.19.3 — Sprint 44.3 query-then-act Alter/Delete via TDL collection on $Narration CONTAINS "[YAI:<uid>]" → keyed envelope on Tally-native MASTERID + DATE + VCHTYPE + VCHNUMBER; lookup-miss falls through to Create.
+AGENT_VERSION = "0.20.2"  # v0.20.2 — tunnel auto-reconnect hardening: _run_tunnel_loop now self-restarts (no more silent thread death), the WS auth-ack resumes via the durable device token instead of logging out on a transient blip, and a liveness watchdog respawns the tunnel if it ever dies — so a Cloud Run redeploy never leaves the agent disconnected (heartbeat-green but tunnel-dead). v0.20.1 — never fabricate: removed all mock/simulator fallbacks in fetch_vouchers/fetch_rich_ledgers/fetch_local_ledgers/fetch_groups that injected fake data ("coffee beans", VCH-GUID, Gupta & Sons) when Tally returned empty — that leaked fabricated vouchers into a real workspace. All now return []. v0.20.0 — CRITICAL accounting fix: _build_voucher_xml AMOUNT sign was inverted (Dr=+, Cr=-), so every pushed Sales landed in Tally's CREDIT column (party credited not debited). Now Tally-correct: Dr=negative, Cr=positive (confirmed vs native vouchers). v0.19.4 — Cloud Run preset URL fix (project-number host returned Google 404; switched to hash-format canonical host). v0.19.3 — Sprint 44.3 query-then-act Alter/Delete via TDL collection on $Narration CONTAINS "[YAI:<uid>]" → keyed envelope on Tally-native MASTERID + DATE + VCHTYPE + VCHNUMBER; lookup-miss falls through to Create.
 
 
 def _post_json(url, body, timeout=15.0):
@@ -2821,6 +2821,22 @@ class TallyBridgeApp:
         self.ws_thread = threading.Thread(target=self._run_tunnel_loop, daemon=True)
         self.ws_thread.start()
         threading.Thread(target=self._check_tally, daemon=True).start()
+        # Liveness watchdog (started once): if the tunnel thread ever ends while we're
+        # still meant to run, respawn it. Belt-and-suspenders on top of _run_tunnel_loop's
+        # self-restart — a redeploy/drop can never leave us permanently disconnected.
+        if not getattr(self, "_watchdog_started", False):
+            self._watchdog_started = True
+            threading.Thread(target=self._tunnel_watchdog, daemon=True).start()
+
+    def _tunnel_watchdog(self):
+        while True:
+            time.sleep(30)
+            try:
+                if self.should_run and (self.ws_thread is None or not self.ws_thread.is_alive()):
+                    self.log("Watchdog: tunnel thread down — respawning.", "warn")
+                    self.start_tunnel()
+            except Exception:
+                pass
 
     def _trigger_baseline_sync(self):
         """Call HTTP /tally/ingest so the server pulls a full baseline of Tally data.
@@ -2865,9 +2881,26 @@ class TallyBridgeApp:
             self.log(f"Tally not detected at {tally_url}. Using simulator.", "warn")
 
     def _run_tunnel_loop(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(self._tunnel_loop())
+        # Resilience: the tunnel thread must NEVER die silently. If _tunnel_loop ever
+        # escapes (a non-Exception BaseException, or an error inside its own except/
+        # backoff handler), log it and relaunch a fresh event loop while we're still
+        # meant to run — so a dropped or redeployed connection always recovers without
+        # a manual restart. (Previously a single escape killed this daemon thread for
+        # good: heartbeat stayed green but Full import failed with "bridge unavailable".)
+        while self.should_run:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self._tunnel_loop())
+            except BaseException as e:
+                try: self.log(f"Tunnel loop crashed: {e!r} — relaunching in 5s", "error")
+                except Exception: pass
+                self.set_status(False)
+            finally:
+                try: loop.close()
+                except Exception: pass
+            if self.should_run:
+                time.sleep(5)
 
     async def _tunnel_loop(self):
         import websockets
@@ -2894,16 +2927,32 @@ class TallyBridgeApp:
                     ack_raw = await asyncio.wait_for(ws.recv(), timeout=10)
                     ack = json.loads(ack_raw)
                     if ack.get("status") != "ok":
-                        code = ack.get("code", "?")
+                        code = str(ack.get("code", "?"))
                         msg = ack.get("message", "Auth failed")
-                        self.log(f"❌ Connection rejected ({code}): {msg}", "error")
                         self.set_status(False)
-                        # Stop loop — user needs to re-auth
+                        if code == "AUTH_INVALID":
+                            # Session expired/superseded (e.g. server redeployed) — resume
+                            # via the durable device token and reconnect, instead of logging
+                            # the user out on a blip. Only give up after several failed
+                            # resumes (device token genuinely revoked).
+                            self._auth_fail_count = getattr(self, "_auth_fail_count", 0) + 1
+                            if self._auth_fail_count <= 3:
+                                self.log(f"Session rejected ({code}) — resuming via device token, retry in {backoff}s…", "warn")
+                                try: self._refresh_session()
+                                except Exception: pass
+                                await asyncio.sleep(backoff)
+                                backoff = min(backoff * 2, 30)
+                                continue
+                            self.log(f"❌ Session can't be resumed: {msg}. Please log in again.", "error")
+                        else:
+                            # PERMISSION_DENIED / COMPANY_NAME_MISMATCH etc. — config issues
+                            # retrying won't fix; surface and stop.
+                            self.log(f"❌ Connection rejected ({code}): {msg}", "error")
                         self.should_run = False
-                        # Drop back to login screen on the UI thread
                         self.root.after(0, self.build_login_wizard)
                         return
 
+                    self._auth_fail_count = 0
                     self.set_status(True)
                     self.log(f"Secure tunnel active for {self.selected_company_name}. Ready for sync.", "success")
 
